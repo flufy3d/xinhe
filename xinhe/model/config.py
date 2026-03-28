@@ -1,0 +1,125 @@
+"""
+XinheConfig — 心核配置
+
+包含状态机制、LoRA、训练等全部超参数。
+Backbone 参数由 MiniMind 自己的 config 管理。
+"""
+from dataclasses import dataclass, field
+from typing import Optional
+import yaml
+
+
+@dataclass
+class XinheConfig:
+    # --- Backbone ---
+    backbone_model_path: str = "./minimind"
+    backbone_weights_path: str = "./minimind/model/minimind-v1-small"
+    hidden_size: int = 768
+    freeze_backbone: bool = True
+
+    # --- 持久状态 ---
+    n_state: int = 32               # 状态 token 数
+    state_dim: int = 768            # 状态维度 (= hidden_size)
+    state_scale_init: float = 0.0   # sigmoid(0) ≈ 0.5，用 -5.0 则 ≈ 0.007
+    gate_bias_init: float = 0.0     # gate 静态偏置初始值
+
+    # --- Sleep ---
+    sleep_every: int = 4            # 每隔几个 segment 做一次 sleep
+    sleep_passes: int = 1           # 每次 sleep 做几轮自整理
+
+    # --- LoRA ---
+    lora_rank: int = 16
+    lora_alpha: int = 32
+    lora_dropout: float = 0.0
+    lora_target_modules: list = field(default_factory=lambda: ["q_proj", "v_proj"])
+
+    # --- 训练 ---
+    segment_length: int = 256
+    episode_length: int = 16
+    tbptt_steps: int = 4
+    batch_size: int = 4
+    learning_rate: float = 3e-4
+    weight_decay: float = 0.01
+    grad_clip: float = 1.0
+    warmup_steps: int = 100
+    max_steps: int = 10000
+    eval_every: int = 500
+    save_every: int = 1000
+    log_every: int = 10
+    device: str = "cuda"
+    dtype: str = "bfloat16"
+
+    # --- 数据 ---
+    train_path: str = "./data/train.jsonl"
+    val_path: str = "./data/val.jsonl"
+
+    # --- 日志 ---
+    use_wandb: bool = False
+    wandb_project: str = "xinhe"
+    wandb_run_name: Optional[str] = None
+
+    @classmethod
+    def from_yaml(cls, path: str) -> "XinheConfig":
+        """从 yaml 配置文件加载"""
+        with open(path, "r", encoding="utf-8") as f:
+            raw = yaml.safe_load(f)
+
+        # 将嵌套的 yaml 扁平化到 dataclass 字段
+        flat = {}
+        mapping = {
+            "backbone": {
+                "model_path": "backbone_model_path",
+                "weights_path": "backbone_weights_path",
+                "hidden_size": "hidden_size",
+                "freeze": "freeze_backbone",
+            },
+            "state": {
+                "n_state": "n_state",
+                "state_dim": "state_dim",
+                "state_scale_init": "state_scale_init",
+                "gate_bias_init": "gate_bias_init",
+            },
+            "sleep": {
+                "sleep_every": "sleep_every",
+                "sleep_passes": "sleep_passes",
+            },
+            "lora": {
+                "rank": "lora_rank",
+                "alpha": "lora_alpha",
+                "dropout": "lora_dropout",
+                "target_modules": "lora_target_modules",
+            },
+            "training": {
+                "segment_length": "segment_length",
+                "episode_length": "episode_length",
+                "tbptt_steps": "tbptt_steps",
+                "batch_size": "batch_size",
+                "learning_rate": "learning_rate",
+                "weight_decay": "weight_decay",
+                "grad_clip": "grad_clip",
+                "warmup_steps": "warmup_steps",
+                "max_steps": "max_steps",
+                "eval_every": "eval_every",
+                "save_every": "save_every",
+                "log_every": "log_every",
+                "device": "device",
+                "dtype": "dtype",
+            },
+            "data": {
+                "train_path": "train_path",
+                "val_path": "val_path",
+            },
+            "logging": {
+                "use_wandb": "use_wandb",
+                "project": "wandb_project",
+                "run_name": "wandb_run_name",
+            },
+        }
+
+        for section, fields in mapping.items():
+            if section in raw:
+                for yaml_key, field_name in fields.items():
+                    if yaml_key in raw[section]:
+                        flat[field_name] = raw[section][yaml_key]
+
+        return cls(**flat)

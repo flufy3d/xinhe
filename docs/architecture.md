@@ -1,0 +1,257 @@
+# Xinhe (心核) — 架构设计
+
+## 核心假设
+
+智能可以从"持续状态 + 可塑性 + 多时间尺度"这种统一动力系统中自然涌现。
+
+不做 RAG、不做模块拼装、不扩大 context window。用最小结构（小 transformer + 持久状态向量），通过持续训练让系统内部自发分化出记忆、抽象、快慢变量。
+
+---
+
+## 整体架构
+
+```
+┌──────────────────────────────────────────────────┐
+│                  XinheModel                       │
+│                                                   │
+│   输入: [S_1..S_n | X_1..X_T]                     │
+│          状态token    内容token                    │
+│              ↓                                    │
+│   ┌─────────────────────────────────┐             │
+│   │       StatePlugin (~2M)         │  ← 可训练    │
+│   │  state_emb   状态初始嵌入        │             │
+│   │  state_pos   状态位置编码        │             │
+│   │  state_scale 渐进影响力          │             │
+│   │  gate_bias   快慢区静态偏置      │             │
+│   │  gate_proj   动态门控网络        │             │
+│   │  state_out   输出投影            │             │
+│   └─────────────────────────────────┘             │
+│              ↓ inject                              │
+│   ┌─────────────────────────────────┐             │
+│   │   Backbone: MiniMind (~64M)     │  ← 冻结+LoRA │
+│   │  embed_tokens → 8×Block → norm  │             │
+│   │  LoRA 注入 q_proj / v_proj      │             │
+│   └─────────────────────────────────┘             │
+│              ↓ extract_and_update                  │
+│   输出: logits + state_next                        │
+└──────────────────────────────────────────────────┘
+```
+
+### 插件化设计
+
+StatePlugin 完全独立于 backbone。backbone 只需实现 `BackboneBase` 接口：
+
+```python
+class BackboneBase(ABC):
+    def embed(self, input_ids) -> Tensor:         # token → 嵌入
+    def forward_blocks(self, x, mask) -> Tensor:  # transformer 层
+    def get_lm_head(self) -> nn.Module:           # 输出头
+    def get_hidden_size(self) -> int:              # 隐藏维度
+```
+
+换 backbone（MiniMind → Qwen-7B）只需实现这四个方法，StatePlugin 代码不变。
+
+---
+
+## State-as-Tokens
+
+持久状态实现为额外的 token，拼接在输入序列前面，复用 transformer 的 self-attention 作为读写机制。
+
+接近 Recurrent Memory Transformer (Bulatov et al., 2022)，但关键区别：**不区分读/写 token**，所有状态 token 无差别，由模型自行分化。
+
+### 前向传播
+
+```
+输入:  [S_1..S_n | X_1..X_T]       状态token + 内容token
+         ↓  transformer  ↓
+输出:  [S'_1..S'_n | Y_1..Y_T]     更新后状态 + 预测logits
+
+状态更新: state_next = gate * state_old + (1-gate) * S'
+```
+
+### Attention Mask
+
+```
+             状态列        内容列
+状态行:    [ 全可见      | 全可见    ]   ← 状态读取所有内容（吸收信息）
+内容行:    [ 全可见      | 因果遮蔽  ]   ← 内容读状态 + 因果看内容
+```
+
+状态 token 对当前 segment 全部可见（双向），内容 token 之间严格因果。
+
+### 状态容量
+
+| 配置 | 值 |
+|------|-----|
+| n_state | 32 tokens |
+| state_dim | 768 (= hidden_size) |
+| 原始大小 | 32 × 768 = 24,576 floats ≈ 96KB |
+| 有效信息 | ~30KB（压缩表示，非原文） |
+
+固定容量是特性，不是缺陷——迫使系统学会选择性记忆和抽象压缩。
+
+---
+
+## 双层 Gate：多时间尺度
+
+类比大脑：脑区分化是固定的（海马=快，皮层=慢），但区域内"记什么忘什么"是内容决定的。
+
+```python
+# 层1 — 静态偏置：维度天生的快慢倾向（类似脑区分化）
+self.gate_bias = nn.Parameter(torch.zeros(n_state, state_dim))
+
+# 层2 — 动态投影：根据内容决定此刻该记还是该忘
+self.gate_proj = nn.Linear(2 * state_dim, state_dim)
+
+# 合并
+dynamic_logit = self.gate_proj(cat[state_old, state_new])
+gate = sigmoid(self.gate_bias + dynamic_logit)
+
+state_next = gate * state_old + (1 - gate) * state_new
+```
+
+- `gate_bias` 大 → 该维度天生偏慢（长期存储区），但极端内容仍可覆写
+- `gate_bias` 小 → 该维度天生偏快（工作记忆区），但内容仍有选择权
+- 两层合一个 sigmoid，只多一个线性层，无额外架构复杂度
+
+---
+
+## Sleep 机制：记忆固化 + 在线学习
+
+这是心核最核心的创新。类比人类睡眠：白天积累经验，睡眠时突触重塑。
+
+### 两阶段运行模式
+
+```
+白天（推理）：                         Sleep（学习）：
+  权重完全冻结                           权重更新（plugin + LoRA）
+  只有 state 在流动                      state 压缩整理
+  全速生成，无额外开销                    replay 今天对话，backward 更新
+  对话存入 conversation_buffer            buffer 清空，保存 .pt
+```
+
+### Sleep 做两件事
+
+**1. 状态自整理**
+
+```
+[S_1..S_n |          ]  → transformer → [S'_1..S'_n |          ]
+```
+
+状态 token 只看彼此（双向 attention），无新内容输入。被迫重新组织、压缩内部状态。
+
+**2. 权重更新（在线学习）**
+
+```python
+def sleep(self, conversation_buffer):
+    # 1. 状态自整理
+    for _ in range(sleep_passes):
+        state = plugin.sleep_forward(backbone, state)
+
+    # 2. 对话 replay → 更新权重
+    for segment in conversation_buffer:
+        result = model(segment, state, labels=segment)
+        loss.backward()
+        sleep_optimizer.step()       # plugin + LoRA 权重更新
+        state = result["state_next"].detach()
+
+    # 3. 保存 .pt
+    save_checkpoint(...)
+    conversation_buffer.clear()
+```
+
+### 两套记忆系统
+
+```
+人脑                         Xinhe
+──────────                   ─────
+神经激活（短期工作记忆）       state 向量（每轮变化）
+突触连接（长期固化记忆）       plugin + LoRA 权重（sleep 时更新）
+睡眠时突触重塑               sleep 时 replay + backward
+```
+
+---
+
+## .pt = AI 的灵魂
+
+```python
+checkpoint = {
+    "plugin_state_dict": ...,   # 记忆管理机制 ← sleep 后更新
+    "lora_state_dict": ...,     # backbone 适配 ← sleep 后更新
+    "state": ...,               # 当前记忆内容 ← 每轮变化
+    "conversation_buffer": ..., # 今天的对话 ← sleep 后清空
+    "sleep_count": ...,         # AI 的"年龄"
+}
+```
+
+每个用户的 AI 从同一个预训练起点出发，聊着聊着 .pt 就分化了。不同的 .pt 就是不同的"人"。
+
+---
+
+## 安全启动（不破坏聊天能力）
+
+三层保护，确保加入 StatePlugin 不破坏 backbone 原有能力：
+
+1. **LoRA 零初始化**：B 矩阵全零 → 训练开始时 backbone 行为 = 原始 MiniMind
+2. **状态嵌入近零初始化**：attention 对状态 token 的权重极小
+3. **渐进影响力 state_scale**：`sigmoid(-5.0) ≈ 0.007` → 状态影响力从近零渐增
+
+训练开始时 = 原始 MiniMind 正常聊天，逐渐学会使用状态。
+
+---
+
+## Burn-in：用 prompt 初始化 persona
+
+```python
+def burn_in(self, token_ids_list):
+    state = self.init_state(batch_size=1)
+    with torch.no_grad():
+        for seg in token_ids_list:
+            result = self.forward(seg, state)
+            state = result["state_next"]
+    return state
+```
+
+不同 system prompt → 不同初始状态 → 不同 persona。老用户回来 → 从 .pt 恢复。
+
+---
+
+## 训练
+
+### 预训练阶段
+
+| 项目 | 值 |
+|------|-----|
+| 训练对象 | StatePlugin (~2M) + LoRA (注入 backbone) |
+| 冻结 | Backbone 全部原始权重 |
+| 数据 | 多轮对话，按轮次切分为 segment |
+| 状态传递 | state 跨 segment 持续传递 |
+| 梯度截断 | 每 tbptt_steps(4) 个 segment 做一次 detach + backward |
+| 优化器 | AdamW, lr=3e-4, cosine schedule with warmup |
+| 梯度裁剪 | grad_clip=1.0 |
+
+### 在线学习阶段（Sleep）
+
+| 项目 | 值 |
+|------|-----|
+| 触发 | 用户手动 `/sleep` 或定时触发 |
+| 学习率 | sleep_lr=1e-5（远小于预训练 lr） |
+| 数据 | 当天对话 buffer（replay） |
+| 更新对象 | plugin + LoRA 权重 |
+| 安全措施 | sleep 前保存 checkpoint，失败可回滚 |
+
+---
+
+## 参数总览
+
+| 参数 | 值 | 说明 |
+|------|-----|------|
+| n_state | 32 | 状态 token 数 |
+| state_dim | 768 | 状态维度 = backbone hidden_size |
+| state_scale_init | -5.0 | 初始影响力 sigmoid(-5)≈0.007 |
+| lora_rank | 16 | LoRA 秩 |
+| lora_alpha | 32 | LoRA 缩放 |
+| tbptt_steps | 4 | 截断 BPTT 窗口 |
+| sleep_passes | 3 | 每次 sleep 状态自整理轮数 |
+| sleep_lr | 1e-5 | sleep 权重更新学习率 |
+| max_buffer_segments | 64 | 对话 buffer 上限 |

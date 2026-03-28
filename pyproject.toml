@@ -1,0 +1,21 @@
+[project]
+name = "xinhe"
+version = "0.1.0"
+description = "心核 — 统一状态涌现实验：探索持久状态中的记忆、抽象与多时间尺度涌现"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0",
+    "numpy",
+    "pyyaml",
+    "wandb",
+    "matplotlib",
+    "scikit-learn",
+    "pytest",
+]
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
