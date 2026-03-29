@@ -12,6 +12,7 @@ import yaml
 @dataclass
 class XinheConfig:
     # --- Backbone ---
+    backbone_type: str = "minimind"  # "minimind" 或 "qwen"
     backbone_model_path: str = "./minimind"
     backbone_weights_path: str = "./minimind/model/minimind-v1-small"
     hidden_size: int = 768
@@ -68,6 +69,7 @@ class XinheConfig:
         flat = {}
         mapping = {
             "backbone": {
+                "type": "backbone_type",
                 "model_path": "backbone_model_path",
                 "weights_path": "backbone_weights_path",
                 "hidden_size": "hidden_size",

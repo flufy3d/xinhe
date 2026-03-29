@@ -31,3 +31,5 @@ wandb/
 runs/
 outputs/
 .claude/
+
+models/

@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from typing import Optional
 
 from .config import XinheConfig
-from .backbone import MiniMindBackbone, BackboneBase
+from .backbone import BackboneBase
 from .state_plugin import StatePlugin
 from .lora import inject_lora, get_lora_params
 
@@ -30,11 +30,15 @@ class XinheModel(nn.Module):
         super().__init__()
         self.config = config
 
-        # Backbone (默认用 MiniMind)
-        if backbone is None:
-            self.backbone = MiniMindBackbone(config)
-        else:
+        # Backbone
+        if backbone is not None:
             self.backbone = backbone
+        elif config.backbone_type == "qwen":
+            from .qwen_backbone import QwenBackbone
+            self.backbone = QwenBackbone(config)
+        else:
+            from .minimind_backbone import MiniMindBackbone
+            self.backbone = MiniMindBackbone(config)
 
         # 注入 LoRA
         if config.freeze_backbone and config.lora_rank > 0:

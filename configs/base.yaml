@@ -4,8 +4,9 @@
 
 # --- MiniMind Backbone ---
 backbone:
-  model_path: "./minimind"                # MiniMind 仓库路径
-  weights_path: "./minimind/model/minimind-v1-small"  # 预训练权重路径
+  type: "minimind"                        # "minimind" 或 "qwen"
+  model_path: "./minimind"                # MiniMind 仓库路径 / Qwen 模型路径
+  weights_path: "./minimind/model/minimind-v1-small"  # 预训练权重路径 (MiniMind 专用)
   hidden_size: 768
   num_hidden_layers: 8
   num_attention_heads: 8
