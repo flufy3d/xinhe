@@ -13,11 +13,12 @@
 把 **持久状态** 实现为额外的 token，拼在输入前面，复用 transformer 的 self-attention 做读写。不引入任何新的架构原语——如果智能真的能涌现，它应该能在这么简单的结构里自己出现。
 
 ```
-输入:  [S_1..S_n | X_1..X_T]       状态token + 内容token
-         ↓  transformer  ↓
-输出:  [S'_1..S'_n | Y_1..Y_T]     更新后状态 + 预测
+输入:  [R_1..R_n | X_1..X_T | W_1..W_n]   读状态 + 内容 + 写状态
+         ↓    标准因果 attention    ↓
+输出:  logits (内容部分) + state_next (写状态 → gate更新)
 
-状态更新: state_next = gate * state_old + (1-gate) * S'
+读状态(序列开头): 携带上一轮记忆，content 通过因果 attention 读取
+写状态(序列末尾): 吸收当前 segment 全部信息，写入新 state
 ```
 
 ### 两套记忆系统
@@ -47,11 +48,12 @@ gate = sigmoid(static_bias + dynamic_projection)
 
 ```
 ┌─────────────────────────────────┐
-│       StatePlugin (~2M)         │  ← 可训练，sleep 时更新
-│  state_emb, gate, scale         │
+│       StatePlugin (~3M)         │  ← 可训练，sleep 时更新
+│  read/write emb, gate, scale    │
+│  读写分离: 标准因果attention     │
 ├─────────────────────────────────┤
 │    Backbone (可切换)             │  ← 冻结 + LoRA
-│  MiniMind 64M / Qwen3-0.6B 等   │
+│  Qwen3-0.6B / MiniMind 64M 等   │
 └─────────────────────────────────┘
 ```
 

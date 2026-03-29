@@ -14,26 +14,29 @@
 ┌──────────────────────────────────────────────────┐
 │                  XinheModel                       │
 │                                                   │
-│   输入: [S_1..S_n | X_1..X_T]                     │
-│          状态token    内容token                    │
+│   输入: [R_1..R_n | X_1..X_T | W_1..W_n]         │
+│          读状态      内容token    写状态            │
 │              ↓                                    │
 │   ┌─────────────────────────────────┐             │
-│   │       StatePlugin (~2M)         │  ← 可训练    │
+│   │       StatePlugin (~3M)         │  ← 可训练    │
 │   │  state_emb   状态初始嵌入        │             │
-│   │  state_pos   状态位置编码        │             │
+│   │  read_pos    读状态位置编码      │             │
+│   │  write_emb   写状态查询嵌入      │             │
+│   │  write_pos   写状态位置编码      │             │
 │   │  state_scale 渐进影响力          │             │
 │   │  gate_bias   快慢区静态偏置      │             │
 │   │  gate_proj   动态门控网络        │             │
 │   │  state_out   输出投影            │             │
 │   └─────────────────────────────────┘             │
-│              ↓ inject                              │
+│              ↓ inject (拼接读/写状态)               │
 │   ┌─────────────────────────────────┐             │
 │   │   Backbone (可切换)              │  ← 冻结+LoRA │
-│   │  MiniMind 64M / Qwen3-0.6B 等   │             │
+│   │  Qwen3-0.6B / MiniMind 64M 等   │             │
 │   │  LoRA 注入 q_proj / v_proj      │             │
+│   │  标准因果 attention (无自定义mask)│             │
 │   └─────────────────────────────────┘             │
 │              ↓ extract_and_update                  │
-│   输出: logits + state_next                        │
+│   输出: logits (content部分) + state_next (写部分)  │
 └──────────────────────────────────────────────────┘
 ```
 
@@ -57,40 +60,57 @@ class BackboneBase(ABC):
 
 ---
 
-## State-as-Tokens
+## State-as-Tokens（读写分离架构）
 
-持久状态实现为额外的 token，拼接在输入序列前面，复用 transformer 的 self-attention 作为读写机制。
+持久状态实现为额外的 token，复用 transformer 的 self-attention 作为读写机制。关键设计：**读状态放在序列开头，写状态放在序列末尾**，利用因果 attention 的方向性天然防止信息泄漏。
 
-接近 Recurrent Memory Transformer (Bulatov et al., 2022)，但关键区别：**不区分读/写 token**，所有状态 token 无差别，由模型自行分化。
+### 序列结构
+
+```
+[Read-State(旧) | Content | Write-State(新)]
+  pos 0..31       pos 32..T+31   pos T+32..T+63
+```
 
 ### 前向传播
 
 ```
-输入:  [S_1..S_n | X_1..X_T]       状态token + 内容token
-         ↓  transformer  ↓
-输出:  [S'_1..S'_n | Y_1..Y_T]     更新后状态 + 预测logits
+输入:  [R_1..R_n | X_1..X_T | W_1..W_n]   读状态 + 内容 + 写状态
+         ↓        transformer (因果 attention)        ↓
+输出:  [R'_1..R'_n | Y_1..Y_T | W'_1..W'_n]
 
-状态更新: state_next = gate * state_old + (1-gate) * S'
+logits = lm_head(Y_1..Y_T)                          只用内容部分的输出
+状态更新: state_next = gate * state_old + (1-gate) * proj(W')   用写状态的输出
 ```
 
-### Attention Mask
+### Attention Mask（标准因果）
 
 ```
-             状态列        内容列
-状态行:    [ 全可见      | 全可见    ]   ← 状态读取所有内容（吸收信息）
-内容行:    [ 全可见      | 因果遮蔽  ]   ← 内容读状态 + 因果看内容
+               Read列      Content列     Write列
+Read行:      [ 因果自身    | 不可见      | 不可见    ]  ← 只携带旧记忆
+Content行:   [ 全可见      | 因果遮蔽    | 不可见    ]  ← 从旧state读 + 因果看content
+Write行:     [ 全可见      | 全可见      | 因果自身  ]  ← 吸收所有信息，写入新state
 ```
 
-状态 token 对当前 segment 全部可见（双向），内容 token 之间严格因果。
+标准因果 attention，无需自定义 mask。每个位置只能看到自己和之前的位置。
+
+### 为什么读写分离
+
+早期设计中所有 state token 放在序列开头且双向可见。这导致**信息泄漏**：state token 在训练时偷看同一 segment 的答案，模型不需要跨 segment 记忆就能正确预测。读写分离后：
+
+- **Read-State** 在最前面，看不到任何 content → 只能携带上一轮的旧信息
+- **Content** 能看到 Read-State → 记忆融入思考过程
+- **Write-State** 在最后面，能看到所有 content → 吸收当前信息供下一轮使用
+
+这保证了模型降低 recall loss 的唯一方式是学会跨 segment 使用 state。
 
 ### 状态容量
 
 | 配置 | 值 |
 |------|-----|
-| n_state | 32 tokens |
-| state_dim | 768 (= hidden_size) |
-| 原始大小 | 32 × 768 = 24,576 floats ≈ 96KB |
-| 有效信息 | ~30KB（压缩表示，非原文） |
+| n_state | 32 tokens (读写各 32) |
+| state_dim | 1024 (= hidden_size) |
+| 原始大小 | 32 × 1024 = 32,768 floats ≈ 128KB |
+| 有效信息 | ~40KB（压缩表示，非原文） |
 
 固定容量是特性，不是缺陷——迫使系统学会选择性记忆和抽象压缩。
 
@@ -185,10 +205,10 @@ checkpoint = {
 三层保护，确保加入 StatePlugin 不破坏 backbone 原有能力：
 
 1. **LoRA 零初始化**：B 矩阵全零 → 训练开始时 backbone 行为 = 原始模型
-2. **状态嵌入近零初始化**：attention 对状态 token 的权重极小
-3. **渐进影响力 state_scale**：`sigmoid(-5.0) ≈ 0.007` → 状态影响力从近零渐增
+2. **状态嵌入近零初始化**：read/write token 的位置编码和初始嵌入都近零 (std=0.01)
+3. **渐进影响力 state_scale**：控制 state token 值的缩放，从小到大
 
-训练开始时 = 原始 MiniMind 正常聊天，逐渐学会使用状态。
+读写分离架构的额外优势：标准因果 attention，backbone 不需要处理任何自定义 mask，降低了启动干扰。
 
 ---
 
@@ -240,9 +260,9 @@ def burn_in(self, token_ids_list):
 |------|-----|------|
 | n_state | 32 | 状态 token 数 |
 | state_dim | 768 | 状态维度 = backbone hidden_size |
-| state_scale_init | -5.0 | 初始影响力 sigmoid(-5)≈0.007 |
-| lora_rank | 16 | LoRA 秩 |
-| lora_alpha | 32 | LoRA 缩放 |
+| state_scale_init | 0.0 | 初始影响力 sigmoid(0)=0.5 |
+| lora_rank | 4 | LoRA 秩 |
+| lora_alpha | 8 | LoRA 缩放 |
 | tbptt_steps | 4 | 截断 BPTT 窗口 |
 | sleep_lr | 1e-5 | sleep 权重更新学习率 |
 | max_buffer_segments | 64 | 对话 buffer 上限 |

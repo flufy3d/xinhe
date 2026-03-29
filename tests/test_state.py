@@ -1,5 +1,5 @@
 """
-测试 StatePlugin 的各个方法
+测试 StatePlugin 的各个方法 (读写分离架构)
 """
 import torch
 import pytest
@@ -18,47 +18,69 @@ def test_blank_state_shape(plugin):
 
 
 def test_inject_shape(plugin):
-    """注入后序列长度 = n_state + T"""
+    """注入后序列长度 = n_read + T + n_write"""
     state = plugin.blank_state(2)
     content = torch.randn(2, 16, 64)
 
     hidden, mask = plugin.inject(state, content)
 
-    assert hidden.shape == (2, 8 + 16, 64)
-    assert mask.shape == (1, 1, 24, 24)
+    # [Read(8) | Content(16) | Write(8)] = 32
+    assert hidden.shape == (2, 8 + 16 + 8, 64)
+    assert mask.shape == (1, 1, 32, 32)
 
 
-def test_mask_structure(plugin):
-    """mask 结构正确: 状态双向 + 内容因果"""
-    mask = plugin.build_mask(n_state=4, n_content=6)
-    assert mask.shape == (1, 1, 10, 10)
+def test_mask_is_causal(plugin):
+    """mask 是标准因果: 位置 i 只能看 0..i"""
+    state = plugin.blank_state(1)
+    content = torch.randn(1, 6, 64)
+    _, mask = plugin.inject(state, content)
 
     m = mask[0, 0]
+    total = 8 + 6 + 8  # 22
 
-    # 状态→状态: 全可见 (0)
-    assert (m[:4, :4] == 0).all()
-
-    # 状态→内容: 全可见 (0)
-    assert (m[:4, 4:] == 0).all()
-
-    # 内容→状态: 全可见 (0)
-    assert (m[4:, :4] == 0).all()
-
-    # 内容→内容: 因果 (下三角为0, 上三角为-inf)
-    causal = m[4:, 4:]
-    # 对角线和下方应该是 0
-    for i in range(6):
-        for j in range(6):
+    for i in range(total):
+        for j in range(total):
             if j <= i:
-                assert causal[i, j] == 0, f"causal[{i},{j}] should be 0"
+                assert m[i, j] == 0, f"mask[{i},{j}] should be 0 (visible)"
             else:
-                assert causal[i, j] == float("-inf"), f"causal[{i},{j}] should be -inf"
+                assert m[i, j] == float("-inf"), f"mask[{i},{j}] should be -inf (masked)"
+
+
+def test_no_leakage(plugin):
+    """Read-State 看不到 Content，Content 看不到 Write-State"""
+    state = plugin.blank_state(1)
+    content = torch.randn(1, 6, 64)
+    _, mask = plugin.inject(state, content)
+
+    m = mask[0, 0]
+    n = 8  # n_state
+
+    # Read-State (pos 0..7) 看不到 Content (pos 8..13) 和 Write-State (pos 14..21)
+    for i in range(n):
+        for j in range(n, n + 6 + n):
+            assert m[i, j] == float("-inf"), f"Read[{i}] should NOT see pos {j}"
+
+    # Content (pos 8..13) 看不到 Write-State (pos 14..21)
+    for i in range(n, n + 6):
+        for j in range(n + 6, n + 6 + n):
+            assert m[i, j] == float("-inf"), f"Content[{i}] should NOT see Write[{j}]"
+
+    # Content CAN see Read-State
+    for i in range(n, n + 6):
+        for j in range(n):
+            assert m[i, j] == 0, f"Content[{i}] SHOULD see Read[{j}]"
+
+    # Write-State CAN see everything before it
+    for i in range(n + 6, n + 6 + n):
+        for j in range(i):
+            assert m[i, j] == 0, f"Write[{i}] SHOULD see pos {j}"
 
 
 def test_extract_and_update(plugin):
     """提取 + gate 更新，形状正确"""
     state_old = plugin.blank_state(2)
-    output = torch.randn(2, 8 + 16, 64)
+    # output 长度 = read(8) + content(16) + write(8) = 32
+    output = torch.randn(2, 32, 64)
 
     content_out, state_next = plugin.extract_and_update(output, state_old)
 
