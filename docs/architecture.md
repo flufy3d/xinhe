@@ -28,8 +28,8 @@
 │   └─────────────────────────────────┘             │
 │              ↓ inject                              │
 │   ┌─────────────────────────────────┐             │
-│   │   Backbone: MiniMind (~64M)     │  ← 冻结+LoRA │
-│   │  embed_tokens → 8×Block → norm  │             │
+│   │   Backbone (可切换)              │  ← 冻结+LoRA │
+│   │  MiniMind 64M / Qwen3-0.6B 等   │             │
 │   │  LoRA 注入 q_proj / v_proj      │             │
 │   └─────────────────────────────────┘             │
 │              ↓ extract_and_update                  │
@@ -49,7 +49,11 @@ class BackboneBase(ABC):
     def get_hidden_size(self) -> int:              # 隐藏维度
 ```
 
-换 backbone（MiniMind → Qwen-7B）只需实现这四个方法，StatePlugin 代码不变。
+已实现的 backbone：
+- `MiniMindBackbone`：64M 参数，机制验证用
+- `QwenBackbone`：Qwen3-0.6B (600M)，效果验证用
+
+切换 backbone 只需改 yaml 配置，StatePlugin 代码不变。
 
 ---
 
@@ -192,7 +196,7 @@ checkpoint = {
 
 三层保护，确保加入 StatePlugin 不破坏 backbone 原有能力：
 
-1. **LoRA 零初始化**：B 矩阵全零 → 训练开始时 backbone 行为 = 原始 MiniMind
+1. **LoRA 零初始化**：B 矩阵全零 → 训练开始时 backbone 行为 = 原始模型
 2. **状态嵌入近零初始化**：attention 对状态 token 的权重极小
 3. **渐进影响力 state_scale**：`sigmoid(-5.0) ≈ 0.007` → 状态影响力从近零渐增
 

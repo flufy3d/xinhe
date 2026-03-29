@@ -50,12 +50,12 @@ gate = sigmoid(static_bias + dynamic_projection)
 │       StatePlugin (~2M)         │  ← 可训练，sleep 时更新
 │  state_emb, gate, scale, sleep  │
 ├─────────────────────────────────┤
-│    Backbone: MiniMind (~64M)    │  ← 冻结 + LoRA
-│  embed → 8×Block → norm → head  │
+│    Backbone (可切换)             │  ← 冻结 + LoRA
+│  MiniMind 64M / Qwen3-0.6B 等   │
 └─────────────────────────────────┘
 ```
 
-StatePlugin 独立于 backbone。换基座模型（MiniMind → Qwen-7B）只需实现四个接口方法，Plugin 代码不动。
+StatePlugin 独立于 backbone。切换基座只需改配置文件，Plugin 代码不动。
 
 ---
 
@@ -63,32 +63,17 @@ StatePlugin 独立于 backbone。换基座模型（MiniMind → Qwen-7B）只需
 
 ```
 xinhe/
-├── configs/base.yaml              # 超参数
-├── docs/
-│   ├── architecture.md            # 架构详解
-│   ├── design_rationale.md        # 设计决策与原因
-│   └── roadmap.md                 # 实验路线
-├── xinhe/
-│   ├── model/
-│   │   ├── config.py              # XinheConfig
-│   │   ├── backbone.py            # BackboneBase + MiniMindBackbone
-│   │   ├── state_plugin.py        # 核心：注入/提取/gate/sleep
-│   │   ├── lora.py                # LoRA 适配
-│   │   └── xinhe_model.py         # 顶层组合
-│   ├── data/conversation.py       # 多轮对话数据集
-│   ├── training/trainer.py        # 训练循环（截断 BPTT + sleep）
-│   ├── evaluation/
-│   │   ├── metrics.py             # retention / wipe / 时间尺度分析
-│   │   └── probes.py              # 线性探针
-│   └── utils/
-│       ├── checkpoint.py          # .pt 保存/加载
-│       └── logging_utils.py       # wandb
-├── scripts/
-│   ├── train.py                   # 预训练入口
-│   ├── chat.py                    # 交互式聊天验证
-│   ├── evaluate.py                # 自动化评估
-│   └── visualize_state.py         # 状态可视化
-└── tests/                         # pytest 测试
+├── configs/          # 超参数配置 (base + 各 backbone)
+├── models/           # 模型文件 (config/tokenizer 入库, 权重需手动下载)
+├── docs/             # 架构详解、设计决策、实验路线
+├── xinhe/            # 核心代码
+│   ├── model/        # backbone 抽象 + 适配器 + StatePlugin + LoRA
+│   ├── data/         # 多轮对话数据集
+│   ├── training/     # 训练循环 (截断 BPTT + sleep)
+│   ├── evaluation/   # 记忆保留 / wipe / 时间尺度分析
+│   └── utils/        # checkpoint、logging
+├── scripts/          # train / chat / evaluate / visualize
+└── tests/            # pytest 测试
 ```
 
 ---
@@ -101,16 +86,17 @@ xinhe/
 pip install -e .
 ```
 
-### 预训练
+### 下载权重
+
+将 `model.safetensors` 放入对应 `models/` 子目录（tokenizer 等配置文件已入库）。
+
+### 训练
 
 ```bash
-# 克隆 MiniMind 并下载权重
-git clone https://github.com/jingyaogong/minimind
-# 下载 minimind-3 权重到 minimind/ 目录
-
-# 开始训练
-python scripts/train.py --config configs/base.yaml
+python scripts/train.py --config configs/minimind.yaml
 ```
+
+切换 backbone 只需换配置文件，如 `configs/qwen3-0.6b.yaml`。
 
 ### 聊天验证
 
@@ -173,7 +159,12 @@ python scripts/visualize_state.py --checkpoint checkpoints/latest.pt
 
 ## 硬件
 
-RTX 5080 16GB 全程无压力。MiniMind 64M + StatePlugin 2M，预训练 ~4-6GB 显存。
+| Backbone | 权重大小 | 训练显存 |
+|----------|---------|---------|
+| MiniMind 64M | 122MB | ~4-6GB |
+| Qwen3-0.6B | 1.4GB | ~6-8GB |
+
+RTX 5080 16GB 两个 backbone 都无压力。
 
 ---
 

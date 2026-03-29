@@ -52,19 +52,22 @@
 
 ---
 
-## 4. 为什么选 MiniMind 做 backbone，而不是从零训练？
+## 4. 为什么选 MiniMind 做初始 backbone，而不是从零训练？
 
-**决策**：用 MiniMind（64M 参数，能流畅中文对话）作为冻结 backbone。
+**决策**：用 MiniMind（64M 参数）做机制验证，Qwen3-0.6B（600M 参数）做效果验证。
 
 **最初计划**：从零训练一个 TinyTransformer（4 层，128 维）。
 
 **为什么改**：
 - 从零训练的小模型不会聊天，只能做 copy 任务等人造测试 → 无法通过聊天验证
 - 聊天验证是最直觉、最有说服力的验证方式："我叫张三" → 5 轮后 → "我叫什么？"
-- MiniMind 64M 已能流畅中文对话，加上状态后可以立即通过聊天看效果
-- RTX 5080 16GB 轻松跑，不是瓶颈
+- MiniMind 64M 可以快速验证流程跑通，Qwen3-0.6B 语言能力足够强可以验证实际效果
+- RTX 5080 16GB 两个 backbone 都轻松跑
 
-**长期考虑**：插件化架构意味着换到 Qwen-7B 只需实现 `BackboneBase` 接口，StatePlugin 代码不动。
+**为什么两级 backbone**：
+- MiniMind 64M 语言理解太弱，即使 state 有效也难以从回答中看出效果 → 相当于单元测试
+- Qwen3-0.6B 语言能力强得多，能直接通过对话验证 state 是否改善了记忆 → 相当于集成测试
+- 切换只需改配置文件 (`configs/minimind.yaml` → `configs/qwen3-0.6b.yaml`)，代码不动
 
 ---
 

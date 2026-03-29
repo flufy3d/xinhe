@@ -20,14 +20,14 @@
 
 ### 1. 基线
 
-**目标**：MiniMind 正常加载能聊天
+**目标**：Backbone 正常加载能聊天
 
 **操作**：
-- 克隆 MiniMind 仓库，下载预训练权重
-- 加载 MiniMindBackbone，不加 StatePlugin
+- 下载预训练权重到 `models/` 目录
+- 加载 MiniMindBackbone 或 QwenBackbone，不加 StatePlugin
 - 直接聊天验证
 
-**通过标准**：中文对话流畅，回答合理
+**通过标准**：对话流畅，回答合理
 
 ### 2. 空状态
 
@@ -184,7 +184,8 @@
 ## 未来方向（验证成功后）
 
 ### 近期
-- **Qwen-7B 迁移**：实现 QwenBackbone，重训 LoRA + Plugin
+- ~~**Qwen 迁移**~~：已完成 QwenBackbone（支持 Qwen3-0.6B），切换只需改 yaml
+- **更大 backbone**：Qwen3-4B 等更强模型（需量化或更大显存）
 - **分层 state**：快 state（小，每轮更新）+ 慢 state（大，sleep 时更新）
 - **多模态状态**：图片、语音信息也消化进 state
 
