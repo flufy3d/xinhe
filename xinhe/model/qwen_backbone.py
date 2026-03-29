@@ -25,11 +25,12 @@ class QwenBackbone(nn.Module, BackboneBase):
         nn.Module.__init__(self)
         self.config = config
 
-        # 加载 Qwen 模型
+        # 加载 Qwen 模型，device_map="auto" 自动分配到多卡
         self.model = AutoModelForCausalLM.from_pretrained(
             config.backbone_model_path,
             dtype=torch.bfloat16,
             trust_remote_code=True,
+            device_map="auto",
         )
         self._hidden_size = self.model.config.hidden_size
 
@@ -52,8 +53,16 @@ class QwenBackbone(nn.Module, BackboneBase):
         position_ids = torch.arange(seq_len, device=device).unsqueeze(0)
         position_embeddings = self.model.model.rotary_emb(hidden_states, position_ids)
 
-        # 逐层跑 transformer blocks
+        # 逐层跑 transformer blocks（多卡时跟随 layer 设备移动）
         for layer in self.model.model.layers:
+            layer_device = next(layer.parameters()).device
+            hidden_states = hidden_states.to(layer_device)
+            if attention_mask is not None:
+                attention_mask = attention_mask.to(layer_device)
+            position_embeddings = (
+                position_embeddings[0].to(layer_device),
+                position_embeddings[1].to(layer_device),
+            )
             hidden_states = layer(
                 hidden_states,
                 attention_mask=attention_mask,

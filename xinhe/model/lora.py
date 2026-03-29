@@ -50,7 +50,7 @@ class LoRALinear(nn.Module):
         orig_dtype = x.dtype
         result = self.original(x.to(self.original.weight.dtype))
         # LoRA 增量: x → dropout → A → B → scale
-        lora_out = self.dropout(x) @ self.lora_A.to(x.dtype).T @ self.lora_B.to(x.dtype).T * self.scaling
+        lora_out = self.dropout(x) @ self.lora_A.to(device=x.device, dtype=x.dtype).T @ self.lora_B.to(device=x.device, dtype=x.dtype).T * self.scaling
         return (result + lora_out).to(orig_dtype)
 
 

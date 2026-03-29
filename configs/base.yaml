@@ -32,8 +32,8 @@ lora:
 # --- 训练 ---
 training:
   segment_length: 256
-  episode_length: 14
-  tbptt_steps: 14
+  episode_length: 8
+  tbptt_steps: 8
   batch_size: 1
   learning_rate: 3.0e-4
   weight_decay: 0.01

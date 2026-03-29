@@ -79,7 +79,7 @@ class Trainer:
 
     def train(self):
         """主训练循环"""
-        self.model.to(self.device)
+        self.model.plugin.to(self.device)
         self.model.train()
 
         total_params = self.model.get_total_param_count()

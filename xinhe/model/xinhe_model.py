@@ -89,7 +89,10 @@ class XinheModel(nn.Module):
         # 3. Transformer forward
         output = self.backbone.forward_blocks(hidden_states, attention_mask=mask)
 
-        # 4. 提取新状态 + gate 更新
+        # 4. 提取新状态 + gate 更新（多卡时将输出移回 plugin 所在设备）
+        plugin_device = next(self.plugin.parameters()).device
+        output = output.to(plugin_device)
+        state = state.to(plugin_device)
         content_output, state_next = self.plugin.extract_and_update(output, state)
 
         # 5. 计算 logits (只对内容部分)

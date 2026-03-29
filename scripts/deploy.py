@@ -77,10 +77,8 @@ set -e
 cd {REMOTE_DIR}
 echo '--- 安装依赖 ---'
 uv sync
-echo '--- 生成训练数据 ---'
-uv run python -X utf8 scripts/generate_memory_data.py \
-    --num-train 5000 --num-val 500 \
-    --max-turns 14 --min-distance 1 --max-distance 10
+
+
 """
     run(ssh_cmd(host, port) + [init_script])
 
