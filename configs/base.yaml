@@ -9,10 +9,9 @@ state:
   state_scale_init: -5.0
   gate_bias_init: 0.0
 
-# --- Sleep ---
+# --- Sleep (对话 buffer replay + 权重更新，里程碑 9 实现) ---
 sleep:
   sleep_every: 4
-  sleep_passes: 1
 
 # --- LoRA ---
 lora:

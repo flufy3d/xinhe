@@ -17,7 +17,7 @@ sys.path.insert(0, str(project_root))
 
 from xinhe.model.config import XinheConfig
 from xinhe.model.xinhe_model import XinheModel
-from xinhe.evaluation.metrics import retention_test, wipe_degradation, sleep_effect
+from xinhe.evaluation.metrics import retention_test, wipe_degradation
 
 
 def load_model_and_tokenizer(config, checkpoint_path, device):
@@ -57,7 +57,7 @@ def main():
     parser.add_argument("--config", type=str, default="configs/base.yaml")
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--test", type=str, default="all",
-                        choices=["all", "retention", "wipe", "sleep"])
+                        choices=["all", "retention", "wipe"])
     parser.add_argument("--output", type=str, default=None, help="结果输出 JSON 路径")
     args = parser.parse_args()
 
@@ -87,23 +87,6 @@ def main():
         print(f"  无状态准确率:   {wipe['without_state']:.1%}")
         print(f"  性能下降:       {wipe['degradation']:.1%}")
         results["wipe"] = wipe
-
-    # Sleep 效果
-    if args.test in ("all", "sleep"):
-        print("\n[3/3] Sleep 效果...")
-        # 创建一个有内容的状态
-        state = model.init_state(1).to(device)
-        text = "<s>用户：我叫张三，我住在北京。\n助手：好的。</s>"
-        ids = tokenizer.encode(text, add_special_tokens=False)
-        input_tensor = torch.tensor([ids], dtype=torch.long, device=device)
-        with torch.no_grad():
-            result = model(input_tensor, state)
-            state = result["state_next"]
-
-        sl = sleep_effect(model, state)
-        print(f"  有效秩: {sl['rank_before']:.1f} → {sl['rank_after']:.1f} ({sl['rank_change']:+.1f})")
-        print(f"  状态范数: {sl['norm_before']:.1f} → {sl['norm_after']:.1f} ({sl['norm_change']:+.1f})")
-        results["sleep"] = sl
 
     # 保存结果
     if args.output:

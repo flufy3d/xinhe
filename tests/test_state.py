@@ -79,18 +79,6 @@ def test_gate_range(plugin):
     assert (gate <= 1).all()
 
 
-def test_sleep_forward(plugin):
-    """sleep pass 不改变状态形状"""
-    state = plugin.blank_state(2)
-
-    # 模拟 backbone forward
-    def mock_backbone(hidden_states, attention_mask=None):
-        return hidden_states + torch.randn_like(hidden_states) * 0.01
-
-    state_next = plugin.sleep_forward(mock_backbone, state)
-    assert state_next.shape == state.shape
-
-
 def test_state_stats(plugin):
     """状态统计信息包含所有字段"""
     state = plugin.blank_state(1)

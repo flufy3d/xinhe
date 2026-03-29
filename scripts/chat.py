@@ -5,7 +5,6 @@
     /save <name>     保存当前状态到文件
     /load <name>     加载之前保存的状态
     /wipe            清除状态 (对比实验: 清除后还记得吗?)
-    /sleep           手动触发 sleep 压缩
     /stats           显示状态分析 (gate分布、活跃维度、有效秩)
     /burnin <text>   用文本初始化 persona 状态
     /reset           重置为空白状态
@@ -163,7 +162,6 @@ def main():
                 print("  /save <name>   — 保存当前状态")
                 print("  /load <name>   — 加载状态")
                 print("  /wipe          — 清除状态 (对比实验)")
-                print("  /sleep         — 手动 sleep 压缩")
                 print("  /stats         — 状态分析")
                 print("  /reset         — 重置为空白状态")
                 print("  /burnin <text> — 用文本初始化 persona")
@@ -184,13 +182,6 @@ def main():
             elif cmd == "/wipe":
                 state = model.init_state(batch_size=1).to(device)
                 print("  状态已清除（重置为空白）")
-
-            elif cmd == "/sleep":
-                print("  执行 sleep pass...")
-                with torch.no_grad():
-                    state = model.sleep(state)
-                print("  sleep 完成")
-                print_stats(model, state)
 
             elif cmd == "/stats":
                 print_stats(model, state)
@@ -258,11 +249,6 @@ def main():
         print(f"\n心核: {response}")
         print(f"  [轮次 {turn_count} | scale={torch.sigmoid(model.plugin.state_scale).item():.3f}]")
 
-        # 自动 sleep (每 sleep_every 轮)
-        if turn_count > 0 and turn_count % config.sleep_every == 0:
-            with torch.no_grad():
-                state = model.sleep(state)
-            print(f"  [自动 sleep 完成]")
 
 
 if __name__ == "__main__":

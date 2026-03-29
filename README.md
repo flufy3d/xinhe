@@ -48,7 +48,7 @@ gate = sigmoid(static_bias + dynamic_projection)
 ```
 ┌─────────────────────────────────┐
 │       StatePlugin (~2M)         │  ← 可训练，sleep 时更新
-│  state_emb, gate, scale, sleep  │
+│  state_emb, gate, scale         │
 ├─────────────────────────────────┤
 │    Backbone (可切换)             │  ← 冻结 + LoRA
 │  MiniMind 64M / Qwen3-0.6B 等   │
@@ -69,7 +69,7 @@ xinhe/
 ├── xinhe/            # 核心代码
 │   ├── model/        # backbone 抽象 + 适配器 + StatePlugin + LoRA
 │   ├── data/         # 多轮对话数据集
-│   ├── training/     # 训练循环 (截断 BPTT + sleep)
+│   ├── training/     # 训练循环 (截断 BPTT)
 │   ├── evaluation/   # 记忆保留 / wipe / 时间尺度分析
 │   └── utils/        # checkpoint、logging
 ├── scripts/          # train / chat / evaluate / visualize
@@ -111,7 +111,6 @@ python scripts/chat.py --checkpoint checkpoints/latest.pt
 | `/save <name>` | 保存 .pt（权重 + 状态 + buffer） |
 | `/load <name>` | 加载 .pt（恢复完整"灵魂"） |
 | `/wipe` | 清除状态（对比实验） |
-| `/sleep` | 手动触发 sleep（状态压缩 + 权重更新） |
 | `/stats` | 显示状态分析 |
 | `/burnin <prompt>` | 用 prompt 初始化 persona |
 
@@ -135,9 +134,8 @@ python scripts/visualize_state.py --checkpoint checkpoints/latest.pt
 | 5. 覆写 | 更新旧信息 | "在北京" → "搬到上海" → 问 |
 | 6. Wipe | 证明依赖状态 | 清除后答不出 |
 | 7. 时间尺度 | 快慢分化 | gate_bias 双峰分布 |
-| 8. Sleep 压缩 | 状态整理有效 | 秩下降 + retention 不降 |
-| 9. Sleep 学习 | 权重固化有效 | 第二天还记得昨天的事 |
-| 10. 灵魂分化 | 不同 .pt 不同人格 | 同问题不同回答 |
+| 8. Sleep | 权重固化有效 | 第二天还记得昨天的事 |
+| 9. 灵魂分化 | 不同 .pt 不同人格 | 同问题不同回答 |
 
 详见 [docs/roadmap.md](docs/roadmap.md)
 

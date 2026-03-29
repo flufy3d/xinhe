@@ -6,7 +6,6 @@
 2. update_test — 信息覆写能力
 3. wipe_degradation — 状态清除后性能下降
 4. timescale_distribution — 快/慢变量分布
-5. sleep_effect — sleep 前后状态变化
 """
 import torch
 import numpy as np
@@ -183,33 +182,6 @@ def timescale_distribution(state_history: list[torch.Tensor]) -> dict:
         "tau_max": float(tau_array.max()),
         "slow_count": int((tau_array > tau_array.mean() + tau_array.std()).sum()),
         "fast_count": int((tau_array < tau_array.mean() - tau_array.std()).sum()),
-    }
-
-
-def sleep_effect(
-    model,
-    state: torch.Tensor,
-) -> dict:
-    """
-    测量 sleep 对状态的影响。
-
-    返回:
-        dict: sleep 前后的有效秩、范数变化
-    """
-    stats_before = model.state_stats(state)
-
-    with torch.no_grad():
-        state_after = model.sleep(state)
-
-    stats_after = model.state_stats(state_after)
-
-    return {
-        "rank_before": stats_before["effective_rank"],
-        "rank_after": stats_after["effective_rank"],
-        "rank_change": stats_after["effective_rank"] - stats_before["effective_rank"],
-        "norm_before": stats_before["state_norm"],
-        "norm_after": stats_after["state_norm"],
-        "norm_change": stats_after["state_norm"] - stats_before["state_norm"],
     }
 
 

@@ -5,7 +5,6 @@ StatePlugin — 可插拔的持久状态机制
 - 状态实现为额外的 token，拼接在输入序列前面
 - 复用 transformer 的 self-attention 作为读写机制
 - 双层 Gate: 静态偏置 (脑区分化) + 动态投影 (内容选择)
-- Sleep: 无输入的 forward pass，状态自整理
 - 渐进 scale: 从 0 开始，不破坏预训练模型
 
 不依赖具体 backbone，将来换模型只需替换 backbone。
@@ -144,52 +143,6 @@ class StatePlugin(nn.Module):
         state_next = gate * state_old + (1 - gate) * state_new
 
         return content_output, state_next
-
-    def sleep_forward(
-        self,
-        backbone_forward_fn,
-        state: torch.Tensor,
-        backbone_dtype: torch.dtype = None,
-    ) -> torch.Tensor:
-        """
-        Sleep pass: 无内容输入，状态 token 只看到彼此。
-
-        参数:
-            backbone_forward_fn: callable(hidden_states, mask) -> hidden_states
-            state: (B, n_state, D) 当前状态
-
-        返回:
-            state_next: (B, n_state, D) sleep 整理后的状态
-        """
-        B = state.shape[0]
-
-        # 渐进影响力: scale 同时作用于状态和位置编码
-        scale = torch.sigmoid(self.state_scale)
-        pos_ids = torch.arange(self.n_state, device=state.device)
-        state_with_pos = (state + self.state_pos(pos_ids).unsqueeze(0)) * scale
-
-        # 对齐 dtype (Qwen=bfloat16, StatePlugin=float32)
-        if backbone_dtype is not None:
-            state_with_pos = state_with_pos.to(dtype=backbone_dtype)
-
-        # Sleep mask: 全双向 (状态 token 互相可见)
-        mask = torch.zeros(
-            1, 1, self.n_state, self.n_state,
-            device=state.device, dtype=state_with_pos.dtype,
-        )
-
-        # 通过 backbone
-        output = backbone_forward_fn(state_with_pos, mask)
-
-        # 用 gate 更新 (对齐 dtype)
-        plugin_dtype = self.state_out_proj.weight.dtype
-        state_new = self.state_out_proj(output.to(plugin_dtype))
-        combined = torch.cat([state.to(plugin_dtype), state_new], dim=-1)
-        dynamic_logit = self.gate_proj(combined)
-        gate = torch.sigmoid(self.gate_bias.unsqueeze(0) + dynamic_logit)
-        state_next = gate * state + (1 - gate) * state_new
-
-        return state_next
 
     @staticmethod
     def build_mask(

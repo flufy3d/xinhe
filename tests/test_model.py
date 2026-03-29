@@ -96,13 +96,6 @@ def test_state_persistence(model):
             f"状态在 segment {i} 没有变化"
 
 
-def test_sleep(model):
-    """sleep pass 不改变状态形状"""
-    state = model.init_state(2)
-    state_after = model.sleep(state)
-    assert state_after.shape == state.shape
-
-
 def test_gradient_flow(model):
     """梯度能通过状态反向传播"""
     B, T = 1, 8

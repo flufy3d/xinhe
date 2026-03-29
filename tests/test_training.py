@@ -60,8 +60,6 @@ def test_training_loop_runs():
         lora_rank=0,
         freeze_backbone=False,
         tbptt_steps=2,
-        sleep_every=2,
-        sleep_passes=1,
         batch_size=2,
         learning_rate=1e-3,
         grad_clip=1.0,

@@ -4,7 +4,6 @@ Trainer — 训练循环
 核心特性:
 - state 跨 segment (对话轮次) 传递
 - 截断 BPTT: 每 tbptt_steps 轮做 detach + backward + step
-- Sleep: 每 sleep_every 轮做一次无输入 forward pass
 - 只训练 StatePlugin + LoRA 参数
 """
 import math
@@ -31,7 +30,6 @@ class Trainer:
                 1. forward(segment, state) → logits, state_next
                 2. 累积 loss
                 3. 每 tbptt_steps 做一次 backward + optimizer step + state.detach()
-                4. 每 sleep_every 做一次 sleep pass
                 state = state_next
     """
 
@@ -160,11 +158,6 @@ class Trainer:
                 accumulated_loss = torch.tensor(0.0, device=self.device)
                 steps_in_window = 0
 
-            # Sleep: 每 sleep_every 个 segment 做一次
-            if seg_idx > 0 and seg_idx % self.config.sleep_every == 0:
-                for _ in range(self.config.sleep_passes):
-                    state = self.model.sleep(state)
-
             # Forward
             with torch.amp.autocast("cuda", dtype=self.dtype):
                 result = self.model(segment, state, labels=segment)
@@ -202,11 +195,6 @@ class Trainer:
 
             for seg_idx, segment in enumerate(episode_segments):
                 segment = segment.to(self.device)
-
-                # Sleep
-                if seg_idx > 0 and seg_idx % self.config.sleep_every == 0:
-                    for _ in range(self.config.sleep_passes):
-                        state = self.model.sleep(state)
 
                 with torch.amp.autocast("cuda", dtype=self.dtype):
                     result = self.model(segment, state, labels=segment)

@@ -4,7 +4,6 @@ XinheModel — 顶层模型
 组合 backbone (MiniMind) + StatePlugin，实现:
 - 带持久状态的 forward pass
 - 带状态的文本生成
-- Sleep pass
 - Burn-in 初始化
 """
 import torch
@@ -114,24 +113,6 @@ class XinheModel(nn.Module):
             result["loss"] = loss
 
         return result
-
-    def sleep(self, state: torch.Tensor) -> torch.Tensor:
-        """
-        执行 sleep pass: 无内容输入，状态自整理。
-
-        参数:
-            state: (B, n_state, D)
-
-        返回:
-            state_next: (B, n_state, D) sleep 后的状态
-        """
-        # 推断 backbone dtype (Qwen=bfloat16, MiniMind=float32)
-        backbone_dtype = next(self.backbone.parameters()).dtype
-        return self.plugin.sleep_forward(
-            backbone_forward_fn=self.backbone.forward_blocks,
-            state=state,
-            backbone_dtype=backbone_dtype,
-        )
 
     def init_state(self, batch_size: int = 1) -> torch.Tensor:
         """创建空白初始状态"""

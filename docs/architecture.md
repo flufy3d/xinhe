@@ -129,40 +129,28 @@ state_next = gate * state_old + (1 - gate) * state_new
 ```
 白天（推理）：                         Sleep（学习）：
   权重完全冻结                           权重更新（plugin + LoRA）
-  只有 state 在流动                      state 压缩整理
-  全速生成，无额外开销                    replay 今天对话，backward 更新
-  对话存入 conversation_buffer            buffer 清空，保存 .pt
+  只有 state 在流动                      replay 今天对话，backward 更新
+  全速生成，无额外开销                    buffer 清空，state 重置，保存 .pt
+  对话存入 conversation_buffer
 ```
 
-### Sleep 做两件事
-
-**1. 状态自整理**
-
-```
-[S_1..S_n |          ]  → transformer → [S'_1..S'_n |          ]
-```
-
-状态 token 只看彼此（双向 attention），无新内容输入。被迫重新组织、压缩内部状态。
-
-**2. 权重更新（在线学习）**
+### Sleep 流程
 
 ```python
 def sleep(self, conversation_buffer):
-    # 1. 状态自整理
-    for _ in range(sleep_passes):
-        state = plugin.sleep_forward(backbone, state)
-
-    # 2. 对话 replay → 更新权重
+    # 1. 对话 replay → 更新权重
     for segment in conversation_buffer:
         result = model(segment, state, labels=segment)
         loss.backward()
         sleep_optimizer.step()       # plugin + LoRA 权重更新
         state = result["state_next"].detach()
 
-    # 3. 保存 .pt
+    # 2. 保存 .pt，清空 buffer
     save_checkpoint(...)
     conversation_buffer.clear()
 ```
+
+重要信息通过 replay 固化进权重后，state 可以重置为空白——信息已经在权重里了。
 
 ### 两套记忆系统
 
@@ -234,7 +222,7 @@ def burn_in(self, token_ids_list):
 | 优化器 | AdamW, lr=3e-4, cosine schedule with warmup |
 | 梯度裁剪 | grad_clip=1.0 |
 
-### 在线学习阶段（Sleep）
+### 在线学习阶段（Sleep，里程碑 9 实现）
 
 | 项目 | 值 |
 |------|-----|
@@ -256,6 +244,5 @@ def burn_in(self, token_ids_list):
 | lora_rank | 16 | LoRA 秩 |
 | lora_alpha | 32 | LoRA 缩放 |
 | tbptt_steps | 4 | 截断 BPTT 窗口 |
-| sleep_passes | 3 | 每次 sleep 状态自整理轮数 |
 | sleep_lr | 1e-5 | sleep 权重更新学习率 |
 | max_buffer_segments | 64 | 对话 buffer 上限 |
