@@ -83,20 +83,35 @@ xinhe/
 ### 环境
 
 ```bash
-pip install -e .
+uv sync
 ```
 
 ### 下载权重
 
 将 `model.safetensors` 放入对应 `models/` 子目录（tokenizer 等配置文件已入库）。
 
+### 生成训练数据
+
+```bash
+# 1轮记忆（milestone 3 验证）: 告知→立刻回忆，episode 4轮
+python scripts/generate_memory_data.py --num-train 2000 --num-val 200 --max-turns 4 --max-distance 1
+
+# 多轮记忆（milestone 4+）: 更大间隔，更长 episode
+python scripts/generate_memory_data.py --num-train 5000 --num-val 500 --max-turns 16 --max-distance 6
+
+# 预览数据（不写文件）
+python scripts/generate_memory_data.py --preview 3
+```
+
+数据格式见 [docs/data_spec.md](docs/data_spec.md)
+
 ### 训练
 
 ```bash
-python scripts/train.py --config configs/minimind.yaml
+python scripts/train.py
 ```
 
-切换 backbone 只需换配置文件，如 `configs/qwen3-0.6b.yaml`。
+默认使用 Qwen3-0.6B，切换 backbone 在 `configs/base.yaml` 中修改。
 
 ### 聊天验证
 

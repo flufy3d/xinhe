@@ -112,20 +112,21 @@ class Trainer:
 
         return total_loss / max(num_episodes, 1)
 
-    def _train_episode(self, episode_segments: list[torch.Tensor]) -> float:
+    def _train_episode(self, episode_segments) -> float:
         """
         训练一个 episode (多轮对话)。
 
-        episode_segments: segment 列表，每个 (B, T)
+        episode_segments: segment 列表，每个是 (input_ids, labels) tuple，shape (B, T)
         """
-        B = episode_segments[0].shape[0]
+        B = episode_segments[0][0].shape[0]
         state = self.model.init_state(B).to(self.device)
         accumulated_loss = torch.tensor(0.0, device=self.device)
         episode_total_loss = 0.0
         steps_in_window = 0
 
-        for seg_idx, segment in enumerate(episode_segments):
+        for seg_idx, (segment, labels) in enumerate(episode_segments):
             segment = segment.to(self.device)
+            labels = labels.to(self.device)
 
             # 截断 BPTT: 每 tbptt_steps 切断梯度
             if seg_idx > 0 and seg_idx % self.config.tbptt_steps == 0:
@@ -160,7 +161,7 @@ class Trainer:
 
             # Forward
             with torch.amp.autocast("cuda", dtype=self.dtype):
-                result = self.model(segment, state, labels=segment)
+                result = self.model(segment, state, labels=labels)
 
             state = result["state_next"]
             accumulated_loss = accumulated_loss + result["loss"]
@@ -180,6 +181,14 @@ class Trainer:
             self.global_step += 1
             episode_total_loss += avg_loss.item()
 
+            if self.global_step % self.config.log_every == 0:
+                lr = self.scheduler.get_last_lr()[0]
+                scale = torch.sigmoid(self.model.plugin.state_scale).item()
+                print(f"  [Step {self.global_step}] loss={avg_loss.item():.4f} lr={lr:.2e} scale={scale:.4f}")
+
+            if self.global_step % self.config.save_every == 0:
+                self._save_checkpoint()
+
         return episode_total_loss
 
     @torch.no_grad()
@@ -190,14 +199,15 @@ class Trainer:
         num_episodes = 0
 
         for episode_segments in self.val_dataloader:
-            B = episode_segments[0].shape[0]
+            B = episode_segments[0][0].shape[0]
             state = self.model.init_state(B).to(self.device)
 
-            for seg_idx, segment in enumerate(episode_segments):
+            for seg_idx, (segment, labels) in enumerate(episode_segments):
                 segment = segment.to(self.device)
+                labels = labels.to(self.device)
 
                 with torch.amp.autocast("cuda", dtype=self.dtype):
-                    result = self.model(segment, state, labels=segment)
+                    result = self.model(segment, state, labels=labels)
 
                 state = result["state_next"]
                 total_loss += result["loss"].item()

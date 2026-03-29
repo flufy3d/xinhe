@@ -27,6 +27,7 @@ sys.path.insert(0, str(project_root))
 
 from xinhe.model.config import XinheConfig
 from xinhe.model.xinhe_model import XinheModel
+from xinhe.data.conversation import ensure_chat_template
 
 
 STATES_DIR = Path("saved_states")
@@ -36,7 +37,11 @@ def load_tokenizer(config: XinheConfig):
     """加载 tokenizer"""
     model_path = Path(config.backbone_model_path).resolve()
     from transformers import AutoTokenizer
-    return AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+    ensure_chat_template(tokenizer)
+    return tokenizer
 
 
 def print_stats(model: XinheModel, state: torch.Tensor):

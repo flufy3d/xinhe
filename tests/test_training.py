@@ -35,12 +35,16 @@ class TinyBackbone(nn.Module, BackboneBase):
 
 
 class DummyDataset:
-    """极小数据集: 每个 episode 有 4 个 segment"""
+    """极小数据集: 每个 episode 有 4 个 segment，每个 segment 是 (input_ids, labels) tuple"""
 
     def __init__(self, num_episodes=10, seg_len=16, num_segments=4):
         self.episodes = []
         for _ in range(num_episodes):
-            episode = [torch.randint(0, 50, (seg_len,)) for _ in range(num_segments)]
+            episode = []
+            for _ in range(num_segments):
+                ids = torch.randint(0, 50, (seg_len,))
+                labels = ids.clone()
+                episode.append((ids, labels))
             self.episodes.append(episode)
 
     def __len__(self):
@@ -103,7 +107,8 @@ def test_state_detach_in_tbptt():
             assert not state.requires_grad
 
         input_ids = torch.randint(0, 50, (B, T))
-        result = model(input_ids, state, labels=input_ids)
+        labels = input_ids.clone()
+        result = model(input_ids, state, labels=labels)
         state = result["state_next"]
 
         # 在 BPTT 窗口内，state 应该可以反向传播

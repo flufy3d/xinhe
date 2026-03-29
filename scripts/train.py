@@ -2,8 +2,8 @@
 训练入口脚本
 
 用法:
-    python scripts/train.py --config configs/base.yaml
-    python scripts/train.py --config configs/base.yaml --resume checkpoints/xinhe_step_1000.pt
+    python scripts/train.py --config configs/qwen3-0.6b.yaml
+    python scripts/train.py --config configs/qwen3-0.6b.yaml --resume checkpoints/xinhe_step_1000.pt
 """
 import argparse
 import sys
@@ -18,46 +18,35 @@ sys.path.insert(0, str(project_root))
 
 from xinhe.model.config import XinheConfig
 from xinhe.model.xinhe_model import XinheModel
-from xinhe.data.conversation import ConversationDataset, SyntheticMemoryDataset, collate_episodes
+from xinhe.data.conversation import (
+    ConversationDataset, collate_episodes, ensure_chat_template,
+)
 from xinhe.training.trainer import Trainer
 
 
 def load_tokenizer(config: XinheConfig):
-    """加载 MiniMind 的 tokenizer"""
-    minimind_path = Path(config.backbone_model_path).resolve()
-    tokenizer_path = minimind_path / "model" / "tokenizer.json"
-
-    # MiniMind 使用自定义 tokenizer，尝试加载
-    try:
-        from transformers import AutoTokenizer
-        tokenizer = AutoTokenizer.from_pretrained(str(minimind_path / "model"))
-        return tokenizer
-    except Exception:
-        pass
-
-    # 备选: 用 MiniMind 自带的 tokenizer
-    try:
-        sys.path.insert(0, str(minimind_path))
-        from model.tokenizer import Tokenizer
-        tokenizer = Tokenizer(str(tokenizer_path))
-        return tokenizer
-    except Exception:
-        pass
-
-    raise RuntimeError(f"无法加载 tokenizer，请检查路径: {minimind_path}")
+    """加载 tokenizer（backbone 通用）"""
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained(
+        str(Path(config.backbone_model_path).resolve()),
+        trust_remote_code=True,
+    )
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+    ensure_chat_template(tokenizer)
+    return tokenizer
 
 
 def main():
     parser = argparse.ArgumentParser(description="心核 (Xinhe) 训练")
     parser.add_argument("--config", type=str, default="configs/base.yaml", help="配置文件路径")
     parser.add_argument("--resume", type=str, default=None, help="从 checkpoint 恢复")
-    parser.add_argument("--synthetic", action="store_true", help="使用合成记忆数据集 (用于初始验证)")
     args = parser.parse_args()
 
     # 加载配置
     config = XinheConfig.from_yaml(args.config)
     print(f"=== 心核 (Xinhe) 训练 ===")
-    print(f"设备: {config.device} | 精度: {config.dtype}")
+    print(f"Backbone: {config.backbone_type} ({config.backbone_model_path}) | 设备: {config.device} | 精度: {config.dtype}")
     print(f"状态 token: {config.n_state} | 维度: {config.state_dim}")
     print(f"LoRA rank: {config.lora_rank} | 目标模块: {config.lora_target_modules}")
 
@@ -66,35 +55,23 @@ def main():
     print(f"Tokenizer 已加载, vocab_size={getattr(tokenizer, 'vocab_size', '?')}")
 
     # 创建数据集
-    if args.synthetic:
-        print("使用合成记忆数据集")
-        train_dataset = SyntheticMemoryDataset(
-            tokenizer=tokenizer,
-            num_episodes=2000,
-            segment_length=config.segment_length,
-            episode_length=config.episode_length,
-            seed=42,
-        )
-        val_dataset = SyntheticMemoryDataset(
-            tokenizer=tokenizer,
-            num_episodes=200,
-            segment_length=config.segment_length,
-            episode_length=config.episode_length,
-            seed=123,
-        )
-    else:
-        train_dataset = ConversationDataset(
-            data_path=config.train_path,
-            tokenizer=tokenizer,
-            segment_length=config.segment_length,
-            episode_length=config.episode_length,
-        )
-        val_dataset = ConversationDataset(
-            data_path=config.val_path,
-            tokenizer=tokenizer,
-            segment_length=config.segment_length,
-            episode_length=config.episode_length,
-        ) if Path(config.val_path).exists() else None
+    train_dataset = ConversationDataset(
+        data_path=config.train_path,
+        tokenizer=tokenizer,
+        segment_length=config.segment_length,
+        episode_length=config.episode_length,
+    )
+    val_dataset = ConversationDataset(
+        data_path=config.val_path,
+        tokenizer=tokenizer,
+        segment_length=config.segment_length,
+        episode_length=config.episode_length,
+    ) if Path(config.val_path).exists() else None
+
+    if len(train_dataset) == 0:
+        print(f"错误: 训练数据为空，请先生成数据:")
+        print(f"  python scripts/generate_memory_data.py")
+        sys.exit(1)
 
     train_loader = DataLoader(
         train_dataset,
