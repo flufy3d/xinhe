@@ -17,12 +17,17 @@ from xinhe.data.conversation import ensure_chat_template, tokenize_turn
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint", type=str, default="checkpoints/xinhe_step_2000.pt")
+    args = parser.parse_args()
+
     config = XinheConfig.from_yaml("configs/base.yaml")
     device = torch.device(config.device if torch.cuda.is_available() else "cpu")
 
     # 加载模型
     model = XinheModel(config)
-    checkpoint_path = "checkpoints/xinhe_step_1000.pt"
+    checkpoint_path = args.checkpoint
     if Path(checkpoint_path).exists():
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         model.plugin.load_state_dict(checkpoint["plugin_state"])
