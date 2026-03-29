@@ -13,8 +13,8 @@ import yaml
 class XinheConfig:
     # --- Backbone ---
     backbone_type: str = "minimind"  # "minimind" 或 "qwen"
-    backbone_model_path: str = "./minimind"
-    backbone_weights_path: str = "./minimind/model/minimind-v1-small"
+    backbone_model_path: str = "./models/minimind"
+    backbone_weights_path: str = "./models/minimind/model.safetensors"
     hidden_size: int = 768
     freeze_backbone: bool = True
 
@@ -61,9 +61,24 @@ class XinheConfig:
 
     @classmethod
     def from_yaml(cls, path: str) -> "XinheConfig":
-        """从 yaml 配置文件加载"""
+        """从 yaml 配置文件加载，支持 base 继承"""
+        from pathlib import Path
+
         with open(path, "r", encoding="utf-8") as f:
             raw = yaml.safe_load(f)
+
+        # 如果指定了 base，先加载 base 再用当前文件覆盖
+        if "base" in raw:
+            base_path = Path(path).parent / raw.pop("base")
+            with open(base_path, "r", encoding="utf-8") as f:
+                base_raw = yaml.safe_load(f)
+            # 深度合并: raw 覆盖 base_raw
+            for section, values in raw.items():
+                if isinstance(values, dict) and section in base_raw and isinstance(base_raw[section], dict):
+                    base_raw[section].update(values)
+                else:
+                    base_raw[section] = values
+            raw = base_raw
 
         # 将嵌套的 yaml 扁平化到 dataclass 字段
         flat = {}

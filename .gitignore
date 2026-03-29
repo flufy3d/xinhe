@@ -32,4 +32,6 @@ runs/
 outputs/
 .claude/
 
-models/
+# 模型权重文件 (太大不入库，clone 后需手动下载)
+*.safetensors
+*.bin

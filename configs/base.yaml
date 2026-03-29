@@ -1,43 +1,31 @@
 # ============================================================
-# Xinhe (心核) 基础配置
+# Xinhe (心核) 共用默认配置
+# backbone 相关配置由各 backbone yaml 覆盖
 # ============================================================
-
-# --- MiniMind Backbone ---
-backbone:
-  type: "minimind"                        # "minimind" 或 "qwen"
-  model_path: "./minimind"                # MiniMind 仓库路径 / Qwen 模型路径
-  weights_path: "./minimind/model/minimind-v1-small"  # 预训练权重路径 (MiniMind 专用)
-  hidden_size: 768
-  num_hidden_layers: 8
-  num_attention_heads: 8
-  num_key_value_heads: 4
-  vocab_size: 6400
-  freeze: true                            # 冻结主干参数
 
 # --- StatePlugin ---
 state:
-  n_state: 32                             # 状态 token 数
-  state_dim: 768                          # = hidden_size
-  state_scale_init: 0.0                   # 渐进影响力初始值 (sigmoid → ≈0)
-  gate_bias_init: 0.0                     # gate 静态偏置初始值
+  n_state: 32
+  state_scale_init: 0.0
+  gate_bias_init: 0.0
 
 # --- Sleep ---
 sleep:
-  sleep_every: 4                          # 每隔几个 segment 做一次 sleep
-  sleep_passes: 1                         # 每次 sleep 做几轮
+  sleep_every: 4
+  sleep_passes: 1
 
 # --- LoRA ---
 lora:
   rank: 16
   alpha: 32
   dropout: 0.0
-  target_modules: ["q_proj", "v_proj"]    # 适配 MiniMind 的 attention 层
+  target_modules: ["q_proj", "v_proj"]
 
 # --- 训练 ---
 training:
-  segment_length: 256                     # 每个 segment 的 token 数
-  episode_length: 16                      # 每个 episode 的 segment 数
-  tbptt_steps: 4                          # 截断 BPTT 窗口
+  segment_length: 256
+  episode_length: 16
+  tbptt_steps: 4
   batch_size: 4
   learning_rate: 3.0e-4
   weight_decay: 0.01

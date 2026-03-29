@@ -1,0 +1,335 @@
+{
+  "add_bos_token": false,
+  "add_eos_token": false,
+  "add_prefix_space": false,
+  "added_tokens_decoder": {
+    "0": {
+      "content": "<|endoftext|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "1": {
+      "content": "<|im_start|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "2": {
+      "content": "<|im_end|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "3": {
+      "content": "<|object_ref_start|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "4": {
+      "content": "<|object_ref_end|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "5": {
+      "content": "<|box_start|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "6": {
+      "content": "<|box_end|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "7": {
+      "content": "<|quad_start|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "8": {
+      "content": "<|quad_end|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "9": {
+      "content": "<|vision_start|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "10": {
+      "content": "<|vision_end|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "11": {
+      "content": "<|vision_pad|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "12": {
+      "content": "<|image_pad|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "13": {
+      "content": "<|video_pad|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "14": {
+      "content": "<|audio_start|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "15": {
+      "content": "<|audio_end|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "16": {
+      "content": "<|audio_pad|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "17": {
+      "content": "<tts_pad>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "18": {
+      "content": "<tts_text_bos>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "19": {
+      "content": "<tts_text_eod>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "20": {
+      "content": "<tts_text_bos_single>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "21": {
+      "content": "<tool_call>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": false
+    },
+    "22": {
+      "content": "</tool_call>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": false
+    },
+    "23": {
+      "content": "<tool_response>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": false
+    },
+    "24": {
+      "content": "</tool_response>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": false
+    },
+    "25": {
+      "content": "<think>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": false
+    },
+    "26": {
+      "content": "</think>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": false
+    },
+    "27": {
+      "content": "<|buffer1|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": false
+    },
+    "28": {
+      "content": "<|buffer2|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": false
+    },
+    "29": {
+      "content": "<|buffer3|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": false
+    },
+    "30": {
+      "content": "<|buffer4|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": false
+    },
+    "31": {
+      "content": "<|buffer5|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": false
+    },
+    "32": {
+      "content": "<|buffer6|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": false
+    },
+    "33": {
+      "content": "<|buffer7|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": false
+    },
+    "34": {
+      "content": "<|buffer8|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": false
+    },
+    "35": {
+      "content": "<|buffer9|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": false
+    }
+  },
+  "additional_special_tokens": [
+    "<|im_start|>",
+    "<|im_end|>",
+    "<|object_ref_start|>",
+    "<|object_ref_end|>",
+    "<|box_start|>",
+    "<|box_end|>",
+    "<|quad_start|>",
+    "<|quad_end|>",
+    "<|vision_start|>",
+    "<|vision_end|>",
+    "<|vision_pad|>",
+    "<|image_pad|>",
+    "<|video_pad|>",
+    "<|audio_start|>",
+    "<|audio_end|>",
+    "<|audio_pad|>",
+    "<tts_pad>",
+    "<tts_text_bos>",
+    "<tts_text_eod>",
+    "<tts_text_bos_single>"
+  ],
+  "audio_bos_token": "<|audio_start|>",
+  "audio_eos_token": "<|audio_end|>",
+  "audio_token": "<|audio_pad|>",
+  "bos_token": "<|im_start|>",
+  "clean_up_tokenization_spaces": false,
+  "eos_token": "<|im_end|>",
+  "extra_special_tokens": {},
+  "image_token": "<|image_pad|>",
+  "legacy": true,
+  "model_max_length": 131072,
+  "pad_token": "<|endoftext|>",
+  "sp_model_kwargs": {},
+  "spaces_between_special_tokens": false,
+  "tokenizer_class": "PreTrainedTokenizerFast",
+  "unk_token": "<|endoftext|>",
+  "video_token": "<|video_pad|>",
+  "vision_bos_token": "<|vision_start|>",
+  "vision_eos_token": "<|vision_end|>"
+}

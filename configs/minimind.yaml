@@ -1,0 +1,14 @@
+# ============================================================
+# Xinhe — MiniMind backbone (64M, 机制验证用)
+# ============================================================
+base: base.yaml
+
+backbone:
+  type: "minimind"
+  model_path: "./models/minimind"
+  weights_path: "./models/minimind/model.safetensors"
+  hidden_size: 768
+  freeze: true
+
+state:
+  state_dim: 768

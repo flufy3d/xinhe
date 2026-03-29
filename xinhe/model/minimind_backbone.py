@@ -2,8 +2,8 @@
 MiniMind Backbone 适配器
 
 包装 MiniMind 的 MiniMindForCausalLM 为统一 backbone 接口。
+架构代码已内置在 model_minimind.py 中，无需外部依赖。
 """
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -12,27 +12,18 @@ import torch.nn as nn
 
 from .backbone import BackboneBase
 from .config import XinheConfig
+from .model_minimind import MiniMindForCausalLM, MiniMindConfig
 
 
 class MiniMindBackbone(nn.Module, BackboneBase):
     """
     MiniMind backbone: 64M 参数，用于机制验证。
-
-    通过 sys.path 动态导入 MiniMind 仓库代码，
-    加载预训练权重后冻结主干参数。
     """
 
     def __init__(self, config: XinheConfig):
         nn.Module.__init__(self)
         self.config = config
         self._hidden_size = config.hidden_size
-
-        # 动态导入 MiniMind 模块
-        minimind_path = str(Path(config.backbone_model_path).resolve())
-        if minimind_path not in sys.path:
-            sys.path.insert(0, minimind_path)
-
-        from model.model_minimind import MiniMindForCausalLM, MiniMindConfig
 
         # 创建 MiniMind 模型
         mm_config = MiniMindConfig()
@@ -41,14 +32,12 @@ class MiniMindBackbone(nn.Module, BackboneBase):
         # 加载预训练权重
         weights_path = Path(config.backbone_weights_path)
         if weights_path.exists():
-            if weights_path.is_dir():
-                pth_files = list(weights_path.glob("*.pth"))
-                if pth_files:
-                    state_dict = torch.load(pth_files[0], map_location="cpu", weights_only=False)
-                    self.model.load_state_dict(state_dict, strict=False)
-            elif weights_path.suffix == ".pth":
+            if weights_path.suffix == ".safetensors":
+                from safetensors.torch import load_file
+                state_dict = load_file(str(weights_path))
+            else:
                 state_dict = torch.load(str(weights_path), map_location="cpu", weights_only=False)
-                self.model.load_state_dict(state_dict, strict=False)
+            self.model.load_state_dict(state_dict, strict=False)
 
         # 冻结主干参数
         if config.freeze_backbone:
