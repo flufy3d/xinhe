@@ -40,7 +40,9 @@ class StatePlugin(nn.Module):
         self.state_emb = nn.Parameter(torch.randn(n_state, state_dim) * 0.01)
 
         # 状态位置编码 (固定位置 0..n_state-1，不随 segment 变化)
+        # 近零初始化: 避免随机位置编码扰乱 backbone 的 attention
         self.state_pos = nn.Embedding(n_state, state_dim)
+        nn.init.normal_(self.state_pos.weight, std=0.01)
 
         # 渐进影响力: sigmoid(state_scale_init) ≈ 0 时状态无影响
         self.state_scale = nn.Parameter(torch.tensor(state_scale_init))

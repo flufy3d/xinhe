@@ -218,15 +218,11 @@ def main():
         # --- 正常对话 ---
         turn_count += 1
 
-        # 构建输入 (关闭 think 模式)
-        if tokenizer.chat_template:
-            messages = [{"role": "user", "content": user_input}]
-            prompt_text = tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True,
-                enable_thinking=False,
-            )
-        else:
-            prompt_text = f"<|im_start|>user\n{user_input}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        # 构建输入 (使用统一的 ChatML 模板，与训练一致)
+        messages = [{"role": "user", "content": user_input}]
+        prompt_text = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True,
+        )
         input_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
         input_tensor = torch.tensor([input_ids], dtype=torch.long, device=device)
 

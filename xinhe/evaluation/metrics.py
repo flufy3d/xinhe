@@ -7,9 +7,36 @@
 3. wipe_degradation — 状态清除后性能下降
 4. timescale_distribution — 快/慢变量分布
 """
+import random
+
 import torch
 import numpy as np
 from typing import Optional
+
+
+# ── 随机姓名生成（与训练数据生成同源） ──
+
+_SURNAMES = [
+    "赵", "钱", "孙", "李", "周", "吴", "郑", "王", "冯", "陈",
+    "褚", "卫", "蒋", "沈", "韩", "杨", "朱", "秦", "尤", "许",
+    "何", "吕", "施", "张", "孔", "曹", "严", "华", "金", "魏",
+    "陶", "姜", "戚", "谢", "邹", "喻", "柏", "水", "窦", "章",
+]
+
+_GIVEN_CHARS = [
+    "伟", "芳", "娜", "秀", "英", "敏", "静", "丽", "强", "磊",
+    "洋", "勇", "艳", "杰", "娟", "涛", "明", "超", "兰", "霞",
+    "平", "刚", "桂", "文", "辉", "玲", "华", "红", "军", "燕",
+    "萍", "建", "春", "琴", "云", "飞", "峰", "凤", "林", "鑫",
+]
+
+
+def _random_name(rng: random.Random) -> str:
+    surname = rng.choice(_SURNAMES)
+    given = rng.choice(_GIVEN_CHARS)
+    if rng.random() < 0.6:
+        given += rng.choice(_GIVEN_CHARS)
+    return surname + given
 
 
 def retention_test(
@@ -27,7 +54,7 @@ def retention_test(
     if device is None:
         device = next(model.parameters()).device
 
-    names = ["小明", "小红", "张三", "李四", "王五"]
+    rng = random.Random(12345)  # 固定种子保证可复现
     fillers = [
         "今天天气怎么样？",
         "给我讲个故事。",
@@ -42,12 +69,16 @@ def retention_test(
         correct = 0
 
         for trial in range(num_trials):
-            name = names[trial % len(names)]
+            name = _random_name(rng)
             state = model.init_state(1).to(device)
 
-            # 第 0 轮: 告知信息
-            text = f"<s>用户：我叫{name}。\n助手：好的，{name}，我记住了。</s>"
-            ids = tokenizer.encode(text, add_special_tokens=False)
+            # 第 0 轮: 告知信息 (ChatML 格式)
+            tell_text = tokenizer.apply_chat_template(
+                [{"role": "user", "content": f"我叫{name}。"},
+                 {"role": "assistant", "content": f"好的，{name}，我记住了。"}],
+                tokenize=False, add_generation_prompt=False,
+            )
+            ids = tokenizer.encode(tell_text, add_special_tokens=False)
             input_tensor = torch.tensor([ids], dtype=torch.long, device=device)
             with torch.no_grad():
                 result = model(input_tensor, state)
@@ -56,16 +87,23 @@ def retention_test(
             # 中间填充 d-1 轮闲聊
             for i in range(d - 1):
                 filler = fillers[i % len(fillers)]
-                text = f"<s>用户：{filler}\n助手：这是一个好问题。</s>"
-                ids = tokenizer.encode(text, add_special_tokens=False)
+                filler_text = tokenizer.apply_chat_template(
+                    [{"role": "user", "content": filler},
+                     {"role": "assistant", "content": "这是一个好问题。"}],
+                    tokenize=False, add_generation_prompt=False,
+                )
+                ids = tokenizer.encode(filler_text, add_special_tokens=False)
                 input_tensor = torch.tensor([ids], dtype=torch.long, device=device)
                 with torch.no_grad():
                     result = model(input_tensor, state)
                     state = result["state_next"]
 
             # 第 d 轮: 查询
-            query = f"<s>用户：我叫什么名字？\n助手："
-            ids = tokenizer.encode(query, add_special_tokens=False)
+            query_text = tokenizer.apply_chat_template(
+                [{"role": "user", "content": "我叫什么名字？"}],
+                tokenize=False, add_generation_prompt=True,
+            )
+            ids = tokenizer.encode(query_text, add_special_tokens=False)
             input_tensor = torch.tensor([ids], dtype=torch.long, device=device)
 
             with torch.no_grad():
@@ -96,27 +134,34 @@ def wipe_degradation(
     if device is None:
         device = next(model.parameters()).device
 
-    names = ["小明", "小红", "张三", "李四", "王五"]
+    rng = random.Random(54321)
     model.eval()
 
     with_state_correct = 0
     without_state_correct = 0
 
     for trial in range(num_trials):
-        name = names[trial % len(names)]
+        name = _random_name(rng)
         state = model.init_state(1).to(device)
 
         # 告知信息
-        text = f"<s>用户：我叫{name}。\n助手：好的，{name}。</s>"
-        ids = tokenizer.encode(text, add_special_tokens=False)
+        tell_text = tokenizer.apply_chat_template(
+            [{"role": "user", "content": f"我叫{name}。"},
+             {"role": "assistant", "content": f"好的，{name}。"}],
+            tokenize=False, add_generation_prompt=False,
+        )
+        ids = tokenizer.encode(tell_text, add_special_tokens=False)
         input_tensor = torch.tensor([ids], dtype=torch.long, device=device)
         with torch.no_grad():
             result = model(input_tensor, state)
             state_after = result["state_next"]
 
         # 查询 (有状态)
-        query = f"<s>用户：我叫什么？\n助手："
-        q_ids = tokenizer.encode(query, add_special_tokens=False)
+        query_text = tokenizer.apply_chat_template(
+            [{"role": "user", "content": "我叫什么？"}],
+            tokenize=False, add_generation_prompt=True,
+        )
+        q_ids = tokenizer.encode(query_text, add_special_tokens=False)
         q_tensor = torch.tensor([q_ids], dtype=torch.long, device=device)
         with torch.no_grad():
             gen, _ = model.generate_with_state(q_tensor, state_after, max_new_tokens=32, temperature=0.1)

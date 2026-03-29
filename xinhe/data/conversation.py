@@ -30,9 +30,8 @@ CHATML_FALLBACK_TEMPLATE = (
 
 
 def ensure_chat_template(tokenizer):
-    """如果 tokenizer 没有 chat_template，设置 ChatML fallback。"""
-    if getattr(tokenizer, "chat_template", None) is None:
-        tokenizer.chat_template = CHATML_FALLBACK_TEMPLATE
+    """强制使用干净的 ChatML 模板，避免 Qwen3 等模型的 <think> 干扰。"""
+    tokenizer.chat_template = CHATML_FALLBACK_TEMPLATE
 
 
 def tokenize_turn(
@@ -40,14 +39,17 @@ def tokenize_turn(
     user_content: str,
     assistant_content: str,
     segment_length: int,
+    compute_loss: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     将一轮 user+assistant 对话 tokenize 为 (input_ids, labels)。
 
     - 用 apply_chat_template 两步确定 assistant 起始位置
     - labels: user/template 部分 = -100, assistant 部分 = 实际 token id, padding = -100
+    - compute_loss=False 时，整个 segment 的 labels 全为 -100（不参与 loss 计算）
     """
     # Step 1: tokenize user 部分 + generation prompt → 得到 prefix 长度
+    # 使用强制设置的 ChatML 模板，无 <think> 干扰
     prefix_text = tokenizer.apply_chat_template(
         [{"role": "user", "content": user_content}],
         tokenize=False,
@@ -68,8 +70,13 @@ def tokenize_turn(
 
     prefix_len = len(prefix_ids)
 
-    # 构建 labels: prefix 部分 -100, assistant 部分保留
-    labels = [-100] * prefix_len + full_ids[prefix_len:]
+    # 构建 labels
+    if compute_loss:
+        # 正常: prefix 部分 -100, assistant 部分保留
+        labels = [-100] * prefix_len + full_ids[prefix_len:]
+    else:
+        # 整个 segment 不参与 loss
+        labels = [-100] * len(full_ids)
 
     # 截断
     if len(full_ids) > segment_length:
@@ -140,14 +147,14 @@ class ConversationDataset(Dataset):
 
         for i in range(0, len(conversations) - 1, 2):
             user_msg = conversations[i].get("content", "")
-            assistant_msg = (
-                conversations[i + 1].get("content", "")
-                if i + 1 < len(conversations)
-                else ""
-            )
+            asst_entry = conversations[i + 1] if i + 1 < len(conversations) else {}
+            assistant_msg = asst_entry.get("content", "")
+            # train_loss 字段控制该 segment 是否参与 loss 计算（默认 True）
+            compute_loss = asst_entry.get("train_loss", True)
 
             segment = tokenize_turn(
-                self.tokenizer, user_msg, assistant_msg, self.segment_length
+                self.tokenizer, user_msg, assistant_msg, self.segment_length,
+                compute_loss=compute_loss,
             )
             segments.append(segment)
 

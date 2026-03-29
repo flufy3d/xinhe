@@ -122,7 +122,7 @@ class Trainer:
         state = self.model.init_state(B).to(self.device)
         accumulated_loss = torch.tensor(0.0, device=self.device)
         episode_total_loss = 0.0
-        steps_in_window = 0
+        loss_segments = 0  # 只计数有真实 loss 的 segment
 
         for seg_idx, (segment, labels) in enumerate(episode_segments):
             segment = segment.to(self.device)
@@ -131,8 +131,8 @@ class Trainer:
             # 截断 BPTT: 每 tbptt_steps 切断梯度
             if seg_idx > 0 and seg_idx % self.config.tbptt_steps == 0:
                 # 先做 backward + step
-                if steps_in_window > 0:
-                    avg_loss = accumulated_loss / steps_in_window
+                if loss_segments > 0:
+                    avg_loss = accumulated_loss / loss_segments
                     avg_loss.backward()
                     torch.nn.utils.clip_grad_norm_(
                         self.model.get_trainable_params(),
@@ -148,28 +148,35 @@ class Trainer:
                     if self.global_step % self.config.log_every == 0:
                         lr = self.scheduler.get_last_lr()[0]
                         scale = torch.sigmoid(self.model.plugin.state_scale).item()
-                        print(f"  [Step {self.global_step}] loss={avg_loss.item():.4f} lr={lr:.2e} scale={scale:.4f}")
+                        print(f"  [Step {self.global_step}] loss={avg_loss.item():.6f} lr={lr:.2e} scale={scale:.4f}")
 
                     # 保存 checkpoint
                     if self.global_step % self.config.save_every == 0:
                         self._save_checkpoint()
+                elif seg_idx > 0:
+                    # 没有 loss segment 但需要推进 step（避免卡住）
+                    self.optimizer.zero_grad()
 
                 # 切断梯度
                 state = state.detach()
                 accumulated_loss = torch.tensor(0.0, device=self.device)
-                steps_in_window = 0
+                loss_segments = 0
 
             # Forward
             with torch.amp.autocast("cuda", dtype=self.dtype):
                 result = self.model(segment, state, labels=labels)
 
             state = result["state_next"]
-            accumulated_loss = accumulated_loss + result["loss"]
-            steps_in_window += 1
+            seg_loss = result["loss"]
+            accumulated_loss = accumulated_loss + seg_loss
+            # 只有真正有 loss 的 segment 才计数
+            has_valid_labels = (labels != -100).any()
+            if has_valid_labels:
+                loss_segments += 1
 
         # 处理剩余的 accumulated loss
-        if steps_in_window > 0:
-            avg_loss = accumulated_loss / steps_in_window
+        if loss_segments > 0:
+            avg_loss = accumulated_loss / loss_segments
             avg_loss.backward()
             torch.nn.utils.clip_grad_norm_(
                 self.model.get_trainable_params(),
@@ -184,10 +191,13 @@ class Trainer:
             if self.global_step % self.config.log_every == 0:
                 lr = self.scheduler.get_last_lr()[0]
                 scale = torch.sigmoid(self.model.plugin.state_scale).item()
-                print(f"  [Step {self.global_step}] loss={avg_loss.item():.4f} lr={lr:.2e} scale={scale:.4f}")
+                print(f"  [Step {self.global_step}] loss={avg_loss.item():.6f} lr={lr:.2e} scale={scale:.4f}")
 
             if self.global_step % self.config.save_every == 0:
                 self._save_checkpoint()
+        else:
+            # 整个 episode 没有有效 loss（不应该发生，但安全处理）
+            self.optimizer.zero_grad()
 
         return episode_total_loss
 

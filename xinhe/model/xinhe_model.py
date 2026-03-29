@@ -105,11 +105,16 @@ class XinheModel(nn.Module):
             # 标准 next-token prediction: logits[:, :-1] vs labels[:, 1:]
             shift_logits = logits[:, :-1, :].contiguous()
             shift_labels = labels[:, 1:].contiguous()
-            loss = F.cross_entropy(
-                shift_logits.view(-1, shift_logits.size(-1)),
-                shift_labels.view(-1),
-                ignore_index=-100,
-            )
+            # 当所有 labels 都是 -100 时 (如非 recall segment)，loss 设为 0 避免 NaN
+            valid_count = (shift_labels != -100).sum()
+            if valid_count > 0:
+                loss = F.cross_entropy(
+                    shift_logits.view(-1, shift_logits.size(-1)),
+                    shift_labels.view(-1),
+                    ignore_index=-100,
+                )
+            else:
+                loss = torch.tensor(0.0, device=logits.device, requires_grad=True)
             result["loss"] = loss
 
         return result
@@ -150,6 +155,7 @@ class XinheModel(nn.Module):
         temperature: float = 0.85,
         top_p: float = 0.95,
         eos_token_id: Optional[int] = None,
+        repetition_penalty: float = 1.2,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         带状态的文本生成 (自回归)。
@@ -161,6 +167,7 @@ class XinheModel(nn.Module):
             temperature: 采样温度
             top_p: nucleus sampling
             eos_token_id: 终止 token id
+            repetition_penalty: 重复惩罚 (>1.0 抑制重复)
 
         返回:
             generated_ids: (B, T + new_tokens) 生成的完整序列
@@ -170,20 +177,29 @@ class XinheModel(nn.Module):
         B = input_ids.shape[0]
         generated = input_ids.clone()
 
-        # 先做一次完整 forward 获取状态更新和首个 logits
+        # 用输入 state 做 forward，获取首个 logits
+        # 注意：生成过程中 state 保持不变，模拟训练时一个 segment 一次 forward 的行为
         result = self.forward(input_ids, state)
-        state = result["state_next"]
         next_logits = result["logits"][:, -1, :]  # (B, V)
 
         for _ in range(max_new_tokens):
-            # 采样
+            # 重复惩罚: 降低已出现 token 的概率
+            if repetition_penalty != 1.0:
+                for b in range(B):
+                    prev_tokens = generated[b].unique()
+                    for token_id in prev_tokens:
+                        if next_logits[b, token_id] > 0:
+                            next_logits[b, token_id] /= repetition_penalty
+                        else:
+                            next_logits[b, token_id] *= repetition_penalty
+
+            # 温度缩放
             next_logits = next_logits / temperature
 
             # Top-p (nucleus) sampling
             if top_p < 1.0:
                 sorted_logits, sorted_indices = torch.sort(next_logits, descending=True)
                 cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-                # 移除累积概率超过 top_p 的 token
                 sorted_indices_to_remove = cumulative_probs > top_p
                 sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
                 sorted_indices_to_remove[:, 0] = False
@@ -198,13 +214,16 @@ class XinheModel(nn.Module):
             if eos_token_id is not None and (next_token == eos_token_id).all():
                 break
 
-            # 用完整已生成序列做 forward（保持 causal attention 上下文）
-            # 注意：不用 KV cache，每步重新编码全序列，O(n²) 但保证正确性
+            # 用完整已生成序列 + 原始 state 重新 forward
+            # state 不在生成循环中更新，避免信息被反复覆盖
             result = self.forward(generated, state)
-            state = result["state_next"]
             next_logits = result["logits"][:, -1, :]
 
-        return generated, state
+        # 最终用完整序列 + 原始 state 做一次 forward，得到本轮结束后的 state
+        result = self.forward(generated, state)
+        state_next = result["state_next"]
+
+        return generated, state_next
 
     def get_trainable_params(self) -> list[nn.Parameter]:
         """收集所有可训练参数 (StatePlugin + LoRA)"""
