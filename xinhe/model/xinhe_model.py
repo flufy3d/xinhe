@@ -122,6 +122,16 @@ class XinheModel(nn.Module):
 
         return result
 
+    def setup_device(self, device: torch.device):
+        """
+        单卡: 整个模型移到 device。
+        多卡: backbone 已由 device_map 分配，只移 plugin。
+        """
+        if torch.cuda.device_count() > 1:
+            self.plugin.to(device)
+        else:
+            self.to(device)
+
     def init_state(self, batch_size: int = 1) -> torch.Tensor:
         """创建空白初始状态"""
         device = next(self.parameters()).device

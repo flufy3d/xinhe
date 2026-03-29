@@ -25,12 +25,13 @@ class QwenBackbone(nn.Module, BackboneBase):
         nn.Module.__init__(self)
         self.config = config
 
-        # 加载 Qwen 模型，device_map="auto" 自动分配到多卡
+        # 多卡时用 device_map="auto" 分散显存，单卡不用（避免 accelerate 把层放到 CPU）
+        device_map = "auto" if torch.cuda.device_count() > 1 else None
         self.model = AutoModelForCausalLM.from_pretrained(
             config.backbone_model_path,
             dtype=torch.bfloat16,
             trust_remote_code=True,
-            device_map="auto",
+            device_map=device_map,
         )
         self._hidden_size = self.model.config.hidden_size
 
