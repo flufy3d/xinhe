@@ -86,13 +86,12 @@ class StatePlugin(nn.Module):
         """
         B, T, D = content_emb.shape
 
-        # 渐进影响力
+        # 渐进影响力: scale 同时作用于状态值和 attention mask
         scale = torch.sigmoid(self.state_scale)
-        scaled_state = state * scale
 
-        # 加状态位置编码
+        # 1) 状态值缩放 (数值稳定性)
         pos_ids = torch.arange(self.n_state, device=state.device)
-        state_with_pos = scaled_state + self.state_pos(pos_ids).unsqueeze(0)
+        state_with_pos = (state + self.state_pos(pos_ids).unsqueeze(0)) * scale
 
         # 对齐 dtype (Qwen=bfloat16, StatePlugin=float32)
         state_with_pos = state_with_pos.to(dtype=content_emb.dtype)
@@ -100,8 +99,13 @@ class StatePlugin(nn.Module):
         # 拼接: [状态 | 内容]
         hidden_states = torch.cat([state_with_pos, content_emb], dim=1)
 
-        # 构建 attention mask
+        # 2) Attention mask: content→state 通过 attention bias 门控
+        #    乘以 4 确保 bias 足够大 (layer norm 会放大 state token 的值)
+        #    scale_init=-5 时 bias≈-20，content 几乎看不到 state
+        #    scale→1 时 bias→0，content 正常看到 state
         mask = self.build_mask(self.n_state, T, device=content_emb.device, dtype=content_emb.dtype)
+        mask = mask.clone()
+        mask[:, :, self.n_state:, :self.n_state] = torch.log(scale + 1e-8) * 4
 
         return hidden_states, mask
 
@@ -145,6 +149,7 @@ class StatePlugin(nn.Module):
         self,
         backbone_forward_fn,
         state: torch.Tensor,
+        backbone_dtype: torch.dtype = None,
     ) -> torch.Tensor:
         """
         Sleep pass: 无内容输入，状态 token 只看到彼此。
@@ -158,13 +163,14 @@ class StatePlugin(nn.Module):
         """
         B = state.shape[0]
 
-        # 渐进影响力
+        # 渐进影响力: scale 同时作用于状态和位置编码
         scale = torch.sigmoid(self.state_scale)
-        scaled_state = state * scale
-
-        # 加位置编码
         pos_ids = torch.arange(self.n_state, device=state.device)
-        state_with_pos = scaled_state + self.state_pos(pos_ids).unsqueeze(0)
+        state_with_pos = (state + self.state_pos(pos_ids).unsqueeze(0)) * scale
+
+        # 对齐 dtype (Qwen=bfloat16, StatePlugin=float32)
+        if backbone_dtype is not None:
+            state_with_pos = state_with_pos.to(dtype=backbone_dtype)
 
         # Sleep mask: 全双向 (状态 token 互相可见)
         mask = torch.zeros(

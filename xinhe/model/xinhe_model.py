@@ -125,9 +125,12 @@ class XinheModel(nn.Module):
         返回:
             state_next: (B, n_state, D) sleep 后的状态
         """
+        # 推断 backbone dtype (Qwen=bfloat16, MiniMind=float32)
+        backbone_dtype = next(self.backbone.parameters()).dtype
         return self.plugin.sleep_forward(
             backbone_forward_fn=self.backbone.forward_blocks,
             state=state,
+            backbone_dtype=backbone_dtype,
         )
 
     def init_state(self, batch_size: int = 1) -> torch.Tensor:
@@ -214,9 +217,9 @@ class XinheModel(nn.Module):
             if eos_token_id is not None and (next_token == eos_token_id).all():
                 break
 
-            # 用新 token 做 forward（单 token 输入 + 状态）
-            # 注意：这里每次只输入最新的 token，状态携带之前的全部信息
-            result = self.forward(next_token, state)
+            # 用完整已生成序列做 forward（保持 causal attention 上下文）
+            # 注意：不用 KV cache，每步重新编码全序列，O(n²) 但保证正确性
+            result = self.forward(generated, state)
             state = result["state_next"]
             next_logits = result["logits"][:, -1, :]
 

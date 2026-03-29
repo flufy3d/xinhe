@@ -21,7 +21,7 @@ class XinheConfig:
     # --- 持久状态 ---
     n_state: int = 32               # 状态 token 数
     state_dim: int = 768            # 状态维度 (= hidden_size)
-    state_scale_init: float = 0.0   # sigmoid(0) ≈ 0.5，用 -5.0 则 ≈ 0.007
+    state_scale_init: float = -5.0  # sigmoid(-5) ≈ 0.007，空状态几乎无影响
     gate_bias_init: float = 0.0     # gate 静态偏置初始值
 
     # --- Sleep ---

@@ -139,6 +139,10 @@ def test_generate(model):
     assert generated.shape[1] > input_ids.shape[1]
     assert new_state.shape == state.shape
 
+    # 生成的 token 不应全部相同（排除乱码退化）
+    new_tokens = generated[0, input_ids.shape[1]:]
+    assert not (new_tokens == new_tokens[0]).all(), "生成的 token 全部相同，可能退化"
+
 
 def test_trainable_params(model):
     """可训练参数数量 > 0"""

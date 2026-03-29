@@ -6,7 +6,7 @@
 # --- StatePlugin ---
 state:
   n_state: 32
-  state_scale_init: 0.0
+  state_scale_init: -5.0
   gate_bias_init: 0.0
 
 # --- Sleep ---
