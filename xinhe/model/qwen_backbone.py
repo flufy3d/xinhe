@@ -28,7 +28,7 @@ class QwenBackbone(nn.Module, BackboneBase):
         # 加载 Qwen 模型
         self.model = AutoModelForCausalLM.from_pretrained(
             config.backbone_model_path,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             trust_remote_code=True,
         )
         self._hidden_size = self.model.config.hidden_size
@@ -46,19 +46,19 @@ class QwenBackbone(nn.Module, BackboneBase):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        # Qwen 使用 RoPE，需要构建 position_ids
+        # Qwen 使用 RoPE，需要构建 position embeddings
         seq_len = hidden_states.shape[1]
         device = hidden_states.device
         position_ids = torch.arange(seq_len, device=device).unsqueeze(0)
+        position_embeddings = self.model.model.rotary_emb(hidden_states, position_ids)
 
         # 逐层跑 transformer blocks
         for layer in self.model.model.layers:
-            layer_output = layer(
+            hidden_states = layer(
                 hidden_states,
                 attention_mask=attention_mask,
-                position_ids=position_ids,
+                position_embeddings=position_embeddings,
             )
-            hidden_states = layer_output[0]
 
         hidden_states = self.model.model.norm(hidden_states)
         return hidden_states

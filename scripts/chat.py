@@ -34,20 +34,10 @@ STATES_DIR = Path("saved_states")
 
 
 def load_tokenizer(config: XinheConfig):
-    """加载 MiniMind tokenizer"""
-    minimind_path = Path(config.backbone_model_path).resolve()
-    try:
-        from transformers import AutoTokenizer
-        return AutoTokenizer.from_pretrained(str(minimind_path / "model"))
-    except Exception:
-        pass
-    try:
-        sys.path.insert(0, str(minimind_path))
-        from model.tokenizer import Tokenizer
-        return Tokenizer(str(minimind_path / "model" / "tokenizer.json"))
-    except Exception:
-        pass
-    raise RuntimeError(f"无法加载 tokenizer: {minimind_path}")
+    """加载 tokenizer"""
+    model_path = Path(config.backbone_model_path).resolve()
+    from transformers import AutoTokenizer
+    return AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
 
 
 def print_stats(model: XinheModel, state: torch.Tensor):
@@ -232,17 +222,20 @@ def main():
         # --- 正常对话 ---
         turn_count += 1
 
-        # 构建输入 (对话格式)
-        prompt_text = f"<s>用户：{user_input}\n助手："
+        # 构建输入 (关闭 think 模式)
+        if tokenizer.chat_template:
+            messages = [{"role": "user", "content": user_input}]
+            prompt_text = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True,
+                enable_thinking=False,
+            )
+        else:
+            prompt_text = f"<|im_start|>user\n{user_input}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
         input_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
         input_tensor = torch.tensor([input_ids], dtype=torch.long, device=device)
 
-        # 获取 eos token id
-        eos_id = getattr(tokenizer, 'eos_token_id', None)
-        # MiniMind 可能用 </s> 或其他特殊 token
-        if eos_id is None:
-            eos_id = tokenizer.encode("</s>", add_special_tokens=False)
-            eos_id = eos_id[0] if eos_id else None
+        # eos token id
+        eos_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
 
         # 生成回复
         with torch.no_grad():

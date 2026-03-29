@@ -94,6 +94,9 @@ class StatePlugin(nn.Module):
         pos_ids = torch.arange(self.n_state, device=state.device)
         state_with_pos = scaled_state + self.state_pos(pos_ids).unsqueeze(0)
 
+        # 对齐 dtype (Qwen=bfloat16, StatePlugin=float32)
+        state_with_pos = state_with_pos.to(dtype=content_emb.dtype)
+
         # 拼接: [状态 | 内容]
         hidden_states = torch.cat([state_with_pos, content_emb], dim=1)
 
@@ -122,8 +125,8 @@ class StatePlugin(nn.Module):
         state_raw = output[:, :self.n_state, :]      # (B, n_state, D)
         content_output = output[:, self.n_state:, :]  # (B, T, D)
 
-        # 输出投影
-        state_new = self.state_out_proj(state_raw)    # (B, n_state, D)
+        # 输出投影 (对齐 dtype: backbone 输出可能是 bfloat16，plugin 参数是 float32)
+        state_new = self.state_out_proj(state_raw.to(self.state_out_proj.weight.dtype))
 
         # --- 双层 Gate ---
         # 拼接旧状态和新状态: 模型看到 "我有什么" 和 "来了什么新的"
@@ -166,15 +169,16 @@ class StatePlugin(nn.Module):
         # Sleep mask: 全双向 (状态 token 互相可见)
         mask = torch.zeros(
             1, 1, self.n_state, self.n_state,
-            device=state.device, dtype=state.dtype,
+            device=state.device, dtype=state_with_pos.dtype,
         )
 
         # 通过 backbone
         output = backbone_forward_fn(state_with_pos, mask)
 
-        # 用 gate 更新
-        state_new = self.state_out_proj(output)
-        combined = torch.cat([state, state_new], dim=-1)
+        # 用 gate 更新 (对齐 dtype)
+        plugin_dtype = self.state_out_proj.weight.dtype
+        state_new = self.state_out_proj(output.to(plugin_dtype))
+        combined = torch.cat([state.to(plugin_dtype), state_new], dim=-1)
         dynamic_logit = self.gate_proj(combined)
         gate = torch.sigmoid(self.gate_bias.unsqueeze(0) + dynamic_logit)
         state_next = gate * state + (1 - gate) * state_new

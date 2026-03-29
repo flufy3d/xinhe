@@ -56,20 +56,20 @@ class MiniMindBackbone(nn.Module, BackboneBase):
         device = hidden_states.device
 
         past_key_values = [None] * len(self.model.model.layers)
-        total_aux_loss = torch.tensor(0.0, device=device)
 
         for i, layer in enumerate(self.model.model.layers):
-            position_embeddings = self.model.model.pos_cis(hidden_states, seq_len=seq_len)
+            position_embeddings = (
+                self.model.model.freqs_cos[:seq_len],
+                self.model.model.freqs_sin[:seq_len],
+            )
 
-            hidden_states, past_kv, aux_loss = layer(
+            hidden_states, past_kv = layer(
                 hidden_states,
                 position_embeddings=position_embeddings,
                 past_key_value=past_key_values[i],
                 use_cache=False,
                 attention_mask=attention_mask,
             )
-            if aux_loss is not None:
-                total_aux_loss = total_aux_loss + aux_loss
 
         hidden_states = self.model.model.norm(hidden_states)
         return hidden_states

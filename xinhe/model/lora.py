@@ -46,11 +46,12 @@ class LoRALinear(nn.Module):
             self.original.bias.requires_grad = False
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # 原始输出
-        result = self.original(x)
+        # 原始输出 (对齐 dtype，Qwen 权重可能是 bfloat16)
+        orig_dtype = x.dtype
+        result = self.original(x.to(self.original.weight.dtype))
         # LoRA 增量: x → dropout → A → B → scale
-        lora_out = self.dropout(x) @ self.lora_A.T @ self.lora_B.T * self.scaling
-        return result + lora_out
+        lora_out = self.dropout(x) @ self.lora_A.to(x.dtype).T @ self.lora_B.to(x.dtype).T * self.scaling
+        return (result + lora_out).to(orig_dtype)
 
 
 def inject_lora(
