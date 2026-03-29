@@ -95,11 +95,8 @@ uv sync
 ### 生成训练数据
 
 ```bash
-# 1轮记忆（milestone 3 验证）: 告知→立刻回忆，episode 4轮
-python scripts/generate_memory_data.py --num-train 2000 --num-val 200 --max-turns 4 --max-distance 1
-
-# 多轮记忆（milestone 4+）: 更大间隔，更长 episode
-python scripts/generate_memory_data.py --num-train 5000 --num-val 500 --max-turns 16 --max-distance 6
+# 多轮记忆 + 覆写（milestone 4/5）: 距离1~10，含20%覆写episode，14轮/episode
+python scripts/generate_memory_data.py --num-train 5000 --num-val 500 --max-turns 14 --max-distance 10
 
 # 预览数据（不写文件）
 python scripts/generate_memory_data.py --preview 3
