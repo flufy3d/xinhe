@@ -40,14 +40,15 @@ def load_model_and_tokenizer(config, checkpoint_path, device):
     model.eval()
 
     # 加载 tokenizer
-    minimind_path = Path(config.backbone_model_path).resolve()
-    try:
-        from transformers import AutoTokenizer
-        tokenizer = AutoTokenizer.from_pretrained(str(minimind_path / "model"))
-    except Exception:
-        sys.path.insert(0, str(minimind_path))
-        from model.tokenizer import Tokenizer
-        tokenizer = Tokenizer(str(minimind_path / "model" / "tokenizer.json"))
+    from transformers import AutoTokenizer
+    from xinhe.data.conversation import ensure_chat_template
+    tokenizer = AutoTokenizer.from_pretrained(
+        str(Path(config.backbone_model_path).resolve()),
+        trust_remote_code=True,
+    )
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+    ensure_chat_template(tokenizer)
 
     return model, tokenizer
 
@@ -72,7 +73,7 @@ def main():
     # 记忆保留测试
     if args.test in ("all", "retention"):
         print("\n[1/3] 记忆保留测试...")
-        ret = retention_test(model, tokenizer, distances=[1, 2, 4, 8], device=device)
+        ret = retention_test(model, tokenizer, distances=[1, 2, 4, 6, 8, 10], device=device)
         print("  距离 → 准确率:")
         for d, acc in ret.items():
             bar = "█" * int(acc * 20) + "░" * (20 - int(acc * 20))

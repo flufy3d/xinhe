@@ -277,6 +277,11 @@ class Trainer:
 
         if "optimizer_state" in checkpoint:
             self.optimizer.load_state_dict(checkpoint["optimizer_state"])
+            # 将 optimizer state 搬到正确设备
+            for state in self.optimizer.state.values():
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor):
+                        state[k] = v.to(self.device)
         if "scheduler_state" in checkpoint:
             self.scheduler.load_state_dict(checkpoint["scheduler_state"])
 
