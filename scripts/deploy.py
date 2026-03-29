@@ -12,7 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-REMOTE_DIR = "/root/xinhe"
+REMOTE_DIR = "/root/workspace/xinhe"
 SCRIPT_DIR = Path(__file__).parent.parent
 
 
@@ -44,31 +44,31 @@ def main():
     print(f"  远端: {REMOTE_DIR}")
     print("=" * 54)
 
-    # 获取 git remote
-    result = subprocess.run(
-        ["git", "-C", str(SCRIPT_DIR), "remote", "get-url", "origin"],
-        capture_output=True, text=True
-    )
-    repo_url = result.stdout.strip()
-
-    # ── 1. clone / pull 代码 ────────────────────────────────
+    # ── 1. 同步代码 ─────────────────────────────────────────
     print("\n[1/3] 同步代码...")
-    remote_script = f"""
-if [ -d {REMOTE_DIR}/.git ]; then
-    echo '已有仓库，pull 最新...'
-    cd {REMOTE_DIR} && git pull --rebase
-else
-    echo '克隆仓库...'
-    git clone {repo_url} {REMOTE_DIR}
-fi
-"""
-    run(ssh_cmd(host, port) + [remote_script])
+    run(ssh_cmd(host, port) + [f"mkdir -p {REMOTE_DIR}"])
+    tar_proc = subprocess.Popen(
+        ["tar", "-czf", "-",
+         "--exclude=__pycache__", "--exclude=*.pyc", "--exclude=*.pyo",
+         "xinhe", "scripts", "configs", "tests", "pyproject.toml", "uv.lock"],
+        stdout=subprocess.PIPE,
+        cwd=str(SCRIPT_DIR),
+    )
+    ssh_proc = subprocess.Popen(
+        ssh_cmd(host, port) + [f"tar -xzf - -C {REMOTE_DIR}"],
+        stdin=tar_proc.stdout,
+    )
+    tar_proc.stdout.close()
+    ssh_proc.wait()
+    tar_proc.wait()
 
     # ── 2. 同步模型权重 ─────────────────────────────────────
-    print("\n[2/3] 同步模型权重 (~1.5G，首次较慢)...")
-    run(ssh_cmd(host, port) + [f"mkdir -p {REMOTE_DIR}/models"])
-    run(["scp", "-r", "-P", port, "-o", "StrictHostKeyChecking=no",
-         str(SCRIPT_DIR / "models"), f"{host}:{REMOTE_DIR}/"])
+    print("\n[2/3] 同步模型权重...")
+    run(ssh_cmd(host, port) + [
+        f"mkdir -p {REMOTE_DIR}/models && "
+        f"ln -sfn /root/public-storage/model/Qwen/Qwen3-0.6B {REMOTE_DIR}/models/qwen3-0.6b"
+    ])
+    print("  qwen3-0.6b -> 软链接自 public-storage")
 
     # ── 3. 远端：uv sync + 生成数据 ─────────────────────────
     print("\n[3/3] 远端初始化...")
