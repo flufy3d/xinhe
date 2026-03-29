@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""
+部署脚本 - 同步代码和模型权重到远端 GPU 服务器
+
+用法:
+    python deploy.py "ssh -p 33269 root@cn-north-b.ssh.damodel.com"
+    python deploy.py root@cn-north-b.ssh.damodel.com 33269
+"""
+import argparse
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+REMOTE_DIR = "/root/xinhe"
+SCRIPT_DIR = Path(__file__).parent.parent
+
+
+def run(cmd: list[str], check=True):
+    print(f"  $ {' '.join(cmd)}")
+    return subprocess.run(cmd, check=check)
+
+
+def ssh_cmd(host, port):
+    return ["ssh", "-p", port, "-o", "StrictHostKeyChecking=no", host]
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("target", help="SSH 地址，如 'ssh -p 33269 root@host' 或 'root@host'")
+    parser.add_argument("port", nargs="?", default="22")
+    args = parser.parse_args()
+
+    # 解析 host / port
+    m = re.search(r"-p\s+(\d+)\s+(\S+)", args.target)
+    if m:
+        port, host = m.group(1), m.group(2)
+    else:
+        host = args.target
+        port = args.port
+
+    print("=" * 54)
+    print(f"  目标: {host}:{port}")
+    print(f"  远端: {REMOTE_DIR}")
+    print("=" * 54)
+
+    # 获取 git remote
+    result = subprocess.run(
+        ["git", "-C", str(SCRIPT_DIR), "remote", "get-url", "origin"],
+        capture_output=True, text=True
+    )
+    repo_url = result.stdout.strip()
+
+    # ── 1. clone / pull 代码 ────────────────────────────────
+    print("\n[1/3] 同步代码...")
+    remote_script = f"""
+if [ -d {REMOTE_DIR}/.git ]; then
+    echo '已有仓库，pull 最新...'
+    cd {REMOTE_DIR} && git pull --rebase
+else
+    echo '克隆仓库...'
+    git clone {repo_url} {REMOTE_DIR}
+fi
+"""
+    run(ssh_cmd(host, port) + [remote_script])
+
+    # ── 2. 同步模型权重 ─────────────────────────────────────
+    print("\n[2/3] 同步模型权重 (~1.5G，首次较慢)...")
+    run(ssh_cmd(host, port) + [f"mkdir -p {REMOTE_DIR}/models"])
+    run(["scp", "-r", "-P", port, "-o", "StrictHostKeyChecking=no",
+         str(SCRIPT_DIR / "models"), f"{host}:{REMOTE_DIR}/"])
+
+    # ── 3. 远端：uv sync + 生成数据 ─────────────────────────
+    print("\n[3/3] 远端初始化...")
+    init_script = f"""
+set -e
+cd {REMOTE_DIR}
+echo '--- 安装依赖 ---'
+uv sync
+echo '--- 生成训练数据 ---'
+uv run python -X utf8 scripts/generate_memory_data.py \
+    --num-train 5000 --num-val 500 \
+    --max-turns 14 --min-distance 1 --max-distance 10
+"""
+    run(ssh_cmd(host, port) + [init_script])
+
+    print("\n" + "=" * 54)
+    print("  部署完成！ssh 进去开始训练：")
+    print(f"  ssh -p {port} {host}")
+    print(f"  cd {REMOTE_DIR} && uv run python scripts/train.py")
+    print("=" * 54)
+
+
+if __name__ == "__main__":
+    main()
