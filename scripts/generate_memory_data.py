@@ -479,6 +479,7 @@ def generate_data(
     no_pre_filler: bool = False,
     max_pre_filler: int = 3,
     no_overwrite: bool = False,
+    overwrite_ratio: float = 0.4,
     seed: int = 42,
 ):
     """
@@ -488,7 +489,8 @@ def generate_data(
     """
     active_fillers = FILLERS[:num_fillers] if num_fillers > 0 else FILLERS
     use_pre_filler = not no_pre_filler
-    overwrite_ratio = 0.0 if no_overwrite else 0.2
+    if no_overwrite:
+        overwrite_ratio = 0.0
 
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
