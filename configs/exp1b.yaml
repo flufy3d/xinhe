@@ -1,0 +1,13 @@
+# 实验 1B: M3 参数 + 随机 tell 位置 (tell 位置随机化测试)
+base: qwen3-0.6b.yaml
+
+training:
+  episode_length: 5
+  tbptt_steps: 5
+  batch_size: 2
+  grad_accum_steps: 2
+  max_steps: 5000
+
+data:
+  train_path: "./data/exp1b/train.jsonl"
+  val_path: "./data/exp1b/val.jsonl"

@@ -41,6 +41,7 @@ def main():
     parser = argparse.ArgumentParser(description="心核 (Xinhe) 训练")
     parser.add_argument("--config", type=str, default="configs/base.yaml", help="配置文件路径")
     parser.add_argument("--resume", type=str, default=None, help="从 checkpoint 恢复")
+    parser.add_argument("--reset-step", action="store_true", help="恢复权重但重置 step 和优化器（用于课程学习）")
     args = parser.parse_args()
 
     # 加载配置
@@ -97,9 +98,19 @@ def main():
     # 创建 trainer
     trainer = Trainer(model, config, train_loader, val_loader)
 
-    # 从 checkpoint 恢复
-    if args.resume:
-        trainer.load_checkpoint(args.resume)
+    # 从 checkpoint 恢复 (命令行优先，否则读 config)
+    resume_path = args.resume or (config.resume_from if config.resume_from else None)
+    if resume_path:
+        trainer.load_checkpoint(resume_path)
+        if args.reset_step:
+            trainer.global_step = 0
+            trainer.optimizer = torch.optim.AdamW(
+                model.get_trainable_params(),
+                lr=config.learning_rate,
+                weight_decay=config.weight_decay,
+            )
+            trainer.scheduler = trainer._build_scheduler()
+            print(f"[课程学习] 已重置 step=0, 优化器和调度器已重建")
 
     # 开始训练
     trainer.train()

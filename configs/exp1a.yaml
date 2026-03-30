@@ -1,0 +1,12 @@
+# 实验 1A: M3 参数 + 305 fillers (filler 多样性测试)
+base: qwen3-0.6b.yaml
+
+training:
+  episode_length: 4
+  tbptt_steps: 4
+  batch_size: 4
+  max_steps: 5000
+
+data:
+  train_path: "./data/exp1a/train.jsonl"
+  val_path: "./data/exp1a/val.jsonl"

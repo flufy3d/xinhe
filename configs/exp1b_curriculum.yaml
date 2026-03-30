@@ -1,0 +1,15 @@
+# 课程学习: 从 1A checkpoint 继续，训练随机 tell 位置
+base: qwen3-0.6b.yaml
+
+training:
+  episode_length: 5
+  tbptt_steps: 5
+  batch_size: 2
+  grad_accum_steps: 2
+  learning_rate: 1.0e-4
+  max_steps: 5000
+  resume_from: "checkpoints/backup/xinhe_305_fillers.pt"
+
+data:
+  train_path: "./data/exp1b/train.jsonl"
+  val_path: "./data/exp1b/val.jsonl"

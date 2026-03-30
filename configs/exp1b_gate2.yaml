@@ -1,0 +1,16 @@
+# 实验 1B + gate_bias=2.0 (随机 tell + 高保留率 gate)
+base: qwen3-0.6b.yaml
+
+training:
+  episode_length: 5
+  tbptt_steps: 5
+  batch_size: 2
+  grad_accum_steps: 2
+  max_steps: 5000
+
+data:
+  train_path: "./data/exp1b/train.jsonl"
+  val_path: "./data/exp1b/val.jsonl"
+
+state:
+  gate_bias_init: 2.0

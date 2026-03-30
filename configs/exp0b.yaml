@@ -1,0 +1,12 @@
+# 实验 0b: M3 exact + batch_size=1 (诊断 batch size 影响)
+base: qwen3-0.6b.yaml
+
+training:
+  episode_length: 4
+  tbptt_steps: 4
+  batch_size: 1
+  max_steps: 5000
+
+data:
+  train_path: "./data/exp0b/train.jsonl"
+  val_path: "./data/exp0b/val.jsonl"

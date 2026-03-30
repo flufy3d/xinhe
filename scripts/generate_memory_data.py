@@ -329,19 +329,24 @@ def generate_episode(
     max_distance: int = 4,
     max_turns: int = 16,
     num_facts: int = 1,
+    fillers: list = None,
+    pre_filler: bool = True,
+    max_pre_filler: int = 3,
 ) -> list[dict]:
     """
     生成一个 episode 的对话轮次。
 
-    结构: [前置闲聊 0~3轮] [告知事实] [闲聊填充 x distance] [回忆提问(train_loss=true)] [闲聊补充...]
+    结构: [前置闲聊 0~N轮] [告知事实] [闲聊填充 x distance] [回忆提问(train_loss=true)] [闲聊补充...]
     """
+    if fillers is None:
+        fillers = FILLERS
     facts = sample_facts(rng, num_facts)
     turns = []
 
-    # 前置闲聊: 0~3 轮随机 filler，让 tell 不总在第一轮
-    pre_filler_count = rng.randint(0, 3)
+    # 前置闲聊: 0~max_pre_filler 轮随机 filler，让 tell 不总在第一轮
+    pre_filler_count = rng.randint(0, max_pre_filler) if pre_filler else 0
     for _ in range(pre_filler_count):
-        filler = rng.choice(FILLERS)
+        filler = rng.choice(fillers)
         turns.append({"user": filler[0], "assistant": filler[1], "train_loss": False})
 
     # 告知阶段: 每个事实一轮 (计算 loss，让模型学会回复确认)
@@ -354,7 +359,7 @@ def generate_episode(
     # 闲聊填充 (不计算 loss)
     distance = rng.randint(min_distance, max_distance)
     for _ in range(distance):
-        filler = rng.choice(FILLERS)
+        filler = rng.choice(fillers)
         turns.append({"user": filler[0], "assistant": filler[1], "train_loss": False})
 
     # 回忆阶段: 随机挑一个事实提问 (train_loss=True!)
@@ -366,7 +371,7 @@ def generate_episode(
 
     # 补充闲聊到 max_turns (不计算 loss)
     while len(turns) < max_turns:
-        filler = rng.choice(FILLERS)
+        filler = rng.choice(fillers)
         turns.append({"user": filler[0], "assistant": filler[1], "train_loss": False})
 
     return turns[:max_turns]
@@ -377,12 +382,17 @@ def generate_overwrite_episode(
     min_distance: int = 1,
     max_distance: int = 4,
     max_turns: int = 16,
+    fillers: list = None,
+    pre_filler: bool = True,
+    max_pre_filler: int = 2,
 ) -> list[dict]:
     """
     生成覆写 episode: [前置闲聊] [tell_old] [filler] [tell_new(覆写)] [filler] [recall(应答新值)]
 
     训练模型学会：遇到新信息时覆盖旧信息，recall 应答最新值。
     """
+    if fillers is None:
+        fillers = FILLERS
     # 选一个类别，生成旧值和新值
     generators = {"name": random_name, "number": random_number, "city": random_city}
     cat = rng.choice(list(generators.keys()))
@@ -394,9 +404,9 @@ def generate_overwrite_episode(
     turns = []
 
     # 前置闲聊
-    pre_filler_count = rng.randint(0, 2)
+    pre_filler_count = rng.randint(0, max_pre_filler) if pre_filler else 0
     for _ in range(pre_filler_count):
-        filler = rng.choice(FILLERS)
+        filler = rng.choice(fillers)
         turns.append({"user": filler[0], "assistant": filler[1], "train_loss": False})
 
     # 告知旧值
@@ -406,7 +416,7 @@ def generate_overwrite_episode(
     # 中间闲聊
     d1 = rng.randint(min_distance, max(min_distance, max_distance // 2))
     for _ in range(d1):
-        filler = rng.choice(FILLERS)
+        filler = rng.choice(fillers)
         turns.append({"user": filler[0], "assistant": filler[1], "train_loss": False})
 
     # 覆写为新值
@@ -416,7 +426,7 @@ def generate_overwrite_episode(
     # 覆写后闲聊
     d2 = rng.randint(min_distance, max(min_distance, max_distance // 2))
     for _ in range(d2):
-        filler = rng.choice(FILLERS)
+        filler = rng.choice(fillers)
         turns.append({"user": filler[0], "assistant": filler[1], "train_loss": False})
 
     # 回忆（应答新值）
@@ -425,7 +435,7 @@ def generate_overwrite_episode(
 
     # 补充到 max_turns
     while len(turns) < max_turns:
-        filler = rng.choice(FILLERS)
+        filler = rng.choice(fillers)
         turns.append({"user": filler[0], "assistant": filler[1], "train_loss": False})
 
     return turns[:max_turns]
@@ -468,20 +478,31 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--out-dir", type=str, default="data", help="输出目录")
     parser.add_argument("--preview", type=int, default=0, help="预览 N 条数据（不写文件）")
+    parser.add_argument("--num-fillers", type=int, default=0, help="限制 filler 数量（0=全部）")
+    parser.add_argument("--no-pre-filler", action="store_true", help="禁用 tell 前的随机闲聊")
+    parser.add_argument("--max-pre-filler", type=int, default=3, help="最大前置闲聊轮数")
+    parser.add_argument("--no-overwrite", action="store_true", help="禁用覆写 episode")
     args = parser.parse_args()
+
+    # filler 子集
+    active_fillers = FILLERS[:args.num_fillers] if args.num_fillers > 0 else FILLERS
+    use_pre_filler = not args.no_pre_filler
+    overwrite_ratio = 0.0 if args.no_overwrite else 0.2
 
     out_dir = Path(args.out_dir)
 
     def gen_episodes(rng: random.Random, num: int):
         episodes = []
         for _ in range(num):
-            # 20% 覆写 episode，80% 普通记忆 episode
-            if rng.random() < 0.2:
+            if overwrite_ratio > 0 and rng.random() < overwrite_ratio:
                 turns = generate_overwrite_episode(
                     rng,
                     min_distance=args.min_distance,
                     max_distance=args.max_distance,
                     max_turns=args.max_turns,
+                    fillers=active_fillers,
+                    pre_filler=use_pre_filler,
+                    max_pre_filler=args.max_pre_filler,
                 )
             else:
                 turns = generate_episode(
@@ -490,6 +511,9 @@ def main():
                     max_distance=args.max_distance,
                     max_turns=args.max_turns,
                     num_facts=args.num_facts,
+                    fillers=active_fillers,
+                    pre_filler=use_pre_filler,
+                    max_pre_filler=args.max_pre_filler,
                 )
             episodes.append(turns)
         return episodes

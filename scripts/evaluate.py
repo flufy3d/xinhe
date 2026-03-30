@@ -59,6 +59,7 @@ def main():
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--test", type=str, default="all",
                         choices=["all", "retention", "wipe"])
+    parser.add_argument("--num-trials", type=int, default=10, help="每项测试的试验次数")
     parser.add_argument("--output", type=str, default=None, help="结果输出 JSON 路径")
     args = parser.parse_args()
 
@@ -72,8 +73,8 @@ def main():
 
     # 记忆保留测试
     if args.test in ("all", "retention"):
-        print("\n[1/3] 记忆保留测试...")
-        ret = retention_test(model, tokenizer, distances=[1, 2, 4, 6, 8, 10], device=device)
+        print("\n[1/2] 记忆保留测试...")
+        ret = retention_test(model, tokenizer, distances=[1, 2, 4, 6, 8, 10], num_trials=args.num_trials, device=device)
         print("  距离 → 准确率:")
         for d, acc in ret.items():
             bar = "█" * int(acc * 20) + "░" * (20 - int(acc * 20))
@@ -82,8 +83,8 @@ def main():
 
     # 状态清除对比
     if args.test in ("all", "wipe"):
-        print("\n[2/3] 状态清除对比...")
-        wipe = wipe_degradation(model, tokenizer, device=device)
+        print("\n[2/2] 状态清除对比...")
+        wipe = wipe_degradation(model, tokenizer, num_trials=args.num_trials, device=device)
         print(f"  有状态准确率:   {wipe['with_state']:.1%}")
         print(f"  无状态准确率:   {wipe['without_state']:.1%}")
         print(f"  性能下降:       {wipe['degradation']:.1%}")

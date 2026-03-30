@@ -63,6 +63,7 @@ class Trainer:
         # 训练状态
         self.global_step = 0
         self.best_val_loss = float("inf")
+        self._accum_count = 0  # 梯度累积计数器
 
     def _build_scheduler(self):
         """Cosine schedule with linear warmup"""
@@ -85,7 +86,10 @@ class Trainer:
         total_params = self.model.get_total_param_count()
         trainable_params = self.model.get_trainable_param_count()
         print(f"总参数: {total_params:,} | 可训练: {trainable_params:,} ({trainable_params/total_params*100:.1f}%)")
+        if self.config.grad_accum_steps > 1:
+            print(f"梯度累积: {self.config.grad_accum_steps} 步")
 
+        self.optimizer.zero_grad()
         epoch = 0
         while self.global_step < self.config.max_steps:
             epoch += 1
@@ -130,32 +134,14 @@ class Trainer:
 
             # 截断 BPTT: 每 tbptt_steps 切断梯度
             if seg_idx > 0 and seg_idx % self.config.tbptt_steps == 0:
-                # 先做 backward + step
+                # 先做 backward (+ 可能的 optimizer step)
                 if loss_segments > 0:
                     avg_loss = accumulated_loss / loss_segments
-                    avg_loss.backward()
-                    torch.nn.utils.clip_grad_norm_(
-                        self.model.get_trainable_params(),
-                        self.config.grad_clip,
-                    )
-                    self.optimizer.step()
-                    self.scheduler.step()
-                    self.optimizer.zero_grad()
-                    self.global_step += 1
-
+                    (avg_loss / self.config.grad_accum_steps).backward()
                     episode_total_loss += avg_loss.item()
-
-                    if self.global_step % self.config.log_every == 0:
-                        lr = self.scheduler.get_last_lr()[0]
-                        scale = torch.sigmoid(self.model.plugin.state_scale).item()
-                        print(f"  [Step {self.global_step}] loss={avg_loss.item():.6f} lr={lr:.2e} scale={scale:.4f}")
-
-                    # 保存 checkpoint
-                    if self.global_step % self.config.save_every == 0:
-                        self._save_checkpoint()
+                    self._maybe_optimizer_step(avg_loss.item())
                 elif seg_idx > 0:
-                    # 没有 loss segment 但需要推进 step（避免卡住）
-                    self.optimizer.zero_grad()
+                    pass  # 没有 loss segment，跳过
 
                 # 切断梯度
                 state = state.detach()
@@ -177,27 +163,9 @@ class Trainer:
         # 处理剩余的 accumulated loss
         if loss_segments > 0:
             avg_loss = accumulated_loss / loss_segments
-            avg_loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                self.model.get_trainable_params(),
-                self.config.grad_clip,
-            )
-            self.optimizer.step()
-            self.scheduler.step()
-            self.optimizer.zero_grad()
-            self.global_step += 1
+            (avg_loss / self.config.grad_accum_steps).backward()
             episode_total_loss += avg_loss.item()
-
-            if self.global_step % self.config.log_every == 0:
-                lr = self.scheduler.get_last_lr()[0]
-                scale = torch.sigmoid(self.model.plugin.state_scale).item()
-                print(f"  [Step {self.global_step}] loss={avg_loss.item():.6f} lr={lr:.2e} scale={scale:.4f}")
-
-            if self.global_step % self.config.save_every == 0:
-                self._save_checkpoint()
-        else:
-            # 整个 episode 没有有效 loss（不应该发生，但安全处理）
-            self.optimizer.zero_grad()
+            self._maybe_optimizer_step(avg_loss.item())
 
         return episode_total_loss
 
@@ -226,6 +194,30 @@ class Trainer:
 
         self.model.train()
         return total_loss / max(num_episodes, 1)
+
+    def _maybe_optimizer_step(self, last_loss: float):
+        """梯度累积: 累积够 grad_accum_steps 次后执行一次 optimizer step"""
+        self._accum_count += 1
+        if self._accum_count < self.config.grad_accum_steps:
+            return
+
+        torch.nn.utils.clip_grad_norm_(
+            self.model.get_trainable_params(),
+            self.config.grad_clip,
+        )
+        self.optimizer.step()
+        self.scheduler.step()
+        self.optimizer.zero_grad()
+        self.global_step += 1
+        self._accum_count = 0
+
+        if self.global_step % self.config.log_every == 0:
+            lr = self.scheduler.get_last_lr()[0]
+            scale = torch.sigmoid(self.model.plugin.state_scale).item()
+            print(f"  [Step {self.global_step}] loss={last_loss:.6f} lr={lr:.2e} scale={scale:.4f}")
+
+        if self.global_step % self.config.save_every == 0:
+            self._save_checkpoint()
 
     def _save_checkpoint(self, path: Optional[str] = None):
         """保存 checkpoint (只保存可训练参数 + 优化器状态)"""

@@ -41,6 +41,8 @@ class XinheConfig:
     learning_rate: float = 3e-4
     weight_decay: float = 0.01
     grad_clip: float = 1.0
+    grad_accum_steps: int = 1        # 梯度累积步数 (模拟更大 batch)
+    resume_from: str = ""            # checkpoint 路径 (为空则不恢复)
     warmup_steps: int = 100
     max_steps: int = 10000
     eval_every: int = 500
@@ -59,18 +61,16 @@ class XinheConfig:
     wandb_run_name: Optional[str] = None
 
     @classmethod
-    def from_yaml(cls, path: str) -> "XinheConfig":
-        """从 yaml 配置文件加载，支持 base 继承"""
+    def _load_and_merge(cls, path: str) -> dict:
+        """递归加载 yaml，支持链式 base 继承"""
         from pathlib import Path
 
         with open(path, "r", encoding="utf-8") as f:
             raw = yaml.safe_load(f)
 
-        # 如果指定了 base，先加载 base 再用当前文件覆盖
         if "base" in raw:
             base_path = Path(path).parent / raw.pop("base")
-            with open(base_path, "r", encoding="utf-8") as f:
-                base_raw = yaml.safe_load(f)
+            base_raw = cls._load_and_merge(str(base_path))
             # 深度合并: raw 覆盖 base_raw
             for section, values in raw.items():
                 if isinstance(values, dict) and section in base_raw and isinstance(base_raw[section], dict):
@@ -78,6 +78,13 @@ class XinheConfig:
                 else:
                     base_raw[section] = values
             raw = base_raw
+
+        return raw
+
+    @classmethod
+    def from_yaml(cls, path: str) -> "XinheConfig":
+        """从 yaml 配置文件加载，支持链式 base 继承"""
+        raw = cls._load_and_merge(path)
 
         # 将嵌套的 yaml 扁平化到 dataclass 字段
         flat = {}
@@ -112,6 +119,8 @@ class XinheConfig:
                 "learning_rate": "learning_rate",
                 "weight_decay": "weight_decay",
                 "grad_clip": "grad_clip",
+                "grad_accum_steps": "grad_accum_steps",
+                "resume_from": "resume_from",
                 "warmup_steps": "warmup_steps",
                 "max_steps": "max_steps",
                 "eval_every": "eval_every",
