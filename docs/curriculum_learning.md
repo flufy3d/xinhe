@@ -32,5 +32,21 @@ M4 阶段我们尝试一步到位训练多轮记忆（多样 filler + 随机 tel
 
 **课程阶段之间的参数**：
 - 小学习率（1e-4）
-- 重置 optimizer（`--reset-step`），保留模型权重
-- 每阶段通常 500-1000 步足够，观察 scale 稳定即可进入下一阶段
+- 自动重置 optimizer，保留模型权重
+- 每阶段设置 `early_stop_loss` + `early_stop_patience`，收敛后自动进入下一阶段
+
+## 使用方法
+
+课程学习已集成到训练主流程，在一个 YAML 中定义所有阶段：
+
+```bash
+# 从头训练完所有阶段
+python scripts/train.py --config configs/curriculum_qwen.yaml
+
+# 从指定阶段开始（自动加载前一阶段 checkpoint）
+python scripts/train.py --config configs/curriculum_qwen.yaml --from-stage 3_distance
+```
+
+每个阶段自动生成数据、训练、保存 checkpoint 到 `checkpoints/curriculum/{stage_name}.pt`。已完成的阶段会自动跳过。
+
+扩展新能力（如 M5 覆写）只需在 `curriculum_qwen.yaml` 末尾追加新阶段。

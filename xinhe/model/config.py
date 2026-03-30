@@ -43,6 +43,8 @@ class XinheConfig:
     grad_clip: float = 1.0
     grad_accum_steps: int = 1        # 梯度累积步数 (模拟更大 batch)
     resume_from: str = ""            # checkpoint 路径 (为空则不恢复)
+    early_stop_loss: float = 0.0    # 早停 loss 阈值 (0=不启用)
+    early_stop_patience: int = 0    # 早停耐心 (连续多少步低于阈值)
     warmup_steps: int = 100
     max_steps: int = 10000
     eval_every: int = 500
@@ -82,9 +84,17 @@ class XinheConfig:
         return raw
 
     @classmethod
-    def from_yaml(cls, path: str) -> "XinheConfig":
-        """从 yaml 配置文件加载，支持链式 base 继承"""
+    def from_yaml(cls, path: str) -> tuple["XinheConfig", list[dict]]:
+        """
+        从 yaml 配置文件加载，支持链式 base 继承。
+
+        返回: (config, curriculum_stages)
+            curriculum_stages: 课程学习阶段列表，无 curriculum 段时为空列表
+        """
         raw = cls._load_and_merge(path)
+
+        # 提取 curriculum 段（不进入 dataclass）
+        curriculum = raw.pop("curriculum", []) or []
 
         # 将嵌套的 yaml 扁平化到 dataclass 字段
         flat = {}
@@ -121,6 +131,8 @@ class XinheConfig:
                 "grad_clip": "grad_clip",
                 "grad_accum_steps": "grad_accum_steps",
                 "resume_from": "resume_from",
+                "early_stop_loss": "early_stop_loss",
+                "early_stop_patience": "early_stop_patience",
                 "warmup_steps": "warmup_steps",
                 "max_steps": "max_steps",
                 "eval_every": "eval_every",
@@ -146,4 +158,4 @@ class XinheConfig:
                     if yaml_key in raw[section]:
                         flat[field_name] = raw[section][yaml_key]
 
-        return cls(**flat)
+        return cls(**flat), curriculum

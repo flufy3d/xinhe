@@ -65,6 +65,10 @@ class Trainer:
         self.best_val_loss = float("inf")
         self._accum_count = 0  # 梯度累积计数器
 
+        # 早停状态
+        self._early_stop_count = 0
+        self._early_stopped = False
+
     def _build_scheduler(self):
         """Cosine schedule with linear warmup"""
         warmup = self.config.warmup_steps
@@ -92,6 +96,8 @@ class Trainer:
         self.optimizer.zero_grad()
         epoch = 0
         while self.global_step < self.config.max_steps:
+            if self._early_stopped:
+                break
             epoch += 1
             epoch_loss = self._train_epoch()
 
@@ -99,7 +105,9 @@ class Trainer:
                 val_loss = self._validate()
                 print(f"[Epoch {epoch}] val_loss={val_loss:.4f}")
 
-        print(f"训练完成, 共 {self.global_step} 步")
+        scale = torch.sigmoid(self.model.plugin.state_scale).item()
+        reason = "早停" if self._early_stopped else "完成"
+        print(f"训练{reason}, 共 {self.global_step} 步, scale={scale:.4f}")
 
     def _train_epoch(self) -> float:
         """训练一个 epoch (遍历所有 episode)"""
@@ -107,7 +115,7 @@ class Trainer:
         num_episodes = 0
 
         for episode_segments in self.train_dataloader:
-            if self.global_step >= self.config.max_steps:
+            if self.global_step >= self.config.max_steps or self._early_stopped:
                 break
 
             loss = self._train_episode(episode_segments)
@@ -218,6 +226,37 @@ class Trainer:
 
         if self.global_step % self.config.save_every == 0:
             self._save_checkpoint()
+
+        # 早停检查
+        early_stop_loss = getattr(self.config, 'early_stop_loss', 0)
+        early_stop_patience = getattr(self.config, 'early_stop_patience', 0)
+        if early_stop_loss > 0 and early_stop_patience > 0:
+            if last_loss < early_stop_loss:
+                self._early_stop_count += 1
+                if self._early_stop_count >= early_stop_patience:
+                    self._early_stopped = True
+                    print(f"  [早停] loss < {early_stop_loss} 持续 {early_stop_patience} 步")
+            else:
+                self._early_stop_count = 0
+
+    def reset_for_new_stage(self, config: XinheConfig, train_dataloader: DataLoader,
+                            val_dataloader: Optional[DataLoader] = None):
+        """课程学习：切换到新阶段，保留模型权重，重建 optimizer/scheduler"""
+        self.config = config
+        self.train_dataloader = train_dataloader
+        self.val_dataloader = val_dataloader
+        self.global_step = 0
+        self._accum_count = 0
+        self._early_stop_count = 0
+        self._early_stopped = False
+
+        self.optimizer = torch.optim.AdamW(
+            self.model.get_trainable_params(),
+            lr=config.learning_rate,
+            weight_decay=config.weight_decay,
+        )
+        self.scheduler = self._build_scheduler()
+        self.optimizer.zero_grad()
 
     def _save_checkpoint(self, path: Optional[str] = None):
         """保存 checkpoint (只保存可训练参数 + 优化器状态)"""

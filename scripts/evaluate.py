@@ -63,7 +63,7 @@ def main():
     parser.add_argument("--output", type=str, default=None, help="结果输出 JSON 路径")
     args = parser.parse_args()
 
-    config = XinheConfig.from_yaml(args.config)
+    config, _ = XinheConfig.from_yaml(args.config)
     device = torch.device(config.device if torch.cuda.is_available() else "cpu")
 
     print("=== 心核 评估 ===")

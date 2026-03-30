@@ -10,24 +10,24 @@ from xinhe.model.config import XinheConfig
 
 def test_from_yaml_minimind():
     """minimind.yaml 能正确加载并继承 base"""
-    config = XinheConfig.from_yaml("configs/minimind.yaml")
+    config, _ = XinheConfig.from_yaml("configs/minimind.yaml")
     assert config.backbone_type == "minimind"
     assert config.hidden_size == 768
     assert config.state_dim == 768
     # 继承自 base.yaml
-    assert config.tbptt_steps == 4
+    assert config.tbptt_steps == 8
     assert config.learning_rate == 3e-4
     assert config.n_state == 32
 
 
 def test_from_yaml_qwen():
     """qwen3-0.6b.yaml 能正确加载并继承 base"""
-    config = XinheConfig.from_yaml("configs/qwen3-0.6b.yaml")
+    config, _ = XinheConfig.from_yaml("configs/qwen3-0.6b.yaml")
     assert config.backbone_type == "qwen"
     assert config.hidden_size == 1024
     assert config.state_dim == 1024
     # 继承自 base.yaml
-    assert config.tbptt_steps == 4
+    assert config.tbptt_steps == 8
     assert config.learning_rate == 3e-4
 
 
@@ -43,7 +43,7 @@ def test_yaml_override():
         child.write_text(
             "base: base.yaml\ntraining:\n  batch_size: 8\n"
         )
-        config = XinheConfig.from_yaml(str(child))
+        config, _ = XinheConfig.from_yaml(str(child))
         assert config.batch_size == 8         # 被覆盖
         assert config.learning_rate == 3e-4   # 继承自 base
 

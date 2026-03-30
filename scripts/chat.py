@@ -95,7 +95,7 @@ def main():
     args = parser.parse_args()
 
     # 加载配置和模型
-    config = XinheConfig.from_yaml(args.config)
+    config, _ = XinheConfig.from_yaml(args.config)
     device = torch.device(config.device if torch.cuda.is_available() else "cpu")
 
     print("=== 心核 (Xinhe) 交互式聊天 ===")

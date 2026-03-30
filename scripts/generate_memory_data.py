@@ -467,6 +467,74 @@ def preview_episode(turns: list[dict], idx: int = 0):
     print()
 
 
+def generate_data(
+    out_dir: str,
+    num_train: int = 5000,
+    num_val: int = 200,
+    min_distance: int = 1,
+    max_distance: int = 4,
+    max_turns: int = 16,
+    num_facts: int = 1,
+    num_fillers: int = 0,
+    no_pre_filler: bool = False,
+    max_pre_filler: int = 3,
+    no_overwrite: bool = False,
+    seed: int = 42,
+):
+    """
+    生成训练/验证数据到指定目录。供 train.py 课程学习调用。
+
+    返回: (train_path, val_path)
+    """
+    active_fillers = FILLERS[:num_fillers] if num_fillers > 0 else FILLERS
+    use_pre_filler = not no_pre_filler
+    overwrite_ratio = 0.0 if no_overwrite else 0.2
+
+    out_path = Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    def gen_episodes(rng: random.Random, num: int):
+        episodes = []
+        for _ in range(num):
+            if overwrite_ratio > 0 and rng.random() < overwrite_ratio:
+                turns = generate_overwrite_episode(
+                    rng,
+                    min_distance=min_distance,
+                    max_distance=max_distance,
+                    max_turns=max_turns,
+                    fillers=active_fillers,
+                    pre_filler=use_pre_filler,
+                    max_pre_filler=max_pre_filler,
+                )
+            else:
+                turns = generate_episode(
+                    rng,
+                    min_distance=min_distance,
+                    max_distance=max_distance,
+                    max_turns=max_turns,
+                    num_facts=num_facts,
+                    fillers=active_fillers,
+                    pre_filler=use_pre_filler,
+                    max_pre_filler=max_pre_filler,
+                )
+            episodes.append(turns)
+        return episodes
+
+    paths = {}
+    for split, num, s in [("train", num_train, seed),
+                           ("val", num_val, seed + 10000)]:
+        rng = random.Random(s)
+        episodes = gen_episodes(rng, num)
+        path = out_path / f"{split}.jsonl"
+        with open(path, "w", encoding="utf-8") as f:
+            for ep in episodes:
+                f.write(episode_to_jsonl(ep) + "\n")
+        paths[split] = str(path)
+        print(f"  {split}: {num} episodes → {path}")
+
+    return paths["train"], paths["val"]
+
+
 def main():
     parser = argparse.ArgumentParser(description="生成记忆训练数据")
     parser.add_argument("--num-train", type=int, default=2000, help="训练集 episode 数量")
@@ -484,67 +552,41 @@ def main():
     parser.add_argument("--no-overwrite", action="store_true", help="禁用覆写 episode")
     args = parser.parse_args()
 
-    # filler 子集
-    active_fillers = FILLERS[:args.num_fillers] if args.num_fillers > 0 else FILLERS
-    use_pre_filler = not args.no_pre_filler
-    overwrite_ratio = 0.0 if args.no_overwrite else 0.2
-
-    out_dir = Path(args.out_dir)
-
-    def gen_episodes(rng: random.Random, num: int):
-        episodes = []
-        for _ in range(num):
-            if overwrite_ratio > 0 and rng.random() < overwrite_ratio:
-                turns = generate_overwrite_episode(
-                    rng,
-                    min_distance=args.min_distance,
-                    max_distance=args.max_distance,
-                    max_turns=args.max_turns,
-                    fillers=active_fillers,
-                    pre_filler=use_pre_filler,
-                    max_pre_filler=args.max_pre_filler,
-                )
-            else:
-                turns = generate_episode(
-                    rng,
-                    min_distance=args.min_distance,
-                    max_distance=args.max_distance,
-                    max_turns=args.max_turns,
-                    num_facts=args.num_facts,
-                    fillers=active_fillers,
-                    pre_filler=use_pre_filler,
-                    max_pre_filler=args.max_pre_filler,
-                )
-            episodes.append(turns)
-        return episodes
-
     # 预览模式
     if args.preview > 0:
+        active_fillers = FILLERS[:args.num_fillers] if args.num_fillers > 0 else FILLERS
+        use_pre_filler = not args.no_pre_filler
+        overwrite_ratio = 0.0 if args.no_overwrite else 0.2
         rng = random.Random(args.seed)
-        episodes = gen_episodes(rng, args.preview)
+        episodes = []
+        for _ in range(args.preview):
+            if overwrite_ratio > 0 and rng.random() < overwrite_ratio:
+                ep = generate_overwrite_episode(rng, args.min_distance, args.max_distance,
+                    args.max_turns, active_fillers, use_pre_filler, args.max_pre_filler)
+            else:
+                ep = generate_episode(rng, args.min_distance, args.max_distance,
+                    args.max_turns, args.num_facts, active_fillers, use_pre_filler, args.max_pre_filler)
+            episodes.append(ep)
         for i, ep in enumerate(episodes):
             preview_episode(ep, i)
         print(f"JSONL 示例:")
         print(episode_to_jsonl(episodes[0]))
         return
 
-    # 生成并写入文件 (train/val 用不同种子，确保无重叠)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    for split, num, seed in [("train", args.num_train, args.seed),
-                              ("val", args.num_val, args.seed + 10000)]:
-        rng = random.Random(seed)
-        episodes = gen_episodes(rng, num)
-        path = out_dir / f"{split}.jsonl"
-        with open(path, "w", encoding="utf-8") as f:
-            for ep in episodes:
-                f.write(episode_to_jsonl(ep) + "\n")
-        print(f"  {split}: {num} episodes → {path}")
-
-    print(f"\n完成! 数据格式 (ShareGPT 兼容):")
-    print(f'  {{"conversations": [{{"role": "user", "content": "..."}}, {{"role": "assistant", "content": "...", "train_loss": true}}, ...]}}')
-    print(f"\n关键设计: 只有 recall turn 标记 train_loss=true，其余 turn 不参与 loss 计算")
-    print(f"未来加入真实数据: 只需追加同格式 JSONL 行到 train.jsonl / val.jsonl")
+    generate_data(
+        out_dir=args.out_dir,
+        num_train=args.num_train,
+        num_val=args.num_val,
+        min_distance=args.min_distance,
+        max_distance=args.max_distance,
+        max_turns=args.max_turns,
+        num_facts=args.num_facts,
+        num_fillers=args.num_fillers,
+        no_pre_filler=args.no_pre_filler,
+        max_pre_filler=args.max_pre_filler,
+        no_overwrite=args.no_overwrite,
+        seed=args.seed,
+    )
 
 
 if __name__ == "__main__":

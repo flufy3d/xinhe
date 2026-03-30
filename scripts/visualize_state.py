@@ -128,7 +128,7 @@ def main():
     from xinhe.model.config import XinheConfig
     from xinhe.model.xinhe_model import XinheModel
 
-    config = XinheConfig.from_yaml(args.config)
+    config, _ = XinheConfig.from_yaml(args.config)
     device = torch.device(config.device if torch.cuda.is_available() else "cpu")
 
     model = XinheModel(config)
