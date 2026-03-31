@@ -139,10 +139,16 @@
 - state 清空后仍能回忆 sleep 过的事实
 - 新事实仍靠 state 正常记忆（不受 Memory LoRA 干扰）
 
+**Replay Buffer 策略**：
+- Buffer 不在 sleep 后清空，作为长期档案持续积累
+- Sleep 采样：70% 近期对话 + 30% 历史随机采样
+- 混合回放巩固旧记忆 + 发现跨时间关联，防止 Memory LoRA 只记今天忘昨天
+
 **验证了什么**：
 - 记忆从 state 转移到权重的通路有效
 - 残差加法不破坏原有能力
 - 分层学习率保护了 state 读写技能
+- 历史混合回放防止旧记忆被覆盖
 
 ### 9. 灵魂分化
 
@@ -167,13 +173,15 @@
 
 | 消融项 | 关闭方式 | 预期影响 |
 |--------|---------|---------|
-| state 数量 | n_state: 32→16→8→4 | retention 下降 |
+| state 数量 | n_state: 32→16→8→4 | 对话内 retention 下降 |
 | gate 静态偏置 | gate_bias 全零 | 时间尺度分化消失 |
 | gate 动态部分 | 去掉 gate_proj | 覆写能力下降 |
-| sleep（权重更新） | sleep 时不更新权重 | 跨天记忆消失 |
-| LoRA | lora_rank: 16→8→4→0 | backbone 无法学会读写状态 |
+| Memory LoRA | 不加 MLP LoRA | 跨天记忆消失，只能靠 state |
+| Skill LoRA | lora_rank: 4→2→0 | backbone 无法学会读写状态 |
+| state 弱化 | sleep 时不弱化 state | Memory LoRA 学不到东西（state 兜底了） |
+| replay 混合比例 | 100% 近期 / 0% 历史 | 旧记忆快速遗忘 |
+| 分层学习率 | Skill LoRA lr 与 Memory LoRA 相同 | 可能破坏 state 读写技能 |
 | TBPTT 窗口 | tbptt_steps: 4→2→1 | 跨 segment 梯度断裂 |
-| sleep_lr | 1e-5→1e-4→1e-6 | 学习速度 vs 稳定性 |
 
 ---
 
