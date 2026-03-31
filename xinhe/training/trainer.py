@@ -106,8 +106,10 @@ class Trainer:
                 print(f"[Epoch {epoch}] val_loss={val_loss:.4f}")
 
         scale = torch.sigmoid(self.model.plugin.state_scale).item()
-        reason = "早停" if self._early_stopped else "完成"
-        print(f"训练{reason}, 共 {self.global_step} 步, scale={scale:.4f}")
+        if self._early_stopped:
+            print(f"训练已收敛, 共 {self.global_step} 步, scale={scale:.4f}")
+        else:
+            print(f"训练完成, 共 {self.global_step} 步, scale={scale:.4f}")
 
     def _train_epoch(self) -> float:
         """训练一个 epoch (遍历所有 episode)"""
@@ -238,7 +240,7 @@ class Trainer:
                 self._ema_loss = alpha * last_loss + (1 - alpha) * self._ema_loss
             if self._ema_loss < early_stop_loss and self.global_step >= early_stop_patience:
                 self._early_stopped = True
-                print(f"  [早停] EMA loss={self._ema_loss:.6f} < {early_stop_loss}")
+                print(f"  [已收敛] EMA loss={self._ema_loss:.6f} < {early_stop_loss}")
 
     def reset_for_new_stage(self, config: XinheConfig, train_dataloader: DataLoader,
                             val_dataloader: Optional[DataLoader] = None):

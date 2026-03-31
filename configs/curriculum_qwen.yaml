@@ -109,3 +109,43 @@ curriculum:
       max_steps: 10000
       early_stop_loss: 0.01
       early_stop_patience: 200
+
+  # 阶段 6: 双事实 — 学会按类别区分存储
+  - name: "6_multi_fact_2"
+    data:
+      num_train: 5000
+      num_facts: 2
+      max_pre_filler: 2
+      no_overwrite: true
+      min_distance: 1
+      max_distance: 5
+      max_turns: 16
+    training:
+      episode_length: 16
+      tbptt_steps: 16
+      batch_size: 1
+      grad_accum_steps: 4
+      learning_rate: 1.0e-4
+      max_steps: 10000
+      early_stop_loss: 0.01
+      early_stop_patience: 200
+
+  # 阶段 7: 三事实 — 同时记住 name + city + number
+  - name: "7_multi_fact_3"
+    data:
+      num_train: 5000
+      num_facts: 3
+      max_pre_filler: 2
+      no_overwrite: true
+      min_distance: 1
+      max_distance: 10
+      max_turns: 16
+    training:
+      episode_length: 16
+      tbptt_steps: 16
+      batch_size: 1
+      grad_accum_steps: 4
+      learning_rate: 1.0e-4
+      max_steps: 10000
+      early_stop_loss: 0.01
+      early_stop_patience: 200

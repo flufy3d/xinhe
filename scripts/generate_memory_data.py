@@ -362,12 +362,14 @@ def generate_episode(
         filler = rng.choice(fillers)
         turns.append({"user": filler[0], "assistant": filler[1], "train_loss": False})
 
-    # 回忆阶段: 随机挑一个事实提问 (train_loss=True!)
-    recall_fact = rng.choice(facts)
-    cat = recall_fact["category"]
-    template = rng.choice(RECALL_TEMPLATES[cat])
-    turn = make_turn(template, recall_fact["value"], train_loss=True)
-    turns.append(turn)
+    # 回忆阶段: 每个事实都提问 (打乱顺序，train_loss=True!)
+    recall_order = facts[:]
+    rng.shuffle(recall_order)
+    for recall_fact in recall_order:
+        cat = recall_fact["category"]
+        template = rng.choice(RECALL_TEMPLATES[cat])
+        turn = make_turn(template, recall_fact["value"], train_loss=True)
+        turns.append(turn)
 
     # 补充闲聊到 max_turns (不计算 loss)
     while len(turns) < max_turns:
