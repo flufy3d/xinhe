@@ -7,12 +7,15 @@
 ```
 阶段 A: 基础验证          阶段 B: 记忆涌现          阶段 C: 在线学习
 ──────────────          ──────────────          ──────────────
-1. 基线聊天              3. 1轮记忆               8. Sleep (对话replay+权重更新)
-2. 空状态不破坏           4. 多轮记忆               9. 灵魂分化
-                        5. 信息覆写              10. 消融实验
-                        6. Wipe对比
-                        7. 时间尺度分化
+1. 基线聊天 ✅            3. 1轮记忆 ✅             8. Sleep (Memory LoRA + state弱化回放)
+2. 空状态不破坏 ✅         4. 多轮记忆 ✅             9. 灵魂分化
+                        5. 信息覆写 ✅            10. 消融实验
+                        6. Wipe对比 ✅
+                        7. 时间尺度分化 (进行中)
 ```
+
+**关键发现**：M4 阶段证明了课程学习是训练 state 机制的核心策略。
+详见 `docs/curriculum_learning.md`。
 
 ---
 
@@ -116,21 +119,30 @@
 
 ## 阶段 C：在线学习
 
-### 8. Sleep — 对话 replay + 权重更新
+### 8. Sleep — Memory LoRA + State 弱化回放
 
-**目标**：sleep 在线学习有效，对话信息固化进权重
+**目标**：sleep 后对话信息固化进 MLP 权重，state 清空也能回答
+
+**架构**：
+- 新增 Memory LoRA 挂在 MLP 层（up/down/gate_proj），零初始化
+- 对话时保存 (state_in, content, labels) 序列到 replay buffer
+- Sleep 时回放序列，逐步弱化 state（100% → 50% → 0%），标准交叉熵 loss
+- 分层学习率：Memory LoRA 1e-4 / Skill LoRA 1e-6 / StatePlugin 冻结
 
 **操作**：
-- 聊天一天 → `/sleep`（replay 对话 buffer，更新 plugin + LoRA 权重）
-- 第二天加载 .pt → 验证还记得昨天的事
-- 对比：不 sleep 直接加载 state vs sleep 后加载
+- 聊天一天 → `/sleep`（回放 state 序列，弱化 state，更新 LoRA）
+- 第二天加载 .pt → state 空白 → 验证还记得昨天的事
+- 对比：不 sleep vs sleep 后
 
 **通过标准**：
-- sleep 后 plugin 权重有变化（weight diff > 0）
-- 第二天能回忆昨天的对话内容
-- sleep 后的 retention 优于不 sleep
+- sleep 后 Memory LoRA 权重有变化（weight diff > 0）
+- state 清空后仍能回忆 sleep 过的事实
+- 新事实仍靠 state 正常记忆（不受 Memory LoRA 干扰）
 
-**验证了什么**：两套记忆系统在工作（state=短期，权重=长期）
+**验证了什么**：
+- 记忆从 state 转移到权重的通路有效
+- 残差加法不破坏原有能力
+- 分层学习率保护了 state 读写技能
 
 ### 9. 灵魂分化
 
@@ -169,8 +181,9 @@
 
 ### 近期
 - ~~**Qwen 迁移**~~：已完成 QwenBackbone（支持 Qwen3-0.6B），切换只需改 yaml
+- **更多事实类别**：从 3 类（name/city/number）扩展到 8 类（+food/job/hobby/age/pet），验证 state 容量上限
+- **LLM 生成训练数据**：用大模型生成自然对话替代手写模板，提升泛化能力
 - **更大 backbone**：Qwen3-4B 等更强模型（需量化或更大显存）
-- **分层 state**：快 state（小，每轮更新）+ 慢 state（大，sleep 时更新）
 - **多模态状态**：图片、语音信息也消化进 state
 
 ### 中期 — 主动性涌现

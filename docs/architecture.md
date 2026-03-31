@@ -53,8 +53,8 @@ class BackboneBase(ABC):
 ```
 
 已实现的 backbone：
-- `MiniMindBackbone`：64M 参数，机制验证用
-- `QwenBackbone`：Qwen3-0.6B (600M)，效果验证用
+- `QwenBackbone`：Qwen3-0.6B (600M)，当前主力
+- `MiniMindBackbone`：64M 参数，早期流程验证用
 
 切换 backbone 只需改 yaml 配置，StatePlugin 代码不变。
 
@@ -142,44 +142,63 @@ state_next = gate * state_old + (1 - gate) * state_new
 
 ## Sleep 机制：记忆固化 + 在线学习
 
-这是心核最核心的创新。类比人类睡眠：白天积累经验，睡眠时突触重塑。
+类比人类睡眠：白天积累经验（state），睡眠时突触重塑（权重更新）。
 
 ### 两阶段运行模式
 
 ```
 白天（推理）：                         Sleep（学习）：
-  权重完全冻结                           权重更新（plugin + LoRA）
-  只有 state 在流动                      replay 今天对话，backward 更新
-  全速生成，无额外开销                    buffer 清空，state 重置，保存 .pt
-  对话存入 conversation_buffer
+  权重完全冻结                           Memory LoRA + Skill LoRA 更新
+  只有 state 在流动                      回放 (state_in, content, labels) 序列
+  全速生成，无额外开销                    逐步弱化 state 迫使记忆转移到权重
+  保存 (state_in, content, labels) 到 buffer
 ```
+
+### 双 LoRA 架构
+
+Transformer 内部有功能分离：Attention 层控制信息路由，MLP 层存储事实知识。
+
+```
+Transformer Layer:
+├── Attention
+│   ├── q_proj + Skill LoRA    ← 教 attention 怎么读写 state
+│   └── v_proj + Skill LoRA
+├── MLP
+│   ├── up_proj + Memory LoRA   ← 存储长期记忆（零初始化，sleep 时更新）
+│   ├── down_proj + Memory LoRA
+│   └── gate_proj + Memory LoRA
+```
+
+Memory LoRA 零初始化 → 加上去不影响任何现有行为，直到 sleep 更新它。
 
 ### Sleep 流程
 
-```python
-def sleep(self, conversation_buffer):
-    # 1. 对话 replay → 更新权重
-    for segment in conversation_buffer:
-        result = model(segment, state, labels=segment)
-        loss.backward()
-        sleep_optimizer.step()       # plugin + LoRA 权重更新
-        state = result["state_next"].detach()
+1. 回放保存的 (state_in, content, labels) 序列
+2. 逐步弱化 state 输入（100% → 50% → 0%）
+3. 标准交叉熵 loss，模型必须靠权重而非 state 答对
+4. 分层学习率更新：
 
-    # 2. 保存 .pt，清空 buffer
-    save_checkpoint(...)
-    conversation_buffer.clear()
+```
+Memory LoRA (MLP):      lr = 1e-4   快速学习记忆
+Skill LoRA (attention):  lr = 1e-6   极缓慢演化
+StatePlugin:             lr = 0      完全冻结
 ```
 
-重要信息通过 replay 固化进权重后，state 可以重置为空白——信息已经在权重里了。
+### 醒来后的效果
 
-### 两套记忆系统
+Memory LoRA 通过残差连接**叠加**到 backbone 输出上（加法，非替换）：
+- 新事实（未 sleep）：靠 state，和以前一样
+- Sleep 过的事实：state + 权重双通道增强
+- State 清空后：权重兜底，仍能回答
+
+### 记忆系统对应
 
 ```
 人脑                         Xinhe
 ──────────                   ─────
-神经激活（短期工作记忆）       state 向量（每轮变化）
-突触连接（长期固化记忆）       plugin + LoRA 权重（sleep 时更新）
-睡眠时突触重塑               sleep 时 replay + backward
+神经激活（工作记忆）           state（当前对话的工作台）
+突触连接（长期记忆）           LoRA 权重（sleep 后积累的知识）
+睡眠时海马体→皮层转移          sleep 时弱化 state → 迫使权重学习
 ```
 
 ---
@@ -188,15 +207,16 @@ def sleep(self, conversation_buffer):
 
 ```python
 checkpoint = {
-    "plugin_state_dict": ...,   # 记忆管理机制 ← sleep 后更新
-    "lora_state_dict": ...,     # backbone 适配 ← sleep 后更新
-    "state": ...,               # 当前记忆内容 ← 每轮变化
-    "conversation_buffer": ..., # 今天的对话 ← sleep 后清空
-    "sleep_count": ...,         # AI 的"年龄"
+    "plugin_state_dict": ...,        # StatePlugin（gate/scale/state_emb）
+    "skill_lora_state": ...,         # Skill LoRA（attention 层，读写技能）
+    "memory_lora_state": ...,        # Memory LoRA（MLP 层，长期记忆）
+    "state": ...,                    # 当前 state（工作记忆）
+    "replay_buffer": ...,            # 待 sleep 的对话序列
+    "sleep_count": ...,              # AI 的"年龄"
 }
 ```
 
-每个用户的 AI 从同一个预训练起点出发，聊着聊着 .pt 就分化了。不同的 .pt 就是不同的"人"。
+每个用户的 AI 从同一个预训练起点出发，经历不同的对话和 sleep 周期后 .pt 逐渐分化。不同的 .pt 就是不同的"人"。
 
 ---
 
@@ -230,26 +250,38 @@ def burn_in(self, token_ids_list):
 
 ## 训练
 
-### 预训练阶段
+### 课程学习（Curriculum Learning）
+
+State 机制无法一步到位训练——同时学"怎么用 state"和"什么时候用"会陷入死锁（scale 持续下降，模型放弃 state）。必须分阶段递增难度：
+
+```
+阶段 1: 固定 tell + d=1        → 学会 state 基本读写
+阶段 2: 随机 tell 位置          → 学会内容级写入判断
+阶段 3: distance 1-3           → 学会跨距离保持
+阶段 4: distance 1-10 + 多 filler → 完整多轮记忆
+阶段 5+: 多事实 / 覆写          → 区分类别 / 更新能力
+```
+
+课程配置定义在单个 YAML 中，一条命令自动执行所有阶段。详见 `docs/curriculum_learning.md`。
 
 | 项目 | 值 |
 |------|-----|
-| 训练对象 | StatePlugin (~2M) + LoRA (注入 backbone) |
+| 训练对象 | StatePlugin (~3M) + Skill LoRA (注入 q/v_proj) |
 | 冻结 | Backbone 全部原始权重 |
-| 数据 | 多轮对话，按轮次切分为 segment |
+| 数据 | 合成记忆对话，按课程阶段自动生成 |
 | 状态传递 | state 跨 segment 持续传递 |
-| 梯度截断 | 每 tbptt_steps(4) 个 segment 做一次 detach + backward |
-| 优化器 | AdamW, lr=3e-4, cosine schedule with warmup |
-| 梯度裁剪 | grad_clip=1.0 |
+| 梯度截断 | 每 tbptt_steps 个 segment 做 detach + backward |
+| 收敛检测 | EMA loss 低于阈值自动进入下一阶段 |
 
-### 在线学习阶段（Sleep，里程碑 9 实现）
+### Sleep 阶段
 
 | 项目 | 值 |
 |------|-----|
 | 触发 | 用户手动 `/sleep` 或定时触发 |
-| 学习率 | sleep_lr=1e-5（远小于预训练 lr） |
-| 数据 | 当天对话 buffer（replay） |
-| 更新对象 | plugin + LoRA 权重 |
+| 数据 | 对话时保存的 (state_in, content, labels) 序列回放 |
+| State 弱化 | 逐步 100% → 50% → 0%，迫使记忆转移到权重 |
+| 更新对象 | Memory LoRA (MLP, lr=1e-4) + Skill LoRA (attention, lr=1e-6) |
+| 冻结 | StatePlugin（保护 gate/scale） |
 | 安全措施 | sleep 前保存 checkpoint，失败可回滚 |
 
 ---
@@ -258,11 +290,12 @@ def burn_in(self, token_ids_list):
 
 | 参数 | 值 | 说明 |
 |------|-----|------|
-| n_state | 32 | 状态 token 数 |
-| state_dim | 768 | 状态维度 = backbone hidden_size |
+| n_state | 32 | 状态 token 数（读写各 32） |
+| state_dim | 1024 | 状态维度 = backbone hidden_size |
 | state_scale_init | 0.0 | 初始影响力 sigmoid(0)=0.5 |
-| lora_rank | 4 | LoRA 秩 |
+| Skill LoRA rank | 4 | 注入 q_proj, v_proj |
+| Memory LoRA rank | 4 | 注入 up/down/gate_proj（sleep 时更新） |
 | lora_alpha | 8 | LoRA 缩放 |
-| tbptt_steps | 4 | 截断 BPTT 窗口 |
-| sleep_lr | 1e-5 | sleep 权重更新学习率 |
-| max_buffer_segments | 64 | 对话 buffer 上限 |
+| tbptt_steps | 可变 | 课程学习中随 episode_length 调整 |
+| sleep memory_lr | 1e-4 | Memory LoRA 学习率 |
+| sleep skill_lr | 1e-6 | Skill LoRA 学习率 |

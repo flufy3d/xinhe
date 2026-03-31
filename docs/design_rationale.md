@@ -61,22 +61,19 @@
 
 ---
 
-## 4. 为什么选 MiniMind 做初始 backbone，而不是从零训练？
+## 4. 为什么选小 LLM 做 backbone，而不是从零训练？
 
-**决策**：用 MiniMind（64M 参数）做机制验证，Qwen3-0.6B（600M 参数）做效果验证。
+**决策**：用现有的小型 LLM（600M~1B 级别）作为冻结 backbone，在上面训练 StatePlugin + LoRA。
 
 **最初计划**：从零训练一个 TinyTransformer（4 层，128 维）。
 
 **为什么改**：
 - 从零训练的小模型不会聊天，只能做 copy 任务等人造测试 → 无法通过聊天验证
 - 聊天验证是最直觉、最有说服力的验证方式："我叫张三" → 5 轮后 → "我叫什么？"
-- MiniMind 64M 可以快速验证流程跑通，Qwen3-0.6B 语言能力足够强可以验证实际效果
-- RTX 5080 16GB 两个 backbone 都轻松跑
+- 小 LLM 的语言能力足够验证 state 机制是否有效
+- RTX 5080 16GB 跑 600M 模型轻松
 
-**为什么两级 backbone**：
-- MiniMind 64M 语言理解太弱，即使 state 有效也难以从回答中看出效果 → 相当于单元测试
-- Qwen3-0.6B 语言能力强得多，能直接通过对话验证 state 是否改善了记忆 → 相当于集成测试
-- 切换只需改配置文件 (`configs/minimind.yaml` → `configs/qwen3-0.6b.yaml`)，代码不动
+**Backbone 可切换**：StatePlugin 完全独立于 backbone，切换只需改 yaml 配置。已实现 MiniMind（64M，早期流程验证）和 Qwen3-0.6B（600M，当前主力）两个 backbone，实际效果验证主要基于 Qwen3-0.6B。
 
 ---
 
@@ -136,6 +133,39 @@
 第二天：
 "早上好！昨天你说想换工作，我想了想..."
 ```
+
+### 6.6 Sleep 的具体设计（M4/M5 实验后更新）
+
+**Memory LoRA**：在 MLP 层（up_proj/down_proj/gate_proj）新增一套 LoRA，零初始化。
+- Transformer 可解释性研究已验证：Attention 层控制信息路由，MLP 层存储事实知识（Knowledge Neurons, ROME/MEMIT）
+- 因此 Skill LoRA（attention 层）教模型"怎么用 state"，Memory LoRA（MLP 层）存"记过什么"
+
+**回放数据**：对话时保存 (state_in, content, labels) 序列。Sleep 时按原始顺序回放，不需要事实提取或模板生成——state 对本身已包含一切信息。
+
+**State 弱化——迫使记忆转移到权重**：
+- Sleep 回放时逐步弱化 state 输入（100% → 50% → 0%）
+- 模型要降低 loss 的唯一方式是把事实编码进 LoRA 权重
+- 类比：老师收走笔记考试，逼学生把知识记到脑子里
+
+**分层学习率——连续可调的保护策略**：
+```
+Memory LoRA (MLP):     lr = 1e-4  （快速学习记忆）
+Skill LoRA (attention): lr = 1e-6  （极缓慢演化，允许经验积累）
+StatePlugin:            lr = 0     （完全冻结，保护 gate/scale 机制）
+```
+不是非黑即白的冻结，而是通过学习率比例控制各组件的演化速度。Memory LoRA 学得快（记东西），Skill LoRA 几乎不动但保留微弱的经验积累通道，StatePlugin 完全保护以免 state 弱化环境干扰 gate 行为。
+
+**醒来后的效果**：Memory LoRA 通过残差连接叠加到 backbone 输出上——
+- 新事实（还没 sleep）：靠 state，和以前一样
+- Sleep 过的事实：state + 权重双通道，信号更强更稳
+- State 清空后：权重兜底，仍能回答
+- 不会互相干扰，因为残差连接是加法，不是替换
+
+**长期愿景**：
+- State 从"唯一记忆载体"变为"当前对话的工作台"
+- LoRA 权重成为长期记忆的主体
+- Skill 和 Memory 在同一套权重体系中交织演化（通过学习率比例控制节奏）
+- Gate 专注对话内的信息时效管理，不再承担跨对话持久记忆的不可能任务
 
 ---
 
@@ -237,11 +267,20 @@
 
 **问题**：sleep 在线学习会不会破坏之前学到的？
 
-**多层防护**：
-1. **极小学习率**：sleep_lr = 1e-5，远小于预训练 lr(3e-4)，每次只微调一点
-2. **EWC 正则**：对重要权重施加正则化，防止大幅偏移
-3. **sleep 前保存 checkpoint**：出问题可以回滚
-4. **sanity check**：sleep 后跑几个标准测试，质量下降就回滚
-5. **最大更新幅度**：限制单次 sleep 的权重变化范围
+**核心防护——分层学习率**：
+- Memory LoRA (MLP) 用较高 lr → 快速记忆，允许变化
+- Skill LoRA (attention) 用极低 lr → 几乎不动，技能被保护
+- StatePlugin lr=0 → 完全冻结
+- 这不是硬冻结，而是连续可调的演化速率控制
+
+**辅助防护**：
+1. **sleep 前保存 checkpoint**：出问题可以回滚
+2. **sanity check**：sleep 后跑几个标准测试，质量下降就回滚
+
+**关于是否冻结 Skill LoRA 的思考**：
+- 人脑的技能和记忆存储在同一套突触权重中，不会"冻结"某些突触
+- 但人脑有回放混合（sleep 时同时回放旧记忆和新记忆）和慢速巩固机制
+- 心核的策略：不做硬冻结，而是通过学习率差异（1e-6 vs 1e-4 = 100 倍差距）实现"软保护"
+- 如果未来验证 Skill LoRA 更新确实有益（经验反哺技能），可以逐步提高其学习率
 
 **本质思考**：适度的"遗忘"不是 bug，是 feature。人也会忘事。关键是忘该忘的（不重要的细节），记该记的（重要的事实和模式）。gate 机制 + sleep 机制的组合就是在学习"什么该忘什么该记"。

@@ -90,31 +90,11 @@ curriculum:
       early_stop_loss: 0.01
       early_stop_patience: 200
 
-  # 阶段 5: 覆写能力 — M5 目标
-  # 在 M4 基础上加入 40% 覆写 episode，学会用新信息覆盖旧信息
-  - name: "5_overwrite"
+  # 阶段 5: 3 类事实 — 从 8 类中随机选 3 类（泛化到新类别）
+  - name: "5_fact3"
     data:
       num_train: 5000
-      max_pre_filler: 2
-      overwrite_ratio: 0.4
-      min_distance: 1
-      max_distance: 10
-      max_turns: 16
-    training:
-      episode_length: 16
-      tbptt_steps: 16
-      batch_size: 1
-      grad_accum_steps: 4
-      learning_rate: 1.0e-4
-      max_steps: 10000
-      early_stop_loss: 0.01
-      early_stop_patience: 200
-
-  # 阶段 6: 双事实 — 学会按类别区分存储
-  - name: "6_multi_fact_2"
-    data:
-      num_train: 5000
-      num_facts: 2
+      num_facts: 3
       max_pre_filler: 2
       no_overwrite: true
       min_distance: 1
@@ -130,11 +110,31 @@ curriculum:
       early_stop_loss: 0.01
       early_stop_patience: 200
 
-  # 阶段 7: 三事实 — 同时记住 name + city + number
-  - name: "7_multi_fact_3"
+  # 阶段 6: 5 类事实
+  - name: "6_fact5"
     data:
       num_train: 5000
-      num_facts: 3
+      num_facts: 5
+      max_pre_filler: 2
+      no_overwrite: true
+      min_distance: 1
+      max_distance: 5
+      max_turns: 16
+    training:
+      episode_length: 16
+      tbptt_steps: 16
+      batch_size: 1
+      grad_accum_steps: 4
+      learning_rate: 1.0e-4
+      max_steps: 10000
+      early_stop_loss: 0.01
+      early_stop_patience: 200
+
+  # 阶段 7: 8 类事实 — 全部类别
+  - name: "7_fact8"
+    data:
+      num_train: 5000
+      num_facts: 8
       max_pre_filler: 2
       no_overwrite: true
       min_distance: 1
@@ -147,5 +147,26 @@ curriculum:
       grad_accum_steps: 4
       learning_rate: 1.0e-4
       max_steps: 10000
-      early_stop_loss: 0.01
+      early_stop_loss: 0.05
+      early_stop_patience: 200
+
+  # 阶段 8: 覆写能力
+  # 8 类事实 + 40% 覆写
+  - name: "7_overwrite"
+    data:
+      num_train: 5000
+      num_facts: 8
+      max_pre_filler: 2
+      overwrite_ratio: 0.4
+      min_distance: 1
+      max_distance: 10
+      max_turns: 16
+    training:
+      episode_length: 16
+      tbptt_steps: 16
+      batch_size: 1
+      grad_accum_steps: 4
+      learning_rate: 1.0e-4
+      max_steps: 10000
+      early_stop_loss: 0.05
       early_stop_patience: 200
