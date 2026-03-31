@@ -181,21 +181,27 @@ def train_curriculum(base_config, stages, args):
     model = XinheModel(base_config)
     model.setup_device(torch.device(base_config.device))
 
-    # 如果从中间阶段开始，加载前一阶段的 checkpoint
-    if start_idx > 0:
+    # 加载初始权重: --resume 优先，否则加载前一阶段的 checkpoint
+    init_ckpt = None
+    if args.resume:
+        init_ckpt = args.resume
+    elif start_idx > 0:
         prev_ckpt = Path(f"checkpoints/curriculum/{stage_names[start_idx - 1]}.pt")
         if prev_ckpt.exists():
-            ckpt = torch.load(str(prev_ckpt), map_location=base_config.device, weights_only=False)
-            model.plugin.load_state_dict(ckpt["plugin_state"])
-            from xinhe.model.lora import LoRALinear
-            lora_state = ckpt.get("lora_state", {})
-            for name, module in model.backbone.named_modules():
-                if isinstance(module, LoRALinear):
-                    if f"{name}.lora_A" in lora_state:
-                        module.lora_A.data = lora_state[f"{name}.lora_A"]
-                    if f"{name}.lora_B" in lora_state:
-                        module.lora_B.data = lora_state[f"{name}.lora_B"]
-            print(f"[课程学习] 从 {prev_ckpt} 加载权重")
+            init_ckpt = str(prev_ckpt)
+
+    if init_ckpt:
+        ckpt = torch.load(init_ckpt, map_location=base_config.device, weights_only=False)
+        model.plugin.load_state_dict(ckpt["plugin_state"])
+        from xinhe.model.lora import LoRALinear
+        lora_state = ckpt.get("lora_state", {})
+        for name, module in model.backbone.named_modules():
+            if isinstance(module, LoRALinear):
+                if f"{name}.lora_A" in lora_state:
+                    module.lora_A.data = lora_state[f"{name}.lora_A"]
+                if f"{name}.lora_B" in lora_state:
+                    module.lora_B.data = lora_state[f"{name}.lora_B"]
+        print(f"[课程学习] 从 {init_ckpt} 加载权重")
 
     trainer = None
 

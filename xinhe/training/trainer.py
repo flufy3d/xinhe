@@ -65,8 +65,8 @@ class Trainer:
         self.best_val_loss = float("inf")
         self._accum_count = 0  # 梯度累积计数器
 
-        # 早停状态
-        self._early_stop_count = 0
+        # 早停状态 (基于 EMA loss，避免单个 outlier episode 重置计数)
+        self._ema_loss = None
         self._early_stopped = False
 
     def _build_scheduler(self):
@@ -227,17 +227,18 @@ class Trainer:
         if self.global_step % self.config.save_every == 0:
             self._save_checkpoint()
 
-        # 早停检查
+        # 早停检查 (基于 EMA loss)
         early_stop_loss = getattr(self.config, 'early_stop_loss', 0)
         early_stop_patience = getattr(self.config, 'early_stop_patience', 0)
         if early_stop_loss > 0 and early_stop_patience > 0:
-            if last_loss < early_stop_loss:
-                self._early_stop_count += 1
-                if self._early_stop_count >= early_stop_patience:
-                    self._early_stopped = True
-                    print(f"  [早停] loss < {early_stop_loss} 持续 {early_stop_patience} 步")
+            alpha = 2.0 / (early_stop_patience + 1)
+            if self._ema_loss is None:
+                self._ema_loss = last_loss
             else:
-                self._early_stop_count = 0
+                self._ema_loss = alpha * last_loss + (1 - alpha) * self._ema_loss
+            if self._ema_loss < early_stop_loss and self.global_step >= early_stop_patience:
+                self._early_stopped = True
+                print(f"  [早停] EMA loss={self._ema_loss:.6f} < {early_stop_loss}")
 
     def reset_for_new_stage(self, config: XinheConfig, train_dataloader: DataLoader,
                             val_dataloader: Optional[DataLoader] = None):
@@ -247,7 +248,7 @@ class Trainer:
         self.val_dataloader = val_dataloader
         self.global_step = 0
         self._accum_count = 0
-        self._early_stop_count = 0
+        self._ema_loss = None
         self._early_stopped = False
 
         self.optimizer = torch.optim.AdamW(
