@@ -373,6 +373,99 @@ RECALL_TEMPLATES = {
     ],
 }
 
+# ── 实体定义 (我/你/他/她/它) ──
+
+ENTITIES = [
+    {"tell": "我", "recall_a": "你"},
+    {"tell": "你", "recall_a": "我"},
+    {"tell": "他", "recall_a": "他"},
+    {"tell": "她", "recall_a": "她"},
+    {"tell": "它", "recall_a": "它"},
+]
+
+# 实体模板：{e}=告知主语, {ea}=回答主语, {v}=值
+ENTITY_FACT_TEMPLATES = {
+    "name": [
+        ("{e}叫{v}。", "好的，{ea}叫{v}！"),
+        ("{e}的名字是{v}。", "好的，{ea}叫{v}，记住了。"),
+        ("{e}名叫{v}。", "好的，{ea}叫{v}！"),
+    ],
+    "number": [
+        ("{e}的编号是{v}。", "好的，{ea}的编号是{v}。"),
+        ("{e}的号码是{v}。", "好的，{ea}是{v}号。"),
+    ],
+    "city": [
+        ("{e}住在{v}。", "好的，{ea}住在{v}。"),
+        ("{e}在{v}生活。", "好的，{ea}在{v}。"),
+        ("{e}是{v}人。", "好的，{ea}是{v}人。"),
+    ],
+    "food": [
+        ("{e}喜欢吃{v}。", "好的，{ea}喜欢吃{v}。"),
+        ("{e}最爱吃{v}。", "好的，{ea}最爱{v}。"),
+    ],
+    "job": [
+        ("{e}是{v}。", "好的，{ea}是{v}。"),
+        ("{e}的职业是{v}。", "好的，{ea}是{v}。"),
+    ],
+    "hobby": [
+        ("{e}喜欢{v}。", "好的，{ea}喜欢{v}。"),
+        ("{e}的爱好是{v}。", "好的，{ea}喜欢{v}。"),
+    ],
+    "age": [
+        ("{e}今年{v}岁。", "好的，{ea}{v}岁。"),
+        ("{e}{v}岁了。", "好的，{ea}{v}岁。"),
+    ],
+    "pet": [
+        ("{e}养了一只{v}。", "好的，{ea}养了{v}。"),
+        ("{e}有一只{v}。", "好的，{ea}有{v}。"),
+    ],
+}
+
+ENTITY_RECALL_TEMPLATES = {
+    "name": [
+        ("{e}叫什么？", "{ea}叫{v}。"),
+        ("{e}叫什么名字？", "{ea}叫{v}。"),
+    ],
+    "number": [
+        ("{e}的编号是什么？", "{ea}的编号是{v}。"),
+        ("{e}是几号？", "{ea}是{v}号。"),
+    ],
+    "city": [
+        ("{e}住在哪里？", "{ea}住在{v}。"),
+        ("{e}是哪里人？", "{ea}是{v}人。"),
+    ],
+    "food": [
+        ("{e}喜欢吃什么？", "{ea}喜欢吃{v}。"),
+        ("{e}爱吃什么？", "{ea}爱吃{v}。"),
+    ],
+    "job": [
+        ("{e}是做什么的？", "{ea}是{v}。"),
+        ("{e}的职业是什么？", "{ea}是{v}。"),
+    ],
+    "hobby": [
+        ("{e}喜欢什么？", "{ea}喜欢{v}。"),
+        ("{e}的爱好是什么？", "{ea}喜欢{v}。"),
+    ],
+    "age": [
+        ("{e}多大了？", "{ea}{v}岁了。"),
+        ("{e}几岁？", "{ea}{v}岁。"),
+    ],
+    "pet": [
+        ("{e}养了什么？", "{ea}养了{v}。"),
+        ("{e}的宠物是什么？", "{ea}的宠物是{v}。"),
+    ],
+}
+
+# ── 对话回忆模板 ──
+
+CONV_RECALL_TEMPLATES = [
+    ("我刚才说了什么？", "你说了「{v}」。"),
+    ("我上一句说的啥？", "你说了「{v}」。"),
+    ("你还记得我刚才说的吗？", "你刚才说「{v}」。"),
+    ("我刚刚问了什么？", "你问了「{v}」。"),
+    ("我刚才跟你说了啥？", "你说了「{v}」。"),
+]
+
 # ── 闲聊填充 ──
 
 FILLERS = [
@@ -638,6 +731,120 @@ def generate_overwrite_episode(
     return turns[:max_turns]
 
 
+def generate_entity_episode(
+    rng: random.Random,
+    min_distance: int = 1,
+    max_distance: int = 4,
+    max_turns: int = 16,
+    num_facts: int = 2,
+    fillers: list = None,
+    pre_filler: bool = True,
+    max_pre_filler: int = 3,
+) -> list[dict]:
+    """
+    生成实体区分 episode: 不同实体(我/你/他/她/它)的事实，recall 时需区分。
+
+    结构: [前置闲聊] [tell×N(不同实体)] [闲聊填充] [recall×N(打乱顺序)] [补充]
+    """
+    if fillers is None:
+        fillers = FILLERS
+
+    # 随机选不同实体和不同类别
+    entities = rng.sample(ENTITIES, min(num_facts, len(ENTITIES)))
+    generators = {
+        "name": lambda: random_name(rng), "number": lambda: random_number(rng),
+        "city": lambda: random_city(rng), "food": lambda: random_food(rng),
+        "job": lambda: random_job(rng), "hobby": lambda: random_hobby(rng),
+        "age": lambda: random_age(rng), "pet": lambda: random_pet(rng),
+    }
+    categories = rng.sample(list(generators.keys()), min(num_facts, len(generators)))
+
+    facts = []
+    for i in range(min(len(entities), len(categories))):
+        facts.append({
+            "entity": entities[i],
+            "category": categories[i],
+            "value": generators[categories[i]](),
+        })
+
+    turns = []
+
+    # 前置闲聊
+    pre_filler_count = rng.randint(0, max_pre_filler) if pre_filler else 0
+    for _ in range(pre_filler_count):
+        filler = rng.choice(fillers)
+        turns.append({"user": filler[0], "assistant": filler[1], "train_loss": False})
+
+    # 告知阶段: 每个事实一轮 (带实体前缀)
+    for fact in facts:
+        e = fact["entity"]
+        cat = fact["category"]
+        template = rng.choice(ENTITY_FACT_TEMPLATES[cat])
+        user_text = template[0].format(e=e["tell"], v=fact["value"])
+        asst_text = template[1].format(e=e["tell"], ea=e["recall_a"], v=fact["value"])
+        turns.append({"user": user_text, "assistant": asst_text, "train_loss": True})
+
+    # 闲聊填充
+    distance = rng.randint(min_distance, max_distance)
+    for _ in range(distance):
+        filler = rng.choice(fillers)
+        turns.append({"user": filler[0], "assistant": filler[1], "train_loss": False})
+
+    # 回忆阶段: 每个事实都提问 (打乱顺序)
+    recall_order = facts[:]
+    rng.shuffle(recall_order)
+    for fact in recall_order:
+        e = fact["entity"]
+        cat = fact["category"]
+        template = rng.choice(ENTITY_RECALL_TEMPLATES[cat])
+        user_text = template[0].format(e=e["tell"], v=fact["value"])
+        asst_text = template[1].format(ea=e["recall_a"], v=fact["value"])
+        turns.append({"user": user_text, "assistant": asst_text, "train_loss": True})
+
+    # 补充闲聊到 max_turns
+    while len(turns) < max_turns:
+        filler = rng.choice(fillers)
+        turns.append({"user": filler[0], "assistant": filler[1], "train_loss": False})
+
+    return turns[:max_turns]
+
+
+def generate_recall_episode(
+    rng: random.Random,
+    max_turns: int = 16,
+    fillers: list = None,
+) -> list[dict]:
+    """
+    生成对话回忆 episode: 几轮闲聊后问"我刚才说了什么"，回忆上一轮内容。
+
+    结构: [闲聊×N] [回忆上一轮] [补充闲聊]
+    """
+    if fillers is None:
+        fillers = FILLERS
+
+    turns = []
+
+    # 先生成 2~5 轮闲聊
+    num_chat = rng.randint(2, 5)
+    used_fillers = rng.sample(fillers, min(num_chat, len(fillers)))
+    for filler in used_fillers:
+        turns.append({"user": filler[0], "assistant": filler[1], "train_loss": False})
+
+    # 回忆上一轮的 user 内容
+    last_user_said = used_fillers[-1][0]
+    template = rng.choice(CONV_RECALL_TEMPLATES)
+    user_text = template[0]
+    asst_text = template[1].format(v=last_user_said)
+    turns.append({"user": user_text, "assistant": asst_text, "train_loss": True})
+
+    # 补充闲聊到 max_turns
+    while len(turns) < max_turns:
+        filler = rng.choice(fillers)
+        turns.append({"user": filler[0], "assistant": filler[1], "train_loss": False})
+
+    return turns[:max_turns]
+
+
 def episode_to_jsonl(turns: list[dict]) -> str:
     """将轮次列表转为 JSONL 行 (ShareGPT 格式 + train_loss 标记)。"""
     conversations = []
@@ -677,10 +884,18 @@ def generate_data(
     max_pre_filler: int = 3,
     no_overwrite: bool = False,
     overwrite_ratio: float = 0.4,
+    entity_ratio: float = 0.0,
+    recall_ratio: float = 0.0,
     seed: int = 42,
 ):
     """
     生成训练/验证数据到指定目录。供 train.py 课程学习调用。
+
+    Episode 类型按比例分配:
+        entity_ratio → 实体区分 episode
+        recall_ratio → 对话回忆 episode
+        overwrite_ratio → 覆写 episode (剩余空间内)
+        其余 → 普通记忆 episode
 
     返回: (train_path, val_path)
     """
@@ -695,7 +910,25 @@ def generate_data(
     def gen_episodes(rng: random.Random, num: int):
         episodes = []
         for _ in range(num):
-            if overwrite_ratio > 0 and rng.random() < overwrite_ratio:
+            r = rng.random()
+            if r < entity_ratio:
+                turns = generate_entity_episode(
+                    rng,
+                    min_distance=min_distance,
+                    max_distance=max_distance,
+                    max_turns=max_turns,
+                    num_facts=num_facts,
+                    fillers=active_fillers,
+                    pre_filler=use_pre_filler,
+                    max_pre_filler=max_pre_filler,
+                )
+            elif r < entity_ratio + recall_ratio:
+                turns = generate_recall_episode(
+                    rng,
+                    max_turns=max_turns,
+                    fillers=active_fillers,
+                )
+            elif r < entity_ratio + recall_ratio + overwrite_ratio:
                 turns = generate_overwrite_episode(
                     rng,
                     min_distance=min_distance,

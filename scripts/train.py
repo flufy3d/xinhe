@@ -120,6 +120,8 @@ def generate_stage_data(stage: dict, stage_name: str) -> tuple[str, str]:
         max_pre_filler=data_cfg.get("max_pre_filler", 3),
         no_overwrite=data_cfg.get("no_overwrite", False),
         overwrite_ratio=data_cfg.get("overwrite_ratio", 0.4),
+        entity_ratio=data_cfg.get("entity_ratio", 0.0),
+        recall_ratio=data_cfg.get("recall_ratio", 0.0),
         seed=data_cfg.get("seed", 42),
     )
 
