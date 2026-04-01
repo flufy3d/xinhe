@@ -147,7 +147,7 @@ curriculum:
       grad_accum_steps: 4
       learning_rate: 1.0e-4
       max_steps: 10000
-      early_stop_loss: 0.05
+      early_stop_loss: 0.02
       early_stop_patience: 200
 
   # 阶段 8: 覆写能力
@@ -168,7 +168,7 @@ curriculum:
       grad_accum_steps: 4
       learning_rate: 1.0e-4
       max_steps: 10000
-      early_stop_loss: 0.05
+      early_stop_loss: 0.02
       early_stop_patience: 200
 
   # 阶段 9: 实体区分 — 我/你/他/她/它
@@ -188,7 +188,7 @@ curriculum:
       grad_accum_steps: 4
       learning_rate: 1.0e-4
       max_steps: 10000
-      early_stop_loss: 0.05
+      early_stop_loss: 0.02
       early_stop_patience: 200
 
   # 阶段 10: 对话回忆 — 记住上一轮说了什么
@@ -206,7 +206,7 @@ curriculum:
       grad_accum_steps: 4
       learning_rate: 1.0e-4
       max_steps: 10000
-      early_stop_loss: 0.05
+      early_stop_loss: 0.02
       early_stop_patience: 200
 
   # 阶段 11: 全能力混合
@@ -227,5 +227,5 @@ curriculum:
       grad_accum_steps: 4
       learning_rate: 1.0e-4
       max_steps: 10000
-      early_stop_loss: 0.05
+      early_stop_loss: 0.02
       early_stop_patience: 200
