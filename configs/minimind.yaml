@@ -12,3 +12,7 @@ backbone:
 
 state:
   state_dim: 768
+
+lora:
+  rank: 64
+  alpha: 128

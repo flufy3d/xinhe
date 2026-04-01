@@ -26,7 +26,12 @@ def load_model_and_tokenizer(config, checkpoint_path, device):
 
     if checkpoint_path:
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-        model.plugin.load_state_dict(checkpoint["plugin_state"])
+        try:
+            model.plugin.load_state_dict(checkpoint["plugin_state"])
+        except RuntimeError as e:
+            raise RuntimeError(
+                "checkpoint 与 --config 不匹配。"
+            ) from e
         from xinhe.model.lora import LoRALinear
         lora_state = checkpoint.get("lora_state", {})
         for name, module in model.backbone.named_modules():
@@ -63,10 +68,24 @@ def main():
     parser.add_argument("--output", type=str, default=None, help="结果输出 JSON 路径")
     args = parser.parse_args()
 
+    checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+
     config, _ = XinheConfig.from_yaml(args.config)
+    config_explicit = "--config" in sys.argv
+    if not config_explicit and isinstance(checkpoint.get("config"), XinheConfig):
+        config = checkpoint["config"]
+        print(f"  使用 checkpoint 内置配置: backbone={config.backbone_type}")
+    elif not config_explicit and "config" not in checkpoint:
+        print("  提示: 请使用与 checkpoint 匹配的 --config。")
+
     device = torch.device(config.device if torch.cuda.is_available() else "cpu")
 
     print("=== 心核 评估 ===")
+    if config_explicit and isinstance(checkpoint.get("config"), XinheConfig):
+        ckpt_cfg = checkpoint["config"]
+        if (ckpt_cfg.backbone_type != config.backbone_type) or (ckpt_cfg.hidden_size != config.hidden_size):
+            print("警告: --config 与 checkpoint 不匹配。")
+
     model, tokenizer = load_model_and_tokenizer(config, args.checkpoint, device)
 
     results = {}

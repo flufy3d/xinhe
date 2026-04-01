@@ -22,7 +22,7 @@ def run(cmd: list[str], check=True):
 
 
 def ssh_cmd(host, port):
-    return ["ssh", "-p", port, "-o", "StrictHostKeyChecking=no", host]
+    return ["ssh", "-p", port, "-o", "StrictHostKeyChecking=no", "-o", "LogLevel=ERROR", host]
 
 
 def main():
@@ -66,16 +66,25 @@ def main():
     print("\n[2/3] 同步模型权重...")
     run(ssh_cmd(host, port) + [
         f"mkdir -p {REMOTE_DIR}/models && "
-        f"ln -sfn /root/public-storage/model/Qwen/Qwen3-0.6B {REMOTE_DIR}/models/qwen3-0.6b"
+        f"ln -sfn /root/public-storage/model/Qwen/Qwen3-0.6B {REMOTE_DIR}/models/qwen3-0.6b && "
+        f"ln -sfn /root/shared-storage/model/minimind-3 {REMOTE_DIR}/models/minimind"
     ])
     print("  qwen3-0.6b -> 软链接自 public-storage")
+    print("  minimind   -> 软链接自 shared-storage")
 
-    # ── 3. 远端：uv sync + 生成数据 ─────────────────────────
+    # ── 3. 远端：安装 uv（如缺失）并同步依赖 ─────────────────
     print("\n[3/3] 远端初始化...")
     init_script = f"""
 set -e
 cd {REMOTE_DIR}
 echo '--- 安装依赖 ---'
+# 非交互 shell 下 .bashrc 可能不生效，先补常见 conda 路径
+export PATH="/opt/conda/bin:$HOME/.local/bin:$PATH"
+# 若远端仍未安装 uv，则自动安装
+if ! command -v uv >/dev/null 2>&1; then
+  echo 'uv 未安装，开始自动安装...'
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+fi
 uv sync
 
 

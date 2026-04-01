@@ -94,8 +94,20 @@ def main():
     parser.add_argument("--top-p", type=float, default=0.95)
     args = parser.parse_args()
 
-    # 加载配置和模型
+    # 加载 checkpoint（如提供）
+    checkpoint = None
+    if args.checkpoint:
+        checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+
+    # 优先使用配置文件；当未显式传 --config 时，自动采用 checkpoint 中保存的配置
     config, _ = XinheConfig.from_yaml(args.config)
+    config_explicit = "--config" in sys.argv
+    if checkpoint and not config_explicit and isinstance(checkpoint.get("config"), XinheConfig):
+        config = checkpoint["config"]
+        print(f"  使用 checkpoint 内置配置: backbone={config.backbone_type}")
+    elif checkpoint and not config_explicit and "config" not in checkpoint:
+        print("  提示: 请使用与 checkpoint 匹配的 --config。")
+
     device = torch.device(config.device if torch.cuda.is_available() else "cpu")
 
     print("=== 心核 (Xinhe) 交互式聊天 ===")
@@ -105,9 +117,18 @@ def main():
     model = XinheModel(config)
 
     # 加载训练好的 checkpoint
-    if args.checkpoint:
-        checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
-        model.plugin.load_state_dict(checkpoint["plugin_state"])
+    if checkpoint:
+        # 若用户显式指定了 --config，但与 checkpoint 配置不一致，给出提示
+        ckpt_cfg = checkpoint.get("config")
+        if config_explicit and isinstance(ckpt_cfg, XinheConfig):
+            if (ckpt_cfg.backbone_type != config.backbone_type) or (ckpt_cfg.hidden_size != config.hidden_size):
+                print("  警告: --config 与 checkpoint 不匹配。")
+        try:
+            model.plugin.load_state_dict(checkpoint["plugin_state"])
+        except RuntimeError as e:
+            raise RuntimeError(
+                "checkpoint 与 --config 不匹配。"
+            ) from e
         # 恢复 LoRA
         from xinhe.model.lora import LoRALinear
         lora_state = checkpoint.get("lora_state", {})

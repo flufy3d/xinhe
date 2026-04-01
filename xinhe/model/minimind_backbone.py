@@ -31,7 +31,12 @@ class MiniMindBackbone(nn.Module, BackboneBase):
 
         # 加载预训练权重
         weights_path = Path(config.backbone_weights_path)
-        if weights_path.exists():
+        if config.backbone_weights_path:
+            if not weights_path.exists():
+                raise FileNotFoundError(
+                    f"MiniMind 权重文件不存在: {weights_path}. "
+                    f"请检查 configs/minimind.yaml 中的 backbone.weights_path。"
+                )
             if weights_path.suffix == ".safetensors":
                 from safetensors.torch import load_file
                 state_dict = load_file(str(weights_path))
