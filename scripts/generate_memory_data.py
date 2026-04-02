@@ -458,13 +458,63 @@ ENTITY_RECALL_TEMPLATES = {
 
 # ── 对话回忆模板 ──
 
-CONV_RECALL_TEMPLATES = [
+# 回忆 user 发言
+CONV_RECALL_USER_TEMPLATES = [
     ("我刚才说了什么？", "你说了「{v}」。"),
     ("我上一句说的啥？", "你说了「{v}」。"),
     ("你还记得我刚才说的吗？", "你刚才说「{v}」。"),
     ("我刚刚问了什么？", "你问了「{v}」。"),
     ("我刚才跟你说了啥？", "你说了「{v}」。"),
 ]
+
+# 回忆 AI 自己的发言 (双向记忆: 连续梦境的基础)
+CONV_RECALL_AI_TEMPLATES = [
+    ("你刚才说了什么？", "我说了「{v}」。"),
+    ("你上一句回答的啥？", "我说了「{v}」。"),
+    ("你还记得你刚才的回复吗？", "我刚才说「{v}」。"),
+    ("你刚刚回答了什么？", "我回答了「{v}」。"),
+    ("你之前怎么说的？", "我说了「{v}」。"),
+]
+
+# ── 动态对话内容模板 (每次随机生成唯一内容，防止记忆固定 filler) ──
+# 格式: (user_template, assistant_response, generator_type)
+
+DYNAMIC_CONTENT_TEMPLATES = [
+    ("我昨天去了{v}。", "{v}是个好地方！", "city"),
+    ("我刚认识了一个叫{v}的人。", "认识新朋友是好事！", "name"),
+    ("我最近在学{v}。", "听起来很有趣！", "hobby"),
+    ("我想养一只{v}。", "{v}很可爱！", "pet"),
+    ("我打算今晚吃{v}。", "{v}确实不错！", "food"),
+    ("我朋友是{v}。", "{v}是个好职业！", "job"),
+    ("我记得有个编号是{v}。", "好的，{v}。", "number"),
+    ("我在{v}待过一段时间。", "{v}不错呢。", "city"),
+    ("我认识一个{v}。", "是嘛！", "job"),
+    ("我以前特别喜欢{v}。", "那是很棒的爱好！", "hobby"),
+    ("我家以前养过{v}。", "真的吗？{v}很好养。", "pet"),
+    ("我昨天点了{v}外卖。", "{v}好吃吗？", "food"),
+    ("有个朋友叫{v}，你帮我记一下。", "好的，{v}，记住了。", "name"),
+    ("我上周去{v}出差了。", "{v}出差辛苦了。", "city"),
+    ("我同事的号码好像是{v}。", "好的，{v}。", "number"),
+    ("最近迷上了{v}。", "{v}挺有意思的！", "hobby"),
+    ("我邻居养了一只{v}。", "{v}养起来应该挺有趣。", "pet"),
+    ("我妈做的{v}特别好吃。", "家里做的{v}一定很香！", "food"),
+    ("我表妹叫{v}。", "{v}这名字不错！", "name"),
+    ("我之前在{v}上过学。", "{v}的学校不错。", "city"),
+]
+
+# 动态内容生成器映射
+_DYNAMIC_GENERATORS = {
+    "name": random_name, "number": random_number, "city": random_city,
+    "food": random_food, "job": random_job, "hobby": random_hobby,
+    "age": random_age, "pet": random_pet,
+}
+
+
+def generate_dynamic_content(rng: random.Random) -> tuple[str, str]:
+    """生成唯一的动态对话内容 (user_text, assistant_text)。"""
+    template = rng.choice(DYNAMIC_CONTENT_TEMPLATES)
+    value = _DYNAMIC_GENERATORS[template[2]](rng)
+    return template[0].format(v=value), template[1].format(v=value)
 
 # ── 闲聊填充 ──
 
@@ -604,11 +654,15 @@ def sample_facts(rng: random.Random, num_facts: int = 1) -> list[dict]:
     return [{"category": cat, "value": generators[cat]()} for cat in categories]
 
 
-def make_turn(template_pair: tuple[str, str], value: str, train_loss: bool = False) -> dict:
-    """用模板生成一轮 user+assistant 对话。"""
+def make_turn(template_pair: tuple[str, str], value: str, train_loss: bool = False,
+              recall_value: str = None) -> dict:
+    """用模板生成一轮 user+assistant 对话。recall_value: recall turn 中需精准度量的值。"""
     user_text = template_pair[0].format(v=value)
     asst_text = template_pair[1].format(v=value)
-    return {"user": user_text, "assistant": asst_text, "train_loss": train_loss}
+    turn = {"user": user_text, "assistant": asst_text, "train_loss": train_loss}
+    if recall_value is not None:
+        turn["value"] = recall_value
+    return turn
 
 
 def generate_episode(
@@ -656,7 +710,8 @@ def generate_episode(
     for recall_fact in recall_order:
         cat = recall_fact["category"]
         template = rng.choice(RECALL_TEMPLATES[cat])
-        turn = make_turn(template, recall_fact["value"], train_loss=True)
+        turn = make_turn(template, recall_fact["value"], train_loss=True,
+                         recall_value=recall_fact["value"])
         turns.append(turn)
 
     # 补充闲聊到 max_turns (不计算 loss)
@@ -721,7 +776,8 @@ def generate_overwrite_episode(
 
     # 回忆（应答新值）
     recall_template = rng.choice(RECALL_TEMPLATES[cat])
-    turns.append(make_turn(recall_template, new_value, train_loss=True))
+    turns.append(make_turn(recall_template, new_value, train_loss=True,
+                           recall_value=new_value))
 
     # 补充到 max_turns
     while len(turns) < max_turns:
@@ -740,16 +796,18 @@ def generate_entity_episode(
     fillers: list = None,
     pre_filler: bool = True,
     max_pre_filler: int = 3,
+    same_category: bool = False,
 ) -> list[dict]:
     """
     生成实体区分 episode: 不同实体(我/你/他/她/它)的事实，recall 时需区分。
 
     结构: [前置闲聊] [tell×N(不同实体)] [闲聊填充] [recall×N(打乱顺序)] [补充]
+    same_category=True 时所有实体共享一个类别，迫使模型学会绑定 entity→value。
     """
     if fillers is None:
         fillers = FILLERS
 
-    # 随机选不同实体和不同类别
+    # 随机选不同实体
     entities = rng.sample(ENTITIES, min(num_facts, len(ENTITIES)))
     generators = {
         "name": lambda: random_name(rng), "number": lambda: random_number(rng),
@@ -757,7 +815,12 @@ def generate_entity_episode(
         "job": lambda: random_job(rng), "hobby": lambda: random_hobby(rng),
         "age": lambda: random_age(rng), "pet": lambda: random_pet(rng),
     }
-    categories = rng.sample(list(generators.keys()), min(num_facts, len(generators)))
+    # 同类别绑定: 所有实体共享一个类别，各自不同值
+    if same_category:
+        shared_cat = rng.choice(list(generators.keys()))
+        categories = [shared_cat] * min(num_facts, len(entities))
+    else:
+        categories = rng.sample(list(generators.keys()), min(num_facts, len(generators)))
 
     facts = []
     for i in range(min(len(entities), len(categories))):
@@ -799,7 +862,10 @@ def generate_entity_episode(
         template = rng.choice(ENTITY_RECALL_TEMPLATES[cat])
         user_text = template[0].format(e=e["tell"], v=fact["value"])
         asst_text = template[1].format(ea=e["recall_a"], v=fact["value"])
-        turns.append({"user": user_text, "assistant": asst_text, "train_loss": True})
+        # value 包含实体代词+值，因为代词是绑定信号
+        recall_val = asst_text.rstrip("。！!.").lstrip()
+        turns.append({"user": user_text, "assistant": asst_text,
+                       "train_loss": True, "value": recall_val})
 
     # 补充闲聊到 max_turns
     while len(turns) < max_turns:
@@ -813,29 +879,42 @@ def generate_recall_episode(
     rng: random.Random,
     max_turns: int = 16,
     fillers: list = None,
+    ai_recall_ratio: float = 0.0,
 ) -> list[dict]:
     """
-    生成对话回忆 episode: 几轮闲聊后问"我刚才说了什么"，回忆上一轮内容。
+    生成对话回忆 episode: 几轮闲聊后回忆上一轮内容。
 
-    结构: [闲聊×N] [回忆上一轮] [补充闲聊]
+    结构: [闲聊×(N-1)] [动态内容(被回忆)] [回忆提问] [补充闲聊]
+    ai_recall_ratio: 回忆 AI 发言的概率 (0=只回忆 user, 0.5=各半)。
+    最后一轮使用动态生成内容（随机值注入），确保每 episode 唯一。
     """
     if fillers is None:
         fillers = FILLERS
 
     turns = []
 
-    # 先生成 2~5 轮闲聊
-    num_chat = rng.randint(2, 5)
-    used_fillers = rng.sample(fillers, min(num_chat, len(fillers)))
-    for filler in used_fillers:
+    # 前置闲聊 1~4 轮 (固定 filler，不被回忆)
+    num_pre_chat = rng.randint(1, 4)
+    pre_fillers = rng.sample(fillers, min(num_pre_chat, len(fillers)))
+    for filler in pre_fillers:
         turns.append({"user": filler[0], "assistant": filler[1], "train_loss": False})
 
-    # 回忆上一轮的 user 内容
-    last_user_said = used_fillers[-1][0]
-    template = rng.choice(CONV_RECALL_TEMPLATES)
+    # 最后一轮: 动态生成内容 (这轮将被回忆)
+    dynamic_user, dynamic_asst = generate_dynamic_content(rng)
+    turns.append({"user": dynamic_user, "assistant": dynamic_asst, "train_loss": False})
+
+    # 选择回忆 user 还是 AI 的发言
+    if rng.random() < ai_recall_ratio:
+        template = rng.choice(CONV_RECALL_AI_TEMPLATES)
+        recalled_text = dynamic_asst
+    else:
+        template = rng.choice(CONV_RECALL_USER_TEMPLATES)
+        recalled_text = dynamic_user
+
     user_text = template[0]
-    asst_text = template[1].format(v=last_user_said)
-    turns.append({"user": user_text, "assistant": asst_text, "train_loss": True})
+    asst_text = template[1].format(v=recalled_text)
+    turns.append({"user": user_text, "assistant": asst_text,
+                   "train_loss": True, "value": recalled_text})
 
     # 补充闲聊到 max_turns
     while len(turns) < max_turns:
@@ -846,15 +925,18 @@ def generate_recall_episode(
 
 
 def episode_to_jsonl(turns: list[dict]) -> str:
-    """将轮次列表转为 JSONL 行 (ShareGPT 格式 + train_loss 标记)。"""
+    """将轮次列表转为 JSONL 行 (ShareGPT 格式 + train_loss 标记 + value 精准度量)。"""
     conversations = []
     for turn in turns:
         conversations.append({"role": "user", "content": turn["user"]})
-        conversations.append({
+        entry = {
             "role": "assistant",
             "content": turn["assistant"],
             "train_loss": turn.get("train_loss", True),
-        })
+        }
+        if "value" in turn:
+            entry["value"] = turn["value"]
+        conversations.append(entry)
     return json.dumps({"conversations": conversations}, ensure_ascii=False)
 
 
@@ -886,6 +968,8 @@ def generate_data(
     overwrite_ratio: float = 0.4,
     entity_ratio: float = 0.0,
     recall_ratio: float = 0.0,
+    same_category: float = 0.0,
+    ai_recall_ratio: float = 0.0,
     seed: int = 42,
 ):
     """
@@ -921,12 +1005,14 @@ def generate_data(
                     fillers=active_fillers,
                     pre_filler=use_pre_filler,
                     max_pre_filler=max_pre_filler,
+                    same_category=rng.random() < same_category,
                 )
             elif r < entity_ratio + recall_ratio:
                 turns = generate_recall_episode(
                     rng,
                     max_turns=max_turns,
                     fillers=active_fillers,
+                    ai_recall_ratio=ai_recall_ratio,
                 )
             elif r < entity_ratio + recall_ratio + overwrite_ratio:
                 turns = generate_overwrite_episode(
@@ -982,6 +1068,9 @@ def main():
     parser.add_argument("--no-pre-filler", action="store_true", help="禁用 tell 前的随机闲聊")
     parser.add_argument("--max-pre-filler", type=int, default=3, help="最大前置闲聊轮数")
     parser.add_argument("--no-overwrite", action="store_true", help="禁用覆写 episode")
+    parser.add_argument("--entity-ratio", type=float, default=0.0, help="实体区分 episode 比例")
+    parser.add_argument("--recall-ratio", type=float, default=0.0, help="对话回忆 episode 比例")
+    parser.add_argument("--same-category", type=float, default=0.0, help="同类别绑定概率 (0-1)")
     args = parser.parse_args()
 
     # 预览模式
@@ -992,7 +1081,14 @@ def main():
         rng = random.Random(args.seed)
         episodes = []
         for _ in range(args.preview):
-            if overwrite_ratio > 0 and rng.random() < overwrite_ratio:
+            r = rng.random()
+            if args.entity_ratio > 0 and r < args.entity_ratio:
+                ep = generate_entity_episode(rng, args.min_distance, args.max_distance,
+                    args.max_turns, args.num_facts, active_fillers, use_pre_filler,
+                    args.max_pre_filler, same_category=rng.random() < args.same_category)
+            elif args.recall_ratio > 0 and r < args.entity_ratio + args.recall_ratio:
+                ep = generate_recall_episode(rng, args.max_turns, active_fillers)
+            elif overwrite_ratio > 0 and rng.random() < overwrite_ratio:
                 ep = generate_overwrite_episode(rng, args.min_distance, args.max_distance,
                     args.max_turns, active_fillers, use_pre_filler, args.max_pre_filler)
             else:
@@ -1017,6 +1113,9 @@ def main():
         no_pre_filler=args.no_pre_filler,
         max_pre_filler=args.max_pre_filler,
         no_overwrite=args.no_overwrite,
+        entity_ratio=args.entity_ratio,
+        recall_ratio=args.recall_ratio,
+        same_category=args.same_category,
         seed=args.seed,
     )
 

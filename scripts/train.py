@@ -122,6 +122,8 @@ def generate_stage_data(stage: dict, stage_name: str) -> tuple[str, str]:
         overwrite_ratio=data_cfg.get("overwrite_ratio", 0.4),
         entity_ratio=data_cfg.get("entity_ratio", 0.0),
         recall_ratio=data_cfg.get("recall_ratio", 0.0),
+        same_category=data_cfg.get("same_category", 0.0),
+        ai_recall_ratio=data_cfg.get("ai_recall_ratio", 0.0),
         seed=data_cfg.get("seed", 42),
     )
 

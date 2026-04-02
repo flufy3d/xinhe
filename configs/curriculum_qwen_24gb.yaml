@@ -1,16 +1,15 @@
 # ============================================================
-# 心核课程学习配置 (Qwen3-0.6B)
+# 心核课程学习配置 (Qwen3-0.6B) — 24GB 显存优化
 #
-# 分阶段训练，每阶段自动生成数据、训练、保存 checkpoint。
+# 相比原版: 后期阶段 batch_size=2, grad_accum_steps=2，训练更快。
 # 用法:
-#   python scripts/train.py --config configs/curriculum_qwen.yaml
-#   python scripts/train.py --config configs/curriculum_qwen.yaml --from-stage 3_distance
+#   python scripts/train.py --config configs/curriculum_qwen_24gb.yaml
+#   python scripts/train.py --config configs/curriculum_qwen_24gb.yaml --from-stage 9_entity
 # ============================================================
 base: qwen3-0.6b.yaml
 
 curriculum:
   # 阶段 1: 基础记忆 — 学会 state 读写机制
-  # 固定 tell 位置 (第一轮), distance=1, 305 种 filler
   - name: "1_base_memory"
     data:
       num_train: 5000
@@ -28,8 +27,7 @@ curriculum:
       early_stop_loss: 0.01
       early_stop_patience: 200
 
-  # 阶段 2: 随机 tell 位置 — 学会内容级写入判断
-  # tell 前 0-1 轮闲聊, 16 种 filler (减少干扰)
+  # 阶段 2: 随机 tell 位置
   - name: "2_random_tell"
     data:
       num_train: 5000
@@ -42,15 +40,14 @@ curriculum:
     training:
       episode_length: 5
       tbptt_steps: 5
-      batch_size: 2
-      grad_accum_steps: 2
+      batch_size: 4
+      grad_accum_steps: 1
       learning_rate: 1.0e-4
       max_steps: 5000
       early_stop_loss: 0.01
       early_stop_patience: 200
 
-  # 阶段 3: 增大距离 — 学会跨距离保持记忆
-  # distance 1-3, 16 种 filler
+  # 阶段 3: 增大距离
   - name: "3_distance"
     data:
       num_train: 5000
@@ -63,15 +60,14 @@ curriculum:
     training:
       episode_length: 7
       tbptt_steps: 7
-      batch_size: 2
-      grad_accum_steps: 2
+      batch_size: 4
+      grad_accum_steps: 1
       learning_rate: 1.0e-4
       max_steps: 5000
       early_stop_loss: 0.01
       early_stop_patience: 200
 
-  # 阶段 4: 完整多轮记忆 — M4 目标
-  # 305 种 filler, 随机 tell, distance 1-10
+  # 阶段 4: 完整多轮记忆
   - name: "4_full_m4"
     data:
       num_train: 5000
@@ -83,14 +79,14 @@ curriculum:
     training:
       episode_length: 16
       tbptt_steps: 16
-      batch_size: 1
-      grad_accum_steps: 4
+      batch_size: 2
+      grad_accum_steps: 2
       learning_rate: 1.0e-4
       max_steps: 10000
       early_stop_loss: 0.01
       early_stop_patience: 200
 
-  # 阶段 5: 3 类事实 — 从 8 类中随机选 3 类（泛化到新类别）
+  # 阶段 5: 3 类事实
   - name: "5_fact3"
     data:
       num_train: 5000
@@ -103,8 +99,8 @@ curriculum:
     training:
       episode_length: 16
       tbptt_steps: 16
-      batch_size: 1
-      grad_accum_steps: 4
+      batch_size: 2
+      grad_accum_steps: 2
       learning_rate: 1.0e-4
       max_steps: 10000
       early_stop_loss: 0.01
@@ -123,14 +119,14 @@ curriculum:
     training:
       episode_length: 16
       tbptt_steps: 16
-      batch_size: 1
-      grad_accum_steps: 4
+      batch_size: 2
+      grad_accum_steps: 2
       learning_rate: 1.0e-4
       max_steps: 10000
       early_stop_loss: 0.01
       early_stop_patience: 200
 
-  # 阶段 7: 8 类事实 — 全部类别
+  # 阶段 7: 8 类事实
   - name: "7_fact8"
     data:
       num_train: 5000
@@ -143,15 +139,14 @@ curriculum:
     training:
       episode_length: 16
       tbptt_steps: 16
-      batch_size: 1
-      grad_accum_steps: 4
+      batch_size: 2
+      grad_accum_steps: 2
       learning_rate: 1.0e-4
       max_steps: 10000
       early_stop_loss: 0.02
       early_stop_patience: 200
 
   # 阶段 8: 覆写能力
-  # 8 类事实 + 40% 覆写
   - name: "8_overwrite"
     data:
       num_train: 5000
@@ -164,14 +159,14 @@ curriculum:
     training:
       episode_length: 16
       tbptt_steps: 16
-      batch_size: 1
-      grad_accum_steps: 4
+      batch_size: 2
+      grad_accum_steps: 2
       learning_rate: 1.0e-4
       max_steps: 10000
       early_stop_loss: 0.02
       early_stop_patience: 200
 
-  # 阶段 9: 实体区分 — 我/你/他/她/它 + 同类别绑定
+  # 阶段 9: 实体区分 + 同类别绑定
   - name: "9_entity"
     data:
       num_train: 5000
@@ -185,14 +180,14 @@ curriculum:
     training:
       episode_length: 16
       tbptt_steps: 16
-      batch_size: 1
-      grad_accum_steps: 4
+      batch_size: 2
+      grad_accum_steps: 2
       learning_rate: 1.0e-4
       max_steps: 10000
       early_stop_loss: 0.02
       early_stop_patience: 200
 
-  # 阶段 10: 对话回忆 — 记住上一轮说了什么
+  # 阶段 10: 回忆 user 发言
   - name: "10_recall"
     data:
       num_train: 5000
@@ -203,14 +198,14 @@ curriculum:
     training:
       episode_length: 16
       tbptt_steps: 16
-      batch_size: 1
-      grad_accum_steps: 4
+      batch_size: 2
+      grad_accum_steps: 2
       learning_rate: 1.0e-4
       max_steps: 10000
       early_stop_loss: 0.02
       early_stop_patience: 200
 
-  # 阶段 11: 回忆 AI 发言 — 双向记忆基础
+  # 阶段 11: 回忆 AI 发言
   - name: "11_recall_ai"
     data:
       num_train: 5000
@@ -222,8 +217,8 @@ curriculum:
     training:
       episode_length: 16
       tbptt_steps: 16
-      batch_size: 1
-      grad_accum_steps: 4
+      batch_size: 2
+      grad_accum_steps: 2
       learning_rate: 1.0e-4
       max_steps: 10000
       early_stop_loss: 0.02
@@ -241,8 +236,8 @@ curriculum:
     training:
       episode_length: 16
       tbptt_steps: 16
-      batch_size: 1
-      grad_accum_steps: 4
+      batch_size: 2
+      grad_accum_steps: 2
       learning_rate: 1.0e-4
       max_steps: 10000
       early_stop_loss: 0.02
@@ -264,8 +259,8 @@ curriculum:
     training:
       episode_length: 16
       tbptt_steps: 16
-      batch_size: 1
-      grad_accum_steps: 4
+      batch_size: 2
+      grad_accum_steps: 2
       learning_rate: 1.0e-4
       max_steps: 10000
       early_stop_loss: 0.02
