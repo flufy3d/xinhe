@@ -260,9 +260,10 @@ def cmd_start(args):
         print(f"  停止: python scripts/remote.py stop")
         sys.exit(1)
 
-    # 自动加 uv run 前缀
+    # 自动加 uv run 前缀，-u 禁用 stdout 缓冲以便实时看日志
     if not command.startswith("uv run "):
         command = f"uv run {command}"
+    command = command.replace("python ", "python -u ", 1)
 
     # nohup 后台运行，pid 写入文件
     # bash -c 确保 & 和 $! 正确解析，disown 让进程脱离 SSH session
