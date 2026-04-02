@@ -65,8 +65,9 @@ class Trainer:
         self.best_val_loss = float("inf")
         self._accum_count = 0  # 梯度累积计数器
 
-        # 早停状态 (基于 EMA loss，避免单个 outlier episode 重置计数)
+        # 早停状态 (基于 EMA loss + 准确率)
         self._ema_loss = None
+        self._ema_acc = None
         self._early_stopped = False
 
     def _build_scheduler(self):
@@ -136,6 +137,8 @@ class Trainer:
         state = self.model.init_state(B).to(self.device)
         accumulated_loss = torch.tensor(0.0, device=self.device)
         episode_total_loss = 0.0
+        episode_correct = 0
+        episode_total = 0
         loss_segments = 0  # 只计数有真实 loss 的 segment
 
         for seg_idx, (segment, labels) in enumerate(episode_segments):
@@ -165,6 +168,8 @@ class Trainer:
             state = result["state_next"]
             seg_loss = result["loss"]
             accumulated_loss = accumulated_loss + seg_loss
+            episode_correct += result.get("correct", 0)
+            episode_total += result.get("total", 0)
             # 只有真正有 loss 的 segment 才计数
             has_valid_labels = (labels != -100).any()
             if has_valid_labels:
@@ -175,7 +180,8 @@ class Trainer:
             avg_loss = accumulated_loss / loss_segments
             (avg_loss / self.config.grad_accum_steps).backward()
             episode_total_loss += avg_loss.item()
-            self._maybe_optimizer_step(avg_loss.item())
+            acc = episode_correct / max(episode_total, 1)
+            self._maybe_optimizer_step(avg_loss.item(), acc)
 
         return episode_total_loss
 
@@ -205,7 +211,7 @@ class Trainer:
         self.model.train()
         return total_loss / max(num_episodes, 1)
 
-    def _maybe_optimizer_step(self, last_loss: float):
+    def _maybe_optimizer_step(self, last_loss: float, last_acc: float = 1.0):
         """梯度累积: 累积够 grad_accum_steps 次后执行一次 optimizer step"""
         self._accum_count += 1
         if self._accum_count < self.config.grad_accum_steps:
@@ -224,23 +230,29 @@ class Trainer:
         if self.global_step % self.config.log_every == 0:
             lr = self.scheduler.get_last_lr()[0]
             scale = torch.sigmoid(self.model.plugin.state_scale).item()
-            print(f"  [Step {self.global_step}] loss={last_loss:.6f} lr={lr:.2e} scale={scale:.4f}")
+            acc_str = f" acc={last_acc:.2%}" if last_acc < 1.0 else ""
+            print(f"  [Step {self.global_step}] loss={last_loss:.6f}{acc_str} lr={lr:.2e} scale={scale:.4f}")
 
         if self.global_step % self.config.save_every == 0:
             self._save_checkpoint()
 
-        # 早停检查 (基于 EMA loss)
+        # 早停检查 (EMA loss + EMA 准确率双条件)
         early_stop_loss = getattr(self.config, 'early_stop_loss', 0)
         early_stop_patience = getattr(self.config, 'early_stop_patience', 0)
         if early_stop_loss > 0 and early_stop_patience > 0:
             alpha = 2.0 / (early_stop_patience + 1)
             if self._ema_loss is None:
                 self._ema_loss = last_loss
+                self._ema_acc = last_acc
             else:
                 self._ema_loss = alpha * last_loss + (1 - alpha) * self._ema_loss
-            if self._ema_loss < early_stop_loss and self.global_step >= early_stop_patience:
+                self._ema_acc = alpha * last_acc + (1 - alpha) * self._ema_acc
+            # 双条件: loss 足够低 AND 准确率 > 95%
+            if (self._ema_loss < early_stop_loss
+                    and self._ema_acc > 0.95
+                    and self.global_step >= early_stop_patience):
                 self._early_stopped = True
-                print(f"  [已收敛] EMA loss={self._ema_loss:.6f} < {early_stop_loss}")
+                print(f"  [已收敛] EMA loss={self._ema_loss:.6f} acc={self._ema_acc:.2%}")
 
     def reset_for_new_stage(self, config: XinheConfig, train_dataloader: DataLoader,
                             val_dataloader: Optional[DataLoader] = None):
@@ -251,6 +263,7 @@ class Trainer:
         self.global_step = 0
         self._accum_count = 0
         self._ema_loss = None
+        self._ema_acc = None
         self._early_stopped = False
 
         self.optimizer = torch.optim.AdamW(

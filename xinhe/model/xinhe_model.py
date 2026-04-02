@@ -116,8 +116,16 @@ class XinheModel(nn.Module):
                     shift_labels.view(-1),
                     ignore_index=-100,
                 )
+                # value token 准确率 (argmax 匹配, 零额外开销)
+                valid_mask = shift_labels.view(-1) != -100
+                preds = shift_logits.view(-1, shift_logits.size(-1))[valid_mask].argmax(dim=-1)
+                targets = shift_labels.view(-1)[valid_mask]
+                result["correct"] = (preds == targets).sum().item()
+                result["total"] = valid_count.item()
             else:
                 loss = torch.tensor(0.0, device=logits.device, requires_grad=True)
+                result["correct"] = 0
+                result["total"] = 0
             result["loss"] = loss
 
         return result
