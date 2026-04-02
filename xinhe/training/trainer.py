@@ -65,9 +65,9 @@ class Trainer:
         self.best_val_loss = float("inf")
         self._accum_count = 0  # 梯度累积计数器
 
-        # 早停状态 (基于 EMA loss + 准确率)
-        self._ema_loss = None
-        self._ema_acc = None
+        # 早停状态 (滑动窗口: 连续 N 步 loss 低 + acc 高才收敛)
+        self._recent_losses = []
+        self._recent_accs = []
         self._early_stopped = False
 
     def _build_scheduler(self):
@@ -236,23 +236,24 @@ class Trainer:
         if self.global_step % self.config.save_every == 0:
             self._save_checkpoint()
 
-        # 早停检查 (EMA loss + EMA 准确率双条件)
+        # 早停检查 (滑动窗口: 最近 patience 步全部满足才收敛)
         early_stop_loss = getattr(self.config, 'early_stop_loss', 0)
         early_stop_patience = getattr(self.config, 'early_stop_patience', 0)
         if early_stop_loss > 0 and early_stop_patience > 0:
-            alpha = 2.0 / (early_stop_patience + 1)
-            if self._ema_loss is None:
-                self._ema_loss = last_loss
-                self._ema_acc = last_acc
-            else:
-                self._ema_loss = alpha * last_loss + (1 - alpha) * self._ema_loss
-                self._ema_acc = alpha * last_acc + (1 - alpha) * self._ema_acc
-            # 双条件: loss 足够低 AND 准确率 > 95%
-            if (self._ema_loss < early_stop_loss
-                    and self._ema_acc > 0.95
-                    and self.global_step >= early_stop_patience):
+            self._recent_losses.append(last_loss)
+            self._recent_accs.append(last_acc)
+            # 只保留最近 patience 步
+            if len(self._recent_losses) > early_stop_patience:
+                self._recent_losses.pop(0)
+                self._recent_accs.pop(0)
+            # 条件: 窗口填满 + 所有 loss < 阈值 + 所有 acc > 95%
+            if (len(self._recent_losses) >= early_stop_patience
+                    and max(self._recent_losses) < early_stop_loss
+                    and min(self._recent_accs) > 0.95):
                 self._early_stopped = True
-                print(f"  [已收敛] EMA loss={self._ema_loss:.6f} acc={self._ema_acc:.2%}")
+                avg_loss = sum(self._recent_losses) / len(self._recent_losses)
+                avg_acc = sum(self._recent_accs) / len(self._recent_accs)
+                print(f"  [已收敛] 连续{early_stop_patience}步: loss<{early_stop_loss} acc={avg_acc:.2%}")
 
     def reset_for_new_stage(self, config: XinheConfig, train_dataloader: DataLoader,
                             val_dataloader: Optional[DataLoader] = None):
@@ -262,8 +263,8 @@ class Trainer:
         self.val_dataloader = val_dataloader
         self.global_step = 0
         self._accum_count = 0
-        self._ema_loss = None
-        self._ema_acc = None
+        self._recent_losses = []
+        self._recent_accs = []
         self._early_stopped = False
 
         self.optimizer = torch.optim.AdamW(
