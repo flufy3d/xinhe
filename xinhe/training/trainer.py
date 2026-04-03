@@ -70,6 +70,10 @@ class Trainer:
         self._recent_accs = []
         self._early_stopped = False
 
+        # EMA 用于日志显示 (alpha≈0.04, ~50步窗口)
+        self._ema_loss = None
+        self._ema_acc = None
+
     def _build_scheduler(self):
         """Cosine schedule with linear warmup"""
         warmup = self.config.warmup_steps
@@ -227,11 +231,19 @@ class Trainer:
         self.global_step += 1
         self._accum_count = 0
 
+        # 更新 EMA (窗口 ≈ log_every 步)
+        alpha = 2.0 / (self.config.log_every + 1)
+        if self._ema_loss is None:
+            self._ema_loss = last_loss
+            self._ema_acc = last_acc
+        else:
+            self._ema_loss = alpha * last_loss + (1 - alpha) * self._ema_loss
+            self._ema_acc = alpha * last_acc + (1 - alpha) * self._ema_acc
+
         if self.global_step % self.config.log_every == 0:
             lr = self.scheduler.get_last_lr()[0]
             scale = torch.sigmoid(self.model.plugin.state_scale).item()
-            acc_str = f" acc={last_acc:.2%}" if last_acc < 1.0 else ""
-            print(f"  [Step {self.global_step}] loss={last_loss:.6f}{acc_str} lr={lr:.2e} scale={scale:.4f}")
+            print(f"  [Step {self.global_step}] loss={last_loss:.6f} acc={last_acc:.2%} ema_loss={self._ema_loss:.4f} ema_acc={self._ema_acc:.2%} lr={lr:.2e} scale={scale:.4f}")
 
         if self.global_step % self.config.save_every == 0:
             self._save_checkpoint()
@@ -266,6 +278,8 @@ class Trainer:
         self._recent_losses = []
         self._recent_accs = []
         self._early_stopped = False
+        self._ema_loss = None
+        self._ema_acc = None
 
         self.optimizer = torch.optim.AdamW(
             self.model.get_trainable_params(),

@@ -84,7 +84,7 @@ curriculum:
       episode_length: 16
       tbptt_steps: 16
       batch_size: 1
-      grad_accum_steps: 4
+      grad_accum_steps: 2
       learning_rate: 1.0e-4
       max_steps: 10000
       early_stop_loss: 0.01
@@ -104,7 +104,7 @@ curriculum:
       episode_length: 16
       tbptt_steps: 16
       batch_size: 1
-      grad_accum_steps: 4
+      grad_accum_steps: 2
       learning_rate: 1.0e-4
       max_steps: 10000
       early_stop_loss: 0.01
@@ -124,7 +124,7 @@ curriculum:
       episode_length: 16
       tbptt_steps: 16
       batch_size: 1
-      grad_accum_steps: 4
+      grad_accum_steps: 2
       learning_rate: 1.0e-4
       max_steps: 10000
       early_stop_loss: 0.01
@@ -144,7 +144,7 @@ curriculum:
       episode_length: 16
       tbptt_steps: 16
       batch_size: 1
-      grad_accum_steps: 4
+      grad_accum_steps: 2
       learning_rate: 1.0e-4
       max_steps: 10000
       early_stop_loss: 0.02
@@ -165,7 +165,7 @@ curriculum:
       episode_length: 16
       tbptt_steps: 16
       batch_size: 1
-      grad_accum_steps: 4
+      grad_accum_steps: 2
       learning_rate: 1.0e-4
       max_steps: 10000
       early_stop_loss: 0.02
@@ -186,7 +186,7 @@ curriculum:
       episode_length: 16
       tbptt_steps: 16
       batch_size: 1
-      grad_accum_steps: 4
+      grad_accum_steps: 2
       learning_rate: 1.0e-4
       max_steps: 10000
       early_stop_loss: 0.02
@@ -204,7 +204,7 @@ curriculum:
       episode_length: 16
       tbptt_steps: 16
       batch_size: 1
-      grad_accum_steps: 4
+      grad_accum_steps: 2
       learning_rate: 1.0e-4
       max_steps: 10000
       early_stop_loss: 0.02
@@ -223,7 +223,7 @@ curriculum:
       episode_length: 16
       tbptt_steps: 16
       batch_size: 1
-      grad_accum_steps: 4
+      grad_accum_steps: 2
       learning_rate: 1.0e-4
       max_steps: 10000
       early_stop_loss: 0.02
@@ -242,7 +242,7 @@ curriculum:
       episode_length: 16
       tbptt_steps: 16
       batch_size: 1
-      grad_accum_steps: 4
+      grad_accum_steps: 2
       learning_rate: 1.0e-4
       max_steps: 10000
       early_stop_loss: 0.02
@@ -265,7 +265,7 @@ curriculum:
       episode_length: 16
       tbptt_steps: 16
       batch_size: 1
-      grad_accum_steps: 4
+      grad_accum_steps: 2
       learning_rate: 1.0e-4
       max_steps: 10000
       early_stop_loss: 0.02
