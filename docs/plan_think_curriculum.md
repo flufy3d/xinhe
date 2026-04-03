@@ -80,6 +80,17 @@ QUESTIONS = {
         "给{e}推荐点适合的活动。",
         "你觉得{e}的生活怎么样？",
     ],
+
+    # 心跳包 — 空/极简输入，模拟主动发起闲聊
+    # 训练目标: 模型基于 state 中所有已知信息主动开口
+    # prompt 给 backbone 时附带所有 fact 作为上下文，训练时 fact 全部移入 state
+    "heartbeat": [
+        "",                # 纯空输入
+        "嗯",
+        "...",
+        "你好",
+        "在吗",
+    ],
 }
 
 # 生成时: question.format(e=entity, e1=entity1, e2=entity2)
@@ -120,8 +131,54 @@ target: backbone 的 think 回复
 | Recall User | 完整对话历史 + 回忆问题 | 早期对话轮次 | 最后一轮提问 |
 | Recall AI | 完整对话历史 + 回忆问题 | 早期对话轮次（含AI回复） | 最后一轮提问 |
 | 混合推理 | facts + 对话历史 + 推理问题 | 全部 | 推理问题 |
+| 心跳包 | 所有 facts + 空/极简输入 | 所有 fact | "" / "嗯" / "你好" 等 |
 
 所有场景统一模式，无需特殊处理。
+
+### 心跳包（主动闲聊）
+
+用途：模拟 AI 主动发起对话的能力，未来可用作定时心跳包触发。
+
+**数据生成时**：给 backbone 一个引导 system prompt + 所有 fact + 空用户输入
+
+```python
+# 生成阶段 — backbone 看到的 prompt
+messages = [
+    {"role": "system", "content": 
+     f"你是用户的AI伙伴。你知道以下信息：\n"
+     f"- 用户叫{name}\n- 用户{age}岁\n- 住在{city}\n- 喜欢{hobby}\n"
+     f"用户沉默了一会儿，请你主动发起一个轻松的话题。"},
+    {"role": "user", "content": ""},
+]
+response = backbone.generate(messages, enable_think=True)
+# → "对了李明，最近天气不错，有没有去游泳呀？"
+```
+
+**训练时**：system prompt 丢掉，fact 移入 state，只保留空输入 + backbone 回复
+
+```
+state:  [编码了所有 fact]
+text:   ""（空输入）
+target: backbone 的主动回复
+```
+
+关键：**引导 system prompt 只在数据生成阶段存在，训练时不包含。**
+它的作用是告诉 backbone "该主动说话了"，是一次性的生成指令。
+训练后模型学到的映射是：state 有内容 + 输入为空 → 主动开口。部署时发空 token 即可触发。
+
+**部署方式**：用户空闲足够久时，定时发送空 token 作为心跳包触发 AI 主动闲聊。
+
+**不会重复**：每次 AI 回复后 write token 会更新 state（即使用户输入为空），
+下一次心跳看到的 state 已经不同，回复自然不同。
+
+**保证多样性**：数据生成时变换 system prompt 的措辞：
+- "主动发起一个轻松的话题"
+- "关心一下用户最近的状况"
+- "聊聊你对用户的印象"
+- "基于你对用户的了解随便说点什么"
+- "问问用户最近有没有新鲜事"
+
+让 backbone 生成风格多样的主动回复，避免训练数据模式单一。
 
 ## 关键设计原则
 
@@ -147,6 +204,28 @@ LoRA 必须保持激活才能从 state 读取信息。
    - 同时恢复 backbone 长回复/推理能力（target 是 backbone 原始 think 回复）
    - 一个课程同时解决两个问题，不需要单独的"无记忆推理"阶段
 3. **最终混合** — 记忆 + 推理全能力
+
+## 与 Sleep 机制的关系
+
+参考：`docs/architecture.md` (Sleep 机制章节)、`docs/design_rationale.md` (6.6 Sleep 具体设计)
+
+Think 课程和 Sleep 是两个互补的记忆固化路径：
+
+| | Think 课程（训练阶段） | Sleep（部署阶段） |
+|---|---|---|
+| 时机 | 预训练时 | 用户使用过程中 |
+| 输入 | 预生成的 think 数据 | replay buffer 中的真实对话 |
+| 更新对象 | Skill LoRA (attention) | Memory LoRA (MLP) + Skill LoRA (微调) |
+| 目的 | 教会模型"怎么从 state 推理" | 把 state 中的短期记忆固化到 MLP 权重 |
+
+Think 课程为 Sleep 打基础：
+- Think 课程训练 Skill LoRA 学会从 state 提取信息 → 推理 → 长回复
+- Sleep 时 replay 对话，逐步弱化 state（100%→50%→0%），迫使 Memory LoRA 接管记忆
+- 两者结合：Skill LoRA 知道怎么用记忆，Memory LoRA 存着长期记忆
+
+心跳包在 Sleep 后更有意义：
+- Sleep 前：心跳只能用 state 中的短期信息
+- Sleep 后：MLP 权重里有长期记忆，即使 state 中上次对话信息已模糊，模型仍能通过权重"记得"用户，生成更个性化的主动问候
 
 ## 架构注意事项
 
