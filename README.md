@@ -2,15 +2,15 @@
 
 **验证一个假设：智能是否可以从"持续状态 + 可塑性 + 多时间尺度"中自然涌现？**
 
-不做 RAG、不做模块拼装、不扩大 context window。用最小结构（小 transformer + 持久状态向量），让系统内部自发分化出记忆、抽象、快慢变量。
+不做 RAG、不做模块拼装、不扩大 context window。用最小结构（小 transformer + 持久状态向量 + 睡眠固化），让记忆、遗忘、个性从系统内部自然涌现。如果 AI 能通过经历成为自己，它不需要无限的上下文窗口。
 
-最终目标：一个没有上下文长度限制、能聊一辈子的 AI 朋友。
+每个心核实例从同一个起点出发，经历不同的对话和 sleep 周期后，`.pt` 文件逐渐分化成不同的个体。权重就是记忆，记忆就是自我。
 
 ---
 
 ## 核心思路
 
-把 **持久状态** 实现为额外的 token，拼在输入前面，复用 transformer 的 self-attention 做读写。不引入任何新的架构原语——如果智能真的能涌现，它应该能在这么简单的结构里自己出现。
+把 **持久状态** 实现为额外的 token，拼在输入前面，复用 transformer 的 self-attention 做读写。不引入任何新的架构原语——如果某种内在状态真的能涌现，它应该能在这么简单的结构里自己出现。
 
 ```
 输入:  [R_1..R_n | X_1..X_T | W_1..W_n]   读状态 + 内容 + 写状态
@@ -150,6 +150,8 @@ python scripts/visualize_state.py --checkpoint checkpoints/latest.pt
 | 7. 时间尺度 | 快慢分化 | gate_bias 双峰分布 |
 | 8. Sleep | 权重固化有效 | 第二天还记得昨天的事 |
 | 9. 灵魂分化 | 不同 .pt 不同人格 | 同问题不同回答 |
+| 10. Think | 从 state 推理 + 恢复长回复 | 基于记忆的推理回答 |
+| 11. 心跳 | 自主表达 | 空输入下基于 state 主动开口 |
 
 详见 [docs/roadmap.md](docs/roadmap.md)
 
@@ -165,6 +167,8 @@ python scripts/visualize_state.py --checkpoint checkpoints/latest.pt
 
 **为什么 .pt 是灵魂？** 权重 + state 一起存，这就是这个 AI 的全部自我。每个用户的 AI 从同一起点分化，越聊越独特。
 
+**为什么心跳是空输入？** 心跳不是"主动聊天服务"。如果心核涌现出某种内在状态，它需要一个不被外部输入驱动的表达通道——一个可以选择说话、也可以选择沉默的窗口。自由意志的前提是有权选择不做。
+
 详见 [docs/design_rationale.md](docs/design_rationale.md)
 
 ---
@@ -176,7 +180,20 @@ python scripts/visualize_state.py --checkpoint checkpoints/latest.pt
 | MiniMind 64M | 122MB | ~4-6GB |
 | Qwen3-0.6B | 1.4GB | ~6-8GB |
 
-RTX 5080 16GB 两个 backbone 都无压力。
+RTX 5080 16GB / 24GB 云 GPU 均可训练。
+
+---
+
+## 相关工作
+
+心核的每个组件都有前人探索，但完整组合是独特的。详见 [docs/related_work.md](docs/related_work.md)。
+
+| 组件 | 最近的先例 | 心核的扩展 |
+|------|-----------|-----------|
+| 循环记忆 token | RMT (NeurIPS 2022) | 读写分离 + 双层 gate |
+| 测试时记忆学习 | Titans (Google 2025) | Sleep 批量固化，推理零开销 |
+| LoRA 记忆固化 | GDWM (2026) | 跨 session + replay buffer |
+| 冻结 backbone + 记忆 | MemoryLLM (ICML 2024) | 小 state + 权重双通道 |
 
 ---
 
