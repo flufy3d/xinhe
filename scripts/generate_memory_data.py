@@ -104,20 +104,55 @@ CITIES_LARGE = [
 ]
 
 
+# ── 复姓 ──
+
+COMPOUND_SURNAMES = [
+    "欧阳", "司马", "上官", "诸葛", "东方", "公孙", "慕容", "皇甫",
+    "令狐", "独孤", "南宫", "西门", "百里", "呼延", "端木", "轩辕",
+    "长孙", "宇文", "尉迟", "澹台", "夏侯", "万俟", "司徒", "太史",
+]
+
+# ── 英文名 + 昵称 (堵字符集捷径) ──
+
+ENGLISH_NAMES = [
+    "Alice", "Bob", "Charlie", "David", "Emma", "Frank", "Grace", "Henry",
+    "Iris", "Jack", "Kate", "Leo", "Mia", "Noah", "Olivia", "Paul",
+    "Quinn", "Ruby", "Sam", "Tom", "Uma", "Vera", "Will", "Xena",
+    "Yuki", "Zoe", "Alex", "Luna", "Max", "Lily", "Oscar", "Ella",
+    "Ryan", "Chloe", "Ethan", "Sophia", "Liam", "Amy", "Kevin", "Jenny",
+]
+
+NICKNAMES = [
+    "小飞侠", "大白", "阿呆", "小丸子", "豆豆", "糖糖", "果果", "团团",
+    "圆圆", "皮皮", "乐乐", "欢欢", "萌萌", "贝贝", "蛋蛋", "球球",
+    "A君", "小K", "Mr.Z", "Dr.X", "666", "007", "101", "Lucky",
+]
+
 # ── 随机生成函数 ──
 
 def random_name(rng: random.Random) -> str:
-    """随机姓+1~2字名，组合空间 200×160×160 ≈ 500万"""
-    surname = rng.choice(SURNAMES)
-    given = rng.choice(GIVEN_CHARS)
-    if rng.random() < 0.6:
-        given += rng.choice(GIVEN_CHARS)
-    return surname + given
+    """随机姓名，1~4字中文 / 英文名 / 昵称，堵长度和字符集捷径"""
+    r = rng.random()
+    if r < 0.05:
+        # 5%: 单字 (1字) — "夏", "龙"
+        return rng.choice(GIVEN_CHARS)
+    elif r < 0.15:
+        # 10%: 英文名 / 昵称
+        return rng.choice(ENGLISH_NAMES) if rng.random() < 0.6 else rng.choice(NICKNAMES)
+    elif r < 0.30:
+        # 15%: 复姓+双字名 (4字) — "欧阳明月"
+        return rng.choice(COMPOUND_SURNAMES) + rng.choice(GIVEN_CHARS) + rng.choice(GIVEN_CHARS)
+    elif r < 0.55:
+        # 25%: 单姓+单字名 (2字) — "李明"
+        return rng.choice(SURNAMES) + rng.choice(GIVEN_CHARS)
+    else:
+        # 45%: 单姓+双字名 (3字) — "李明月"
+        return rng.choice(SURNAMES) + rng.choice(GIVEN_CHARS) + rng.choice(GIVEN_CHARS)
 
 
 def random_number(rng: random.Random) -> str:
-    """随机 4~6 位数字"""
-    length = rng.randint(4, 6)
+    """随机 1~8 位数字，长度多样化"""
+    length = rng.randint(1, 8)
     return "".join(str(rng.randint(0, 9)) for _ in range(length))
 
 
@@ -125,16 +160,27 @@ def random_city(rng: random.Random) -> str:
     return rng.choice(CITIES_LARGE)
 
 
-# ── 新增类别素材 ──
+# ── 新增类别素材 (组合生成扩大池子) ──
 
-FOODS = [
-    "火锅", "烤鸭", "麻辣烫", "饺子", "面条", "米饭", "寿司", "披萨",
-    "汉堡", "烧烤", "拉面", "小龙虾", "酸菜鱼", "回锅肉", "红烧肉",
-    "宫保鸡丁", "糖醋排骨", "麻婆豆腐", "鱼香肉丝", "水煮牛肉",
-    "炒饭", "煎饼", "包子", "馄饨", "粽子", "月饼", "汤圆", "春卷",
-    "凉皮", "肉夹馍", "臭豆腐", "螺蛳粉", "热干面", "刀削面", "炸酱面",
-    "三明治", "沙拉", "牛排", "意大利面", "咖喱饭", "炸鸡", "冰淇淋",
+CLASSIC_FOODS = [
+    "火锅", "烤鸭", "麻辣烫", "饺子", "拉面", "小龙虾", "酸菜鱼",
+    "宫保鸡丁", "麻婆豆腐", "鱼香肉丝", "煎饼", "包子", "馄饨",
+    "凉皮", "肉夹馍", "臭豆腐", "螺蛳粉", "热干面", "刀削面",
+    "三明治", "牛排", "意大利面", "咖喱饭", "炸鸡", "寿司", "披萨",
 ]
+
+COOK_METHODS = [
+    "红烧", "清炒", "水煮", "糖醋", "麻辣", "蒜蓉", "葱爆", "干煸",
+    "酱焖", "香煎", "清蒸", "烤", "卤", "凉拌", "油炸", "炖",
+]
+
+INGREDIENTS = [
+    "牛肉", "鸡肉", "排骨", "豆腐", "土豆", "茄子", "白菜", "鲈鱼",
+    "虾", "猪肉", "羊肉", "鸡蛋", "冬瓜", "南瓜", "萝卜", "蘑菇",
+    "木耳", "藕", "芹菜", "西兰花",
+]
+
+JOB_PREFIXES = ["资深", "实习", "高级", "初级", "首席", "助理", "全职", "兼职"]
 
 JOBS = [
     "程序员", "教师", "医生", "律师", "设计师", "工程师", "记者", "厨师",
@@ -143,6 +189,8 @@ JOBS = [
     "快递员", "外卖员", "理发师", "园丁", "农民", "渔民", "木匠", "电工",
 ]
 
+HOBBY_MODS = ["经常", "偶尔", "每天", "周末", "晚上", "一个人", "和朋友", "在家"]
+
 HOBBIES = [
     "打篮球", "踢足球", "游泳", "跑步", "爬山", "骑自行车", "打羽毛球",
     "打乒乓球", "下棋", "钓鱼", "画画", "弹吉他", "弹钢琴", "唱歌",
@@ -150,27 +198,44 @@ HOBBIES = [
     "滑雪", "冲浪", "瑜伽", "跳舞", "书法", "编程", "种菜", "看动漫",
 ]
 
-PETS = [
-    "猫", "狗", "金鱼", "仓鼠", "兔子", "乌龟", "鹦鹉", "蜥蜴",
-    "蛇", "刺猬", "龙猫", "荷兰猪", "柯基", "金毛", "哈士奇", "布偶猫",
-    "英短", "泰迪", "柴犬", "暹罗猫", "比熊", "拉布拉多", "边牧", "蓝猫",
+PET_COLORS = [
+    "白色的", "黑色的", "灰色的", "棕色的", "花色的",
+    "橘色的", "奶油色的", "金色的", "黑白的", "三花",
+]
+
+PET_ANIMALS = [
+    "猫", "狗", "兔子", "仓鼠", "鹦鹉", "乌龟", "金鱼", "柯基",
+    "泰迪", "柴犬", "英短", "布偶猫", "边牧", "拉布拉多", "哈士奇",
+    "比熊", "蓝猫", "暹罗猫", "龙猫", "刺猬",
 ]
 
 
 def random_food(rng: random.Random) -> str:
-    return rng.choice(FOODS)
+    """做法×食材组合 (320种) + 经典菜名，堵小池记忆"""
+    if rng.random() < 0.15:
+        return rng.choice(CLASSIC_FOODS)
+    return rng.choice(COOK_METHODS) + rng.choice(INGREDIENTS)
 
 def random_job(rng: random.Random) -> str:
-    return rng.choice(JOBS)
+    """前缀×职业组合 (240种)，堵小池记忆"""
+    if rng.random() < 0.3:
+        return rng.choice(JOBS)
+    return rng.choice(JOB_PREFIXES) + rng.choice(JOBS)
 
 def random_hobby(rng: random.Random) -> str:
-    return rng.choice(HOBBIES)
+    """修饰×活动组合 (200种)，堵小池记忆"""
+    if rng.random() < 0.3:
+        return rng.choice(HOBBIES)
+    return rng.choice(HOBBY_MODS) + rng.choice(HOBBIES)
 
 def random_age(rng: random.Random) -> str:
-    return str(rng.randint(18, 65))
+    return str(rng.randint(1, 99))
 
 def random_pet(rng: random.Random) -> str:
-    return rng.choice(PETS)
+    """颜色×动物组合 (200种)，堵小池记忆"""
+    if rng.random() < 0.2:
+        return rng.choice(PET_ANIMALS)
+    return rng.choice(PET_COLORS) + rng.choice(PET_ANIMALS)
 
 
 # ── 陈述模板 ──
