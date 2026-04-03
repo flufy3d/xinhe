@@ -13,7 +13,7 @@ curriculum:
   # 固定 tell 位置 (第一轮), distance=1, 305 种 filler
   - name: "1_base_memory"
     data:
-      num_train: 5000
+      num_train: 10000
       no_pre_filler: true
       no_overwrite: true
       min_distance: 1
@@ -32,7 +32,7 @@ curriculum:
   # tell 前 0-1 轮闲聊, 16 种 filler (减少干扰)
   - name: "2_random_tell"
     data:
-      num_train: 5000
+      num_train: 10000
       num_fillers: 16
       max_pre_filler: 1
       no_overwrite: true
@@ -53,7 +53,7 @@ curriculum:
   # distance 1-3, 16 种 filler
   - name: "3_distance"
     data:
-      num_train: 5000
+      num_train: 10000
       num_fillers: 16
       max_pre_filler: 1
       no_overwrite: true
@@ -74,7 +74,7 @@ curriculum:
   # 305 种 filler, 随机 tell, distance 1-10
   - name: "4_full_m4"
     data:
-      num_train: 5000
+      num_train: 10000
       max_pre_filler: 2
       no_overwrite: true
       min_distance: 1
@@ -93,7 +93,7 @@ curriculum:
   # 阶段 5: 3 类事实 — 从 8 类中随机选 3 类（泛化到新类别）
   - name: "5_fact3"
     data:
-      num_train: 5000
+      num_train: 10000
       num_facts: 3
       max_pre_filler: 2
       no_overwrite: true
@@ -113,7 +113,7 @@ curriculum:
   # 阶段 6: 5 类事实
   - name: "6_fact5"
     data:
-      num_train: 5000
+      num_train: 10000
       num_facts: 5
       max_pre_filler: 2
       no_overwrite: true
@@ -133,7 +133,7 @@ curriculum:
   # 阶段 7: 8 类事实 — 全部类别
   - name: "7_fact8"
     data:
-      num_train: 5000
+      num_train: 10000
       num_facts: 8
       max_pre_filler: 2
       no_overwrite: true
@@ -154,7 +154,7 @@ curriculum:
   # 8 类事实 + 40% 覆写
   - name: "8_overwrite"
     data:
-      num_train: 5000
+      num_train: 10000
       num_facts: 8
       max_pre_filler: 2
       overwrite_ratio: 0.4
@@ -174,7 +174,7 @@ curriculum:
   # 阶段 9: 实体区分 — 我/你/他/她/它 + 同类别绑定
   - name: "9_entity"
     data:
-      num_train: 5000
+      num_train: 10000
       num_facts: 3
       entity_ratio: 0.5
       same_category: 0.5
@@ -195,7 +195,7 @@ curriculum:
   # 阶段 10: 对话回忆 — 记住上一轮说了什么
   - name: "10_recall"
     data:
-      num_train: 5000
+      num_train: 10000
       recall_ratio: 0.5
       entity_ratio: 0.2
       no_overwrite: true
@@ -213,7 +213,7 @@ curriculum:
   # 阶段 11: 回忆 AI 发言 — 双向记忆基础
   - name: "11_recall_ai"
     data:
-      num_train: 5000
+      num_train: 10000
       recall_ratio: 0.5
       ai_recall_ratio: 1.0
       entity_ratio: 0.2
@@ -232,7 +232,7 @@ curriculum:
   # 阶段 12: 混合回忆 — user/AI 各半
   - name: "12_recall_mix"
     data:
-      num_train: 5000
+      num_train: 10000
       recall_ratio: 0.5
       ai_recall_ratio: 0.5
       entity_ratio: 0.2
@@ -251,7 +251,7 @@ curriculum:
   # 阶段 13: 全能力混合
   - name: "13_all"
     data:
-      num_train: 5000
+      num_train: 10000
       num_facts: 5
       entity_ratio: 0.2
       recall_ratio: 0.2
