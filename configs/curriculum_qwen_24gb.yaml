@@ -79,7 +79,7 @@ curriculum:
     training:
       episode_length: 16
       tbptt_steps: 16
-      batch_size: 2
+      batch_size: 1
       grad_accum_steps: 2
       learning_rate: 1.0e-4
       max_steps: 10000
@@ -99,14 +99,14 @@ curriculum:
     training:
       episode_length: 16
       tbptt_steps: 16
-      batch_size: 2
+      batch_size: 1
       grad_accum_steps: 2
       learning_rate: 1.0e-4
       max_steps: 10000
       early_stop_loss: 0.01
       early_stop_patience: 200
 
-  # 阶段 6: 5 类事实
+  # 阶段 6+: batch=1 accum=2 (24GB 不够 batch=2 + 5+facts)
   - name: "6_fact5"
     data:
       num_train: 5000
@@ -119,7 +119,7 @@ curriculum:
     training:
       episode_length: 16
       tbptt_steps: 16
-      batch_size: 2
+      batch_size: 1
       grad_accum_steps: 2
       learning_rate: 1.0e-4
       max_steps: 10000
@@ -139,7 +139,7 @@ curriculum:
     training:
       episode_length: 16
       tbptt_steps: 16
-      batch_size: 2
+      batch_size: 1
       grad_accum_steps: 2
       learning_rate: 1.0e-4
       max_steps: 10000
@@ -159,7 +159,7 @@ curriculum:
     training:
       episode_length: 16
       tbptt_steps: 16
-      batch_size: 2
+      batch_size: 1
       grad_accum_steps: 2
       learning_rate: 1.0e-4
       max_steps: 10000
@@ -180,7 +180,7 @@ curriculum:
     training:
       episode_length: 16
       tbptt_steps: 16
-      batch_size: 2
+      batch_size: 1
       grad_accum_steps: 2
       learning_rate: 1.0e-4
       max_steps: 10000
@@ -198,7 +198,7 @@ curriculum:
     training:
       episode_length: 16
       tbptt_steps: 16
-      batch_size: 2
+      batch_size: 1
       grad_accum_steps: 2
       learning_rate: 1.0e-4
       max_steps: 10000
@@ -217,7 +217,7 @@ curriculum:
     training:
       episode_length: 16
       tbptt_steps: 16
-      batch_size: 2
+      batch_size: 1
       grad_accum_steps: 2
       learning_rate: 1.0e-4
       max_steps: 10000
@@ -236,7 +236,7 @@ curriculum:
     training:
       episode_length: 16
       tbptt_steps: 16
-      batch_size: 2
+      batch_size: 1
       grad_accum_steps: 2
       learning_rate: 1.0e-4
       max_steps: 10000
@@ -259,7 +259,7 @@ curriculum:
     training:
       episode_length: 16
       tbptt_steps: 16
-      batch_size: 2
+      batch_size: 1
       grad_accum_steps: 2
       learning_rate: 1.0e-4
       max_steps: 10000
