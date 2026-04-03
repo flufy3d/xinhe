@@ -9,6 +9,7 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
 from .backbone import BackboneBase
 from .config import XinheConfig
@@ -44,6 +45,8 @@ class MiniMindBackbone(nn.Module, BackboneBase):
                 state_dict = torch.load(str(weights_path), map_location="cpu", weights_only=False)
             self.model.load_state_dict(state_dict, strict=False)
 
+        self._gradient_checkpointing = config.gradient_checkpointing
+
         # 冻结主干参数
         if config.freeze_backbone:
             for param in self.model.parameters():
@@ -68,16 +71,34 @@ class MiniMindBackbone(nn.Module, BackboneBase):
                 self.model.model.freqs_sin[:seq_len],
             )
 
-            hidden_states, past_kv = layer(
-                hidden_states,
-                position_embeddings=position_embeddings,
-                past_key_value=past_key_values[i],
-                use_cache=False,
-                attention_mask=attention_mask,
-            )
+            if self._gradient_checkpointing and self.training:
+                hidden_states = torch_checkpoint(
+                    self._layer_forward,
+                    layer, hidden_states, position_embeddings, attention_mask,
+                    use_reentrant=False,
+                )
+            else:
+                hidden_states, past_kv = layer(
+                    hidden_states,
+                    position_embeddings=position_embeddings,
+                    past_key_value=past_key_values[i],
+                    use_cache=False,
+                    attention_mask=attention_mask,
+                )
 
         hidden_states = self.model.model.norm(hidden_states)
         return hidden_states
+
+    @staticmethod
+    def _layer_forward(layer, hidden_states, position_embeddings, attention_mask):
+        output, _ = layer(
+            hidden_states,
+            position_embeddings=position_embeddings,
+            past_key_value=None,
+            use_cache=False,
+            attention_mask=attention_mask,
+        )
+        return output
 
     def get_lm_head(self) -> nn.Module:
         return self.model.lm_head

@@ -1,7 +1,7 @@
 # ============================================================
 # 心核课程学习配置 (Qwen3-0.6B) — 24GB 显存优化
 #
-# 相比原版: 后期阶段 batch_size=2, grad_accum_steps=2，训练更快。
+# gradient_checkpointing: 用计算换显存，后期阶段 batch_size=2。
 # 用法:
 #   python scripts/train.py --config configs/curriculum_qwen_24gb.yaml
 #   python scripts/train.py --config configs/curriculum_qwen_24gb.yaml --from-stage 9_entity
@@ -79,8 +79,8 @@ curriculum:
     training:
       episode_length: 16
       tbptt_steps: 16
-      batch_size: 1
-      grad_accum_steps: 2
+      batch_size: 2
+      grad_accum_steps: 1
       learning_rate: 1.0e-4
       max_steps: 10000
       early_stop_loss: 0.01
@@ -99,14 +99,14 @@ curriculum:
     training:
       episode_length: 16
       tbptt_steps: 16
-      batch_size: 1
-      grad_accum_steps: 2
+      batch_size: 2
+      grad_accum_steps: 1
       learning_rate: 1.0e-4
       max_steps: 10000
       early_stop_loss: 0.01
       early_stop_patience: 200
 
-  # 阶段 6+: batch=1 accum=2 (24GB 不够 batch=2 + 5+facts)
+  # 阶段 6+: gradient_checkpointing 省显存，batch=2 可行
   - name: "6_fact5"
     data:
       num_train: 5000
@@ -119,8 +119,7 @@ curriculum:
     training:
       episode_length: 16
       tbptt_steps: 16
-      batch_size: 1
-      grad_accum_steps: 2
+      batch_size: 2
       learning_rate: 1.0e-4
       max_steps: 10000
       early_stop_loss: 0.01
@@ -139,8 +138,7 @@ curriculum:
     training:
       episode_length: 16
       tbptt_steps: 16
-      batch_size: 1
-      grad_accum_steps: 2
+      batch_size: 2
       learning_rate: 1.0e-4
       max_steps: 10000
       early_stop_loss: 0.02
@@ -159,8 +157,7 @@ curriculum:
     training:
       episode_length: 16
       tbptt_steps: 16
-      batch_size: 1
-      grad_accum_steps: 2
+      batch_size: 2
       learning_rate: 1.0e-4
       max_steps: 10000
       early_stop_loss: 0.02
@@ -180,8 +177,7 @@ curriculum:
     training:
       episode_length: 16
       tbptt_steps: 16
-      batch_size: 1
-      grad_accum_steps: 2
+      batch_size: 2
       learning_rate: 1.0e-4
       max_steps: 10000
       early_stop_loss: 0.02
@@ -198,8 +194,7 @@ curriculum:
     training:
       episode_length: 16
       tbptt_steps: 16
-      batch_size: 1
-      grad_accum_steps: 2
+      batch_size: 2
       learning_rate: 1.0e-4
       max_steps: 10000
       early_stop_loss: 0.02
@@ -217,8 +212,7 @@ curriculum:
     training:
       episode_length: 16
       tbptt_steps: 16
-      batch_size: 1
-      grad_accum_steps: 2
+      batch_size: 2
       learning_rate: 1.0e-4
       max_steps: 10000
       early_stop_loss: 0.02
@@ -236,8 +230,7 @@ curriculum:
     training:
       episode_length: 16
       tbptt_steps: 16
-      batch_size: 1
-      grad_accum_steps: 2
+      batch_size: 2
       learning_rate: 1.0e-4
       max_steps: 10000
       early_stop_loss: 0.02
@@ -259,8 +252,7 @@ curriculum:
     training:
       episode_length: 16
       tbptt_steps: 16
-      batch_size: 1
-      grad_accum_steps: 2
+      batch_size: 2
       learning_rate: 1.0e-4
       max_steps: 10000
       early_stop_loss: 0.02

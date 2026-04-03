@@ -8,6 +8,7 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint as torch_checkpoint
 from transformers import AutoModelForCausalLM
 
 from .backbone import BackboneBase
@@ -34,6 +35,7 @@ class QwenBackbone(nn.Module, BackboneBase):
             device_map=device_map,
         )
         self._hidden_size = self.model.config.hidden_size
+        self._gradient_checkpointing = config.gradient_checkpointing
 
         # 冻结主干参数
         if config.freeze_backbone:
@@ -64,14 +66,29 @@ class QwenBackbone(nn.Module, BackboneBase):
                 position_embeddings[0].to(layer_device),
                 position_embeddings[1].to(layer_device),
             )
-            hidden_states = layer(
-                hidden_states,
-                attention_mask=attention_mask,
-                position_embeddings=position_embeddings,
-            )
+            if self._gradient_checkpointing and self.training:
+                hidden_states = torch_checkpoint(
+                    self._layer_forward,
+                    layer, hidden_states, attention_mask, position_embeddings,
+                    use_reentrant=False,
+                )
+            else:
+                hidden_states = layer(
+                    hidden_states,
+                    attention_mask=attention_mask,
+                    position_embeddings=position_embeddings,
+                )
 
         hidden_states = self.model.model.norm(hidden_states)
         return hidden_states
+
+    @staticmethod
+    def _layer_forward(layer, hidden_states, attention_mask, position_embeddings):
+        return layer(
+            hidden_states,
+            attention_mask=attention_mask,
+            position_embeddings=position_embeddings,
+        )
 
     def get_lm_head(self) -> nn.Module:
         return self.model.lm_head

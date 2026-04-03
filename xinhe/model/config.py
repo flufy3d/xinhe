@@ -42,6 +42,7 @@ class XinheConfig:
     weight_decay: float = 0.01
     grad_clip: float = 1.0
     grad_accum_steps: int = 1        # 梯度累积步数 (模拟更大 batch)
+    gradient_checkpointing: bool = False  # 用计算换显存 (重算激活值)
     resume_from: str = ""            # checkpoint 路径 (为空则不恢复)
     early_stop_loss: float = 0.0    # 早停 loss 阈值 (0=不启用)
     early_stop_patience: int = 0    # 早停耐心 (连续多少步低于阈值)
@@ -130,6 +131,7 @@ class XinheConfig:
                 "weight_decay": "weight_decay",
                 "grad_clip": "grad_clip",
                 "grad_accum_steps": "grad_accum_steps",
+                "gradient_checkpointing": "gradient_checkpointing",
                 "resume_from": "resume_from",
                 "early_stop_loss": "early_stop_loss",
                 "early_stop_patience": "early_stop_patience",
