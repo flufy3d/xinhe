@@ -287,7 +287,7 @@ def cmd_logs(args):
     if args.follow:
         # tail -f，Ctrl+C 退出不影响训练
         try:
-            subprocess.run(["ssh", "-p", port] + ssh_opts() + [host, f"tail -f {log_path}"])
+            subprocess.run(["ssh", "-p", port] + ssh_opts() + [host, f"tail -n {args.lines} -f {log_path}"])
         except KeyboardInterrupt:
             pass
         return
