@@ -115,10 +115,9 @@ def tokenize_turn(
             assistant_ids = full_ids[prefix_len:]
             pos = _find_subsequence(assistant_ids, value_ids)
             if pos >= 0:
-                # 精确 token 匹配
+                # value token + 句尾收尾 token (含 。<|im_end|>)
                 start = prefix_len + pos
-                end = start + len(value_ids)
-                for i in range(start, end):
+                for i in range(start, len(full_ids)):
                     labels[i] = full_ids[i]
             else:
                 # BPE 合并 fallback: 用字符偏移量定位 (如 "在北京" 合并为单 token)
@@ -126,7 +125,9 @@ def tokenize_turn(
                     tokenizer, assistant_content, value_text,
                     prefix_len, len(full_ids))
                 if positions:
-                    for i in positions:
+                    # value token + 句尾收尾 token (含 。<|im_end|>)
+                    tail_start = min(positions)
+                    for i in range(tail_start, len(full_ids)):
                         labels[i] = full_ids[i]
                 else:
                     # 最终 fallback: 全量 loss
