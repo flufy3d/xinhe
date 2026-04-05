@@ -140,8 +140,11 @@ python scripts/train.py --config configs/curriculum_qwen.yaml --from-stage 14_th
 ```bash
 python scripts/chat.py --checkpoint checkpoints/latest.pt
 
-# 显示 think 推理过程
-python scripts/chat.py --checkpoint checkpoints/latest.pt --show-think
+# 启用思考模式 (生成时以 <think> 开头)
+python scripts/chat.py --checkpoint checkpoints/latest.pt --think
+
+# 思考 + 显示推理过程
+python scripts/chat.py --checkpoint checkpoints/latest.pt --think --show-think
 ```
 
 聊天命令：

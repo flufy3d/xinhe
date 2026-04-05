@@ -92,6 +92,7 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=256, help="最大生成 token 数")
     parser.add_argument("--temperature", type=float, default=0.85)
     parser.add_argument("--top-p", type=float, default=0.95)
+    parser.add_argument("--think", action="store_true", help="启用思考模式 (生成时以 <think> 开头)")
     parser.add_argument("--show-think", action="store_true", help="显示 <think> 推理过程")
     args = parser.parse_args()
 
@@ -246,6 +247,9 @@ def main():
             messages, tokenize=False, add_generation_prompt=True,
         )
         input_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
+        if args.think:
+            think_prefix = tokenizer.encode("<think>\n", add_special_tokens=False)
+            input_ids = input_ids + think_prefix
         input_tensor = torch.tensor([input_ids], dtype=torch.long, device=device)
 
         # eos token id

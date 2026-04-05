@@ -381,7 +381,7 @@ def load_backbone(model_path: str, device: str = "cuda"):
     print(f"加载 backbone: {model_path}")
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
-        model_path, torch_dtype=torch.float16, device_map=device,
+        model_path, dtype=torch.float16, device_map=device,
     )
     model.eval()
     print(f"  backbone 加载完成 ({device})")
@@ -404,11 +404,14 @@ def generate_think_response(
     prompt_text = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True,
     )
-    input_ids = tokenizer(prompt_text, return_tensors="pt").input_ids.to(model.device)
+    inputs = tokenizer(prompt_text, return_tensors="pt")
+    input_ids = inputs.input_ids.to(model.device)
+    attention_mask = inputs.attention_mask.to(model.device)
 
     with torch.no_grad():
         output = model.generate(
             input_ids,
+            attention_mask=attention_mask,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_p=top_p,
@@ -467,8 +470,10 @@ def generate_think_episodes(
     ratio_fact_summary: float = 0.25,
     ratio_fact_reason: float = 0.20,
     ratio_fact_combination: float = 0.15,
+    # 增量写入：传入文件则边生成边写，支持断点续生
+    output_file: str = None,
 ) -> list[list[dict]]:
-    """生成 think episodes (含 backbone 推理)"""
+    """生成 think episodes (含 backbone 推理)，支持增量写入"""
 
     # 累积阈值
     TYPE_BOUNDS = [
@@ -485,57 +490,82 @@ def generate_think_episodes(
         1.0,
     ]
 
+    # 断点续生：检查已有数据
+    existing = 0
+    if output_file and Path(output_file).exists():
+        with open(output_file, "r", encoding="utf-8") as f:
+            existing = sum(1 for line in f if line.strip())
+        if existing >= num:
+            print(f"  [断点续生] 已有 {existing}/{num} 条，跳过")
+            return None  # 调用方读文件即可
+        print(f"  [断点续生] 已有 {existing}/{num} 条，继续生成剩余 {num - existing} 条")
+        # 快进 rng 到正确位置
+        for _ in range(existing):
+            rng.random()
+
     episodes = []
     failed = 0
+    fout = None
+    if output_file:
+        Path(output_file).parent.mkdir(parents=True, exist_ok=True)
+        fout = open(output_file, "a", encoding="utf-8")
 
-    for i in tqdm(range(num), desc="生成 think episodes"):
-        r = rng.random()
+    try:
+        for i in tqdm(range(existing, num), desc="生成 think episodes",
+                       initial=existing, total=num):
+            r = rng.random()
 
-        success = False
-        for retry in range(max_retries):
-            try:
-                if r < TYPE_BOUNDS[0]:  # fact 推理
-                    sr = rng.random()
-                    subtype = FACT_SUBTYPES[0]
-                    for st, b in zip(FACT_SUBTYPES, FACT_BOUNDS):
-                        if sr < b:
-                            subtype = st
-                            break
-                    nf = rng.randint(2, 5) if subtype != "single" else rng.randint(1, 3)
-                    turns, messages = build_fact_think_episode(rng, nf, subtype)
+            for retry in range(max_retries):
+                try:
+                    if r < TYPE_BOUNDS[0]:  # fact 推理
+                        sr = rng.random()
+                        subtype = FACT_SUBTYPES[0]
+                        for st, b in zip(FACT_SUBTYPES, FACT_BOUNDS):
+                            if sr < b:
+                                subtype = st
+                                break
+                        nf = rng.randint(2, 5) if subtype != "single" else rng.randint(1, 3)
+                        turns, messages = build_fact_think_episode(rng, nf, subtype)
 
-                elif r < TYPE_BOUNDS[1]:  # 续聊
-                    turns, messages = build_continuation_episode(rng)
+                    elif r < TYPE_BOUNDS[1]:  # 续聊
+                        turns, messages = build_continuation_episode(rng)
 
-                elif r < TYPE_BOUNDS[2]:  # 心跳
-                    turns, messages = build_heartbeat_episode(rng)
+                    elif r < TYPE_BOUNDS[2]:  # 心跳
+                        turns, messages = build_heartbeat_episode(rng)
 
-                else:  # 纯逻辑
-                    turns, messages = build_pure_logic_episode(rng)
+                    else:  # 纯逻辑
+                        turns, messages = build_pure_logic_episode(rng)
 
-                # backbone 推理
-                response = generate_think_response(
-                    model, tokenizer, messages, max_new_tokens,
-                )
+                    # backbone 推理
+                    response = generate_think_response(
+                        model, tokenizer, messages, max_new_tokens,
+                    )
 
-                if not validate_think_response(response):
-                    if retry < max_retries - 1:
-                        continue
-                    failed += 1
+                    if not validate_think_response(response):
+                        if retry < max_retries - 1:
+                            continue
+                        failed += 1
+                        break
+
+                    # 填入最后一轮的 assistant 回复
+                    turns[-1]["assistant"] = response
+                    episodes.append(turns)
+
+                    # 增量写入
+                    if fout:
+                        fout.write(episode_to_jsonl(turns) + "\n")
+                        fout.flush()
                     break
 
-                # 填入最后一轮的 assistant 回复
-                turns[-1]["assistant"] = response
-                episodes.append(turns)
-                success = True
-                break
-
-            except Exception as e:
-                if retry < max_retries - 1:
-                    continue
-                print(f"\n  Episode {i} 失败: {e}")
-                failed += 1
-                break
+                except Exception as e:
+                    if retry < max_retries - 1:
+                        continue
+                    print(f"\n  Episode {i} 失败: {e}")
+                    failed += 1
+                    break
+    finally:
+        if fout:
+            fout.close()
 
     if failed > 0:
         print(f"  {failed}/{num} episodes 生成失败 (已跳过)")
@@ -573,6 +603,10 @@ def generate_think_data(
     # 加载 backbone
     model, tokenizer = load_backbone(model_path, device)
 
+    # think 数据增量写入到临时文件，支持断点续生
+    think_train_path = str(out_path / "_think_train.jsonl")
+    think_val_path = str(out_path / "_think_val.jsonl")
+
     # 生成 think 数据
     print(f"\n=== 生成 Think 训练数据 ({num_think} episodes) ===")
     rng_train = random.Random(seed)
@@ -582,16 +616,18 @@ def generate_think_data(
         ratio_heartbeat=ratio_heartbeat,
         ratio_logic=ratio_logic,
     )
-    think_train = generate_think_episodes(
+    generate_think_episodes(
         rng_train, num_think, model, tokenizer, max_new_tokens,
         **think_ratio_kwargs,
+        output_file=think_train_path,
     )
 
     print(f"\n=== 生成 Think 验证数据 ({num_val_think} episodes) ===")
     rng_val = random.Random(seed + 10000)
-    think_val = generate_think_episodes(
+    generate_think_episodes(
         rng_val, num_val_think, model, tokenizer, max_new_tokens,
         **think_ratio_kwargs,
+        output_file=think_val_path,
     )
 
     # 释放 backbone 显存
@@ -619,16 +655,15 @@ def generate_think_data(
 
     # 混合并写出
     print(f"\n=== 混合输出 ===")
-    for split, think_eps, mem_path in [
-        ("train", think_train, memory_train_path),
-        ("val", think_val, memory_val_path),
+    for split, think_path, mem_path in [
+        ("train", think_train_path, memory_train_path),
+        ("val", think_val_path, memory_val_path),
     ]:
-        # 读取 memory JSONL
+        with open(think_path, "r", encoding="utf-8") as f:
+            think_lines = [line.strip() for line in f if line.strip()]
+
         with open(mem_path, "r", encoding="utf-8") as f:
             memory_lines = [line.strip() for line in f if line.strip()]
-
-        # think → JSONL
-        think_lines = [episode_to_jsonl(ep) for ep in think_eps]
 
         # 混合打乱
         all_lines = memory_lines + think_lines
@@ -645,6 +680,8 @@ def generate_think_data(
 
     # 清理临时文件
     shutil.rmtree(memory_dir, ignore_errors=True)
+    for tmp in [think_train_path, think_val_path]:
+        Path(tmp).unlink(missing_ok=True)
 
     return str(out_path / "train.jsonl"), str(out_path / "val.jsonl")
 

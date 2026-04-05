@@ -88,6 +88,13 @@ def _generate_think(
         print(f"  [缓存] 使用已有数据: {out_dir}")
         return train_path, val_path
 
+    # --force 时清掉中间文件，重新生成
+    if force:
+        for f in [train_path, val_path,
+                  str(Path(out_dir) / "_think_train.jsonl"),
+                  str(Path(out_dir) / "_think_val.jsonl")]:
+            Path(f).unlink(missing_ok=True)
+
     from generate_think_data import generate_think_data
 
     mp = model_path or data_cfg.get("model_path", "./models/qwen3-0.6b")
