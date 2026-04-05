@@ -303,6 +303,17 @@ def build_heartbeat_episode(
     turns = []
 
     # fact 告知
+    # 心跳 context 用第三人称描述，避免 backbone 把用户 facts 当成自己的
+    HEARTBEAT_CONTEXT = {
+        "name": "用户叫{v}",
+        "number": "用户的编号是{v}",
+        "city": "用户住在{v}",
+        "food": "用户喜欢吃{v}",
+        "job": "用户的职业是{v}",
+        "hobby": "用户喜欢{v}",
+        "age": "用户{v}岁",
+        "pet": "用户养了{v}",
+    }
     fact_lines = []
     for fact in facts:
         cat = fact["category"]
@@ -310,8 +321,7 @@ def build_heartbeat_episode(
         user_text = template[0].format(v=fact["value"])
         asst_text = template[1].format(v=fact["value"])
         turns.append({"user": user_text, "assistant": asst_text, "train_loss": True})
-        # context 用第三人称，避免 backbone 把用户 facts 当成自己的
-        context_text = user_text.replace("我", "用户")
+        context_text = HEARTBEAT_CONTEXT.get(cat, "用户提到{v}").format(v=fact["value"])
         fact_lines.append(context_text)
 
     # 1-2 轮动态对话
@@ -467,8 +477,13 @@ def validate_think_response(response: str) -> bool:
     if "<think>" not in response or "</think>" not in response:
         return False
 
-    # think 块后必须有实际内容
+    # tag 顺序正确
+    think_start = response.find("<think>")
     think_end = response.find("</think>")
+    if think_start >= think_end:
+        return False
+
+    # think 块后必须有实际内容
     answer = response[think_end + len("</think>"):].strip()
     if len(answer) < 2:
         return False

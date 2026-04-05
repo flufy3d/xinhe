@@ -119,6 +119,7 @@ def _generate_think(
         memory_entity_ratio=data_cfg.get("memory_entity_ratio", 0.2),
         memory_recall_ratio=data_cfg.get("memory_recall_ratio", 0.2),
         memory_overwrite_ratio=data_cfg.get("memory_overwrite_ratio", 0.2),
+        memory_same_category=data_cfg.get("memory_same_category", 0.3),
         ratio_fact=data_cfg.get("ratio_fact", 0.55),
         ratio_continuation=data_cfg.get("ratio_continuation", 0.20),
         ratio_heartbeat=data_cfg.get("ratio_heartbeat", 0.15),
