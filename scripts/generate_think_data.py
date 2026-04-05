@@ -310,7 +310,9 @@ def build_heartbeat_episode(
         user_text = template[0].format(v=fact["value"])
         asst_text = template[1].format(v=fact["value"])
         turns.append({"user": user_text, "assistant": asst_text, "train_loss": True})
-        fact_lines.append(user_text)
+        # context 用第三人称，避免 backbone 把用户 facts 当成自己的
+        context_text = user_text.replace("我", "用户")
+        fact_lines.append(context_text)
 
     # 1-2 轮动态对话
     chat_lines = []
@@ -442,11 +444,11 @@ def generate_think_responses_batch(
             do_sample=True,
         )
 
-    # 解码每条结果
+    # 解码每条结果 (左侧 padding，所有 input 长度相同)
+    input_len = inputs.input_ids.shape[1]
     results = []
     for i in range(len(messages_batch)):
-        prompt_len = inputs.input_ids[i].ne(tokenizer.pad_token_id).sum().item()
-        new_ids = outputs[i][prompt_len:]
+        new_ids = outputs[i][input_len:]
         response = tokenizer.decode(new_ids, skip_special_tokens=False)
 
         if "<think>" not in response and "</think>" in response:
