@@ -560,6 +560,7 @@ def generate_think_episodes(
         fout = open(output_file, "a", encoding="utf-8")
 
     remaining = num - existing
+    retry_queue = []
     pbar = tqdm(total=num, initial=existing, desc="生成 think episodes")
 
     try:
@@ -590,6 +591,7 @@ def generate_think_episodes(
                         responses.append("")
 
             # 处理结果
+            failed_in_batch = []
             for j in range(cur_batch):
                 response = responses[j]
                 if validate_think_response(response):
@@ -600,9 +602,32 @@ def generate_think_episodes(
                         fout.flush()
                 else:
                     failed += 1
+                    failed_in_batch.append((batch_turns[j], batch_messages[j]))
 
+            retry_queue.extend(failed_in_batch)
             pos += cur_batch
             pbar.update(cur_batch)
+
+        # 补生成：逐条重试失败的 episodes
+        if retry_queue:
+            print(f"\n  补生成 {len(retry_queue)} 条失败 episodes...")
+            recovered = 0
+            for turns, messages in tqdm(retry_queue, desc="补生成"):
+                try:
+                    response = generate_think_response(
+                        model, tokenizer, messages, max_new_tokens,
+                    )
+                    if validate_think_response(response):
+                        turns[-1]["assistant"] = response
+                        episodes.append(turns)
+                        if fout:
+                            fout.write(episode_to_jsonl(turns) + "\n")
+                            fout.flush()
+                        recovered += 1
+                except Exception:
+                    pass
+            failed -= recovered
+            print(f"  补回 {recovered} 条，最终失败 {failed} 条")
 
     finally:
         pbar.close()
@@ -610,7 +635,7 @@ def generate_think_episodes(
             fout.close()
 
     if failed > 0:
-        print(f"  {failed}/{num} episodes 生成失败 (已跳过)")
+        print(f"  {failed}/{num} episodes 最终失败 (已跳过)")
 
     return episodes
 

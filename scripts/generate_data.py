@@ -85,8 +85,13 @@ def _generate_think(
 
     # 缓存检查: think 数据生成慢，有数据就跳过
     if not force and Path(train_path).exists() and Path(val_path).exists():
-        print(f"  [缓存] 使用已有数据: {out_dir}")
-        return train_path, val_path
+        expected = data_cfg.get("num_think", 5000) + data_cfg.get("num_memory", 5000)
+        with open(train_path, "r", encoding="utf-8") as f:
+            actual = sum(1 for line in f if line.strip())
+        if actual >= expected * 0.95:  # 允许 5% 容差 (失败跳过的)
+            print(f"  [缓存] 使用已有数据: {out_dir} ({actual} 条)")
+            return train_path, val_path
+        print(f"  [数据不足] {actual}/{expected} 条，重新生成")
 
     # --force 时清掉中间文件，重新生成
     if force:
