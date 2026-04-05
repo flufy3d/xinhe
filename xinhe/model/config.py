@@ -115,14 +115,22 @@ class XinheConfig:
                 stage["training"] = merged
 
         # 合并 stage_overrides (硬件相关，优先级最高)
+        # training 字段 → stage["training"], data 字段 → stage["data"]
         if stage_overrides:
             default_ov = stage_overrides.get("default", {})
             for stage in curriculum:
                 name = stage["name"]
                 specific_ov = stage_overrides.get(name, {})
-                training = stage.setdefault("training", {})
-                training.update(default_ov)
-                training.update(specific_ov)
+                merged_ov = {**default_ov, **specific_ov}
+                # data_ 前缀的 key 覆盖到 data 字段
+                data_ov = {k[5:]: v for k, v in merged_ov.items() if k.startswith("data_")}
+                training_ov = {k: v for k, v in merged_ov.items() if not k.startswith("data_")}
+                if training_ov:
+                    training = stage.setdefault("training", {})
+                    training.update(training_ov)
+                if data_ov:
+                    data = stage.setdefault("data", {})
+                    data.update(data_ov)
 
         return curriculum
 

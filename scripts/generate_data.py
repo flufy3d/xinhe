@@ -118,6 +118,7 @@ def _generate_think(
         ratio_continuation=data_cfg.get("ratio_continuation", 0.20),
         ratio_heartbeat=data_cfg.get("ratio_heartbeat", 0.15),
         ratio_logic=data_cfg.get("ratio_logic", 0.10),
+        gen_batch_size=data_cfg.get("gen_batch_size", 16),
     )
 
 

@@ -395,21 +395,45 @@ def generate_think_response(
     top_p: float = 0.9,
 ) -> str:
     """
-    用干净 backbone 生成 think 回复。
+    用干净 backbone 生成 think 回复（单条）。
 
     使用 Qwen3 原生模板（支持 think），不用 ensure_chat_template。
     原生模板的 generation prompt 包含 <think>\\n，所以生成内容从 think 内部开始。
     """
-    # Qwen3 原生模板
-    prompt_text = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True,
+    results = generate_think_responses_batch(
+        model, tokenizer, [messages], max_new_tokens, temperature, top_p,
     )
-    inputs = tokenizer(prompt_text, return_tensors="pt")
+    return results[0]
+
+
+def generate_think_responses_batch(
+    model, tokenizer, messages_batch: list[list[dict]],
+    max_new_tokens: int = 512,
+    temperature: float = 0.7,
+    top_p: float = 0.9,
+) -> list[str]:
+    """
+    批量生成 think 回复。左侧 padding，一次推理多条。
+    """
+    # 构造 prompt texts
+    prompt_texts = []
+    for messages in messages_batch:
+        prompt_text = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True,
+        )
+        prompt_texts.append(prompt_text)
+
+    # 左侧 padding (decoder-only batch generation 需要)
+    original_side = tokenizer.padding_side
+    tokenizer.padding_side = "left"
+    inputs = tokenizer(prompt_texts, return_tensors="pt", padding=True)
+    tokenizer.padding_side = original_side
+
     input_ids = inputs.input_ids.to(model.device)
     attention_mask = inputs.attention_mask.to(model.device)
 
     with torch.no_grad():
-        output = model.generate(
+        outputs = model.generate(
             input_ids,
             attention_mask=attention_mask,
             max_new_tokens=max_new_tokens,
@@ -418,19 +442,22 @@ def generate_think_response(
             do_sample=True,
         )
 
-    new_ids = output[0][input_ids.shape[1]:]
-    response = tokenizer.decode(new_ids, skip_special_tokens=False)
+    # 解码每条结果
+    results = []
+    for i in range(len(messages_batch)):
+        prompt_len = inputs.input_ids[i].ne(tokenizer.pad_token_id).sum().item()
+        new_ids = outputs[i][prompt_len:]
+        response = tokenizer.decode(new_ids, skip_special_tokens=False)
 
-    # Qwen3 原生模板的 generation prompt 已含 <think>\n
-    # 生成内容从 think 块内部开始，补回 <think>
-    if "<think>" not in response and "</think>" in response:
-        response = "<think>\n" + response
+        if "<think>" not in response and "</think>" in response:
+            response = "<think>\n" + response
 
-    # 清理尾部标记
-    for tag in ["<|im_end|>", "<|endoftext|>", "</s>"]:
-        response = response.replace(tag, "")
+        for tag in ["<|im_end|>", "<|endoftext|>", "</s>"]:
+            response = response.replace(tag, "")
 
-    return response.strip()
+        results.append(response.strip())
+
+    return results
 
 
 def validate_think_response(response: str) -> bool:
@@ -460,6 +487,7 @@ def generate_think_episodes(
     tokenizer,
     max_new_tokens: int = 512,
     max_retries: int = 3,
+    batch_size: int = 16,
     # 类型比例 (fact / continuation / heartbeat / logic)
     ratio_fact: float = 0.55,
     ratio_continuation: float = 0.20,
@@ -473,7 +501,7 @@ def generate_think_episodes(
     # 增量写入：传入文件则边生成边写，支持断点续生
     output_file: str = None,
 ) -> list[list[dict]]:
-    """生成 think episodes (含 backbone 推理)，支持增量写入"""
+    """生成 think episodes (含 backbone 推理)，batch 推理加速，支持增量写入"""
 
     # 累积阈值
     TYPE_BOUNDS = [
@@ -490,6 +518,25 @@ def generate_think_episodes(
         1.0,
     ]
 
+    def _build_one(rng):
+        """构造单个 episode，返回 (turns, messages)"""
+        r = rng.random()
+        if r < TYPE_BOUNDS[0]:  # fact 推理
+            sr = rng.random()
+            subtype = FACT_SUBTYPES[0]
+            for st, b in zip(FACT_SUBTYPES, FACT_BOUNDS):
+                if sr < b:
+                    subtype = st
+                    break
+            nf = rng.randint(2, 5) if subtype != "single" else rng.randint(1, 3)
+            return build_fact_think_episode(rng, nf, subtype)
+        elif r < TYPE_BOUNDS[1]:
+            return build_continuation_episode(rng)
+        elif r < TYPE_BOUNDS[2]:
+            return build_heartbeat_episode(rng)
+        else:
+            return build_pure_logic_episode(rng)
+
     # 断点续生：检查已有数据
     existing = 0
     if output_file and Path(output_file).exists():
@@ -497,11 +544,11 @@ def generate_think_episodes(
             existing = sum(1 for line in f if line.strip())
         if existing >= num:
             print(f"  [断点续生] 已有 {existing}/{num} 条，跳过")
-            return None  # 调用方读文件即可
+            return None
         print(f"  [断点续生] 已有 {existing}/{num} 条，继续生成剩余 {num - existing} 条")
         # 快进 rng 到正确位置
         for _ in range(existing):
-            rng.random()
+            _build_one(rng)  # 消耗相同的 rng 序列
 
     episodes = []
     failed = 0
@@ -510,60 +557,53 @@ def generate_think_episodes(
         Path(output_file).parent.mkdir(parents=True, exist_ok=True)
         fout = open(output_file, "a", encoding="utf-8")
 
+    remaining = num - existing
+    pbar = tqdm(total=num, initial=existing, desc="生成 think episodes")
+
     try:
-        for i in tqdm(range(existing, num), desc="生成 think episodes",
-                       initial=existing, total=num):
-            r = rng.random()
+        pos = 0
+        while pos < remaining:
+            # 构造一个 batch 的 episodes
+            cur_batch = min(batch_size, remaining - pos)
+            batch_turns = []
+            batch_messages = []
+            for _ in range(cur_batch):
+                turns, messages = _build_one(rng)
+                batch_turns.append(turns)
+                batch_messages.append(messages)
 
-            for retry in range(max_retries):
-                try:
-                    if r < TYPE_BOUNDS[0]:  # fact 推理
-                        sr = rng.random()
-                        subtype = FACT_SUBTYPES[0]
-                        for st, b in zip(FACT_SUBTYPES, FACT_BOUNDS):
-                            if sr < b:
-                                subtype = st
-                                break
-                        nf = rng.randint(2, 5) if subtype != "single" else rng.randint(1, 3)
-                        turns, messages = build_fact_think_episode(rng, nf, subtype)
+            # batch 推理
+            try:
+                responses = generate_think_responses_batch(
+                    model, tokenizer, batch_messages, max_new_tokens,
+                )
+            except Exception as e:
+                print(f"\n  Batch 推理失败: {e}，降级为逐条处理")
+                responses = []
+                for messages in batch_messages:
+                    try:
+                        r = generate_think_response(model, tokenizer, messages, max_new_tokens)
+                        responses.append(r)
+                    except Exception:
+                        responses.append("")
 
-                    elif r < TYPE_BOUNDS[1]:  # 续聊
-                        turns, messages = build_continuation_episode(rng)
-
-                    elif r < TYPE_BOUNDS[2]:  # 心跳
-                        turns, messages = build_heartbeat_episode(rng)
-
-                    else:  # 纯逻辑
-                        turns, messages = build_pure_logic_episode(rng)
-
-                    # backbone 推理
-                    response = generate_think_response(
-                        model, tokenizer, messages, max_new_tokens,
-                    )
-
-                    if not validate_think_response(response):
-                        if retry < max_retries - 1:
-                            continue
-                        failed += 1
-                        break
-
-                    # 填入最后一轮的 assistant 回复
-                    turns[-1]["assistant"] = response
-                    episodes.append(turns)
-
-                    # 增量写入
+            # 处理结果
+            for j in range(cur_batch):
+                response = responses[j]
+                if validate_think_response(response):
+                    batch_turns[j][-1]["assistant"] = response
+                    episodes.append(batch_turns[j])
                     if fout:
-                        fout.write(episode_to_jsonl(turns) + "\n")
+                        fout.write(episode_to_jsonl(batch_turns[j]) + "\n")
                         fout.flush()
-                    break
-
-                except Exception as e:
-                    if retry < max_retries - 1:
-                        continue
-                    print(f"\n  Episode {i} 失败: {e}")
+                else:
                     failed += 1
-                    break
+
+            pos += cur_batch
+            pbar.update(cur_batch)
+
     finally:
+        pbar.close()
         if fout:
             fout.close()
 
@@ -595,6 +635,7 @@ def generate_think_data(
     ratio_continuation: float = 0.20,
     ratio_heartbeat: float = 0.15,
     ratio_logic: float = 0.10,
+    gen_batch_size: int = 8,
 ):
     """生成混合训练数据 (memory + think)"""
     out_path = Path(out_dir)
@@ -618,6 +659,7 @@ def generate_think_data(
     )
     generate_think_episodes(
         rng_train, num_think, model, tokenizer, max_new_tokens,
+        batch_size=gen_batch_size,
         **think_ratio_kwargs,
         output_file=think_train_path,
     )
@@ -626,6 +668,7 @@ def generate_think_data(
     rng_val = random.Random(seed + 10000)
     generate_think_episodes(
         rng_val, num_val_think, model, tokenizer, max_new_tokens,
+        batch_size=gen_batch_size,
         **think_ratio_kwargs,
         output_file=think_val_path,
     )
@@ -660,7 +703,16 @@ def generate_think_data(
         ("val", think_val_path, memory_val_path),
     ]:
         with open(think_path, "r", encoding="utf-8") as f:
-            think_lines = [line.strip() for line in f if line.strip()]
+            think_lines = []
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    json.loads(line)  # 验证 JSON 完整性
+                    think_lines.append(line)
+                except json.JSONDecodeError:
+                    pass  # 跳过被截断的不完整行
 
         with open(mem_path, "r", encoding="utf-8") as f:
             memory_lines = [line.strip() for line in f if line.strip()]

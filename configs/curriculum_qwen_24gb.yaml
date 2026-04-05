@@ -17,3 +17,5 @@ stage_overrides:
     batch_size: 8
   3_distance:
     batch_size: 8
+  14_think:
+    data_gen_batch_size: 32
