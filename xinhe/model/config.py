@@ -85,6 +85,48 @@ class XinheConfig:
         return raw
 
     @classmethod
+    def _resolve_curriculum(cls, raw: dict, config_path: str) -> list[dict]:
+        """
+        解析课程配置，支持两种方式:
+          1. curriculum: [...] — 内联 (旧格式，向后兼容)
+          2. curriculum_file: curriculum.yaml — 引用共享课程文件
+             + training_defaults: 自动合并到每个阶段
+             + stage_overrides: 硬件相关覆盖 (如 batch_size)
+        """
+        from pathlib import Path
+
+        # 方式 1: 内联
+        curriculum = raw.pop("curriculum", []) or []
+        curriculum_file = raw.pop("curriculum_file", None)
+        stage_overrides = raw.pop("stage_overrides", {})
+
+        # 方式 2: 引用外部文件
+        if curriculum_file:
+            cur_path = Path(config_path).parent / curriculum_file
+            with open(cur_path, "r", encoding="utf-8") as f:
+                cur_raw = yaml.safe_load(f)
+            training_defaults = cur_raw.get("training_defaults", {})
+            curriculum = cur_raw.get("stages", [])
+
+            # 合并 training_defaults → 每个阶段
+            for stage in curriculum:
+                merged = dict(training_defaults)
+                merged.update(stage.get("training", {}))
+                stage["training"] = merged
+
+        # 合并 stage_overrides (硬件相关，优先级最高)
+        if stage_overrides:
+            default_ov = stage_overrides.get("default", {})
+            for stage in curriculum:
+                name = stage["name"]
+                specific_ov = stage_overrides.get(name, {})
+                training = stage.setdefault("training", {})
+                training.update(default_ov)
+                training.update(specific_ov)
+
+        return curriculum
+
+    @classmethod
     def from_yaml(cls, path: str) -> tuple["XinheConfig", list[dict]]:
         """
         从 yaml 配置文件加载，支持链式 base 继承。
@@ -94,8 +136,8 @@ class XinheConfig:
         """
         raw = cls._load_and_merge(path)
 
-        # 提取 curriculum 段（不进入 dataclass）
-        curriculum = raw.pop("curriculum", []) or []
+        # 解析课程配置
+        curriculum = cls._resolve_curriculum(raw, path)
 
         # 将嵌套的 yaml 扁平化到 dataclass 字段
         flat = {}

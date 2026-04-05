@@ -78,6 +78,7 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
 
     # training 段的字段直接映射到 config
     field_map = {
+        "segment_length": "segment_length",
         "episode_length": "episode_length",
         "tbptt_steps": "tbptt_steps",
         "batch_size": "batch_size",
@@ -101,31 +102,9 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
 
 
 def generate_stage_data(stage: dict, stage_name: str) -> tuple[str, str]:
-    """为课程阶段生成合成数据，返回 (train_path, val_path)"""
-    from generate_memory_data import generate_data
-
-    data_cfg = stage.get("data", {})
-    out_dir = f"data/curriculum/{stage_name}"
-
-    return generate_data(
-        out_dir=out_dir,
-        num_train=data_cfg.get("num_train", 5000),
-        num_val=data_cfg.get("num_val", 200),
-        min_distance=data_cfg.get("min_distance", 1),
-        max_distance=data_cfg.get("max_distance", 4),
-        max_turns=data_cfg.get("max_turns", 16),
-        num_facts=data_cfg.get("num_facts", 1),
-        num_fillers=data_cfg.get("num_fillers", 0),
-        no_pre_filler=data_cfg.get("no_pre_filler", False),
-        max_pre_filler=data_cfg.get("max_pre_filler", 3),
-        no_overwrite=data_cfg.get("no_overwrite", False),
-        overwrite_ratio=data_cfg.get("overwrite_ratio", 0.4),
-        entity_ratio=data_cfg.get("entity_ratio", 0.0),
-        recall_ratio=data_cfg.get("recall_ratio", 0.0),
-        same_category=data_cfg.get("same_category", 0.0),
-        ai_recall_ratio=data_cfg.get("ai_recall_ratio", 0.0),
-        seed=data_cfg.get("seed", 42),
-    )
+    """为课程阶段生成数据，自动分发到 memory/think 生成器"""
+    from generate_data import generate_stage_data as _gen
+    return _gen(stage, stage_name)
 
 
 def train_single(config, args):
@@ -218,14 +197,9 @@ def train_curriculum(base_config, stages, args):
         print(f"  课程阶段 [{i+1}/{len(stages)}]: {stage_name}")
         print(f"{'='*60}")
 
-        # 准备数据
-        generate = data_cfg.get("generate", True)
-        if generate:
-            print(f"[数据生成]")
-            train_path, val_path = generate_stage_data(stage, stage_name)
-        else:
-            train_path = data_cfg["train_path"]
-            val_path = data_cfg.get("val_path", "")
+        # 准备数据 (统一分发: memory/think 自动识别)
+        print(f"[数据生成] type={data_cfg.get('type', 'memory')}")
+        train_path, val_path = generate_stage_data(stage, stage_name)
 
         # 构建本阶段 config
         stage_config = apply_stage_overrides(base_config, stage)

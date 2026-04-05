@@ -1,0 +1,200 @@
+# ============================================================
+# 心核课程定义 (所有 backbone / 硬件共享)
+#
+# 不要直接用这个文件训练。用入口文件:
+#   python scripts/train.py --config configs/curriculum_qwen.yaml
+#
+# 入口文件引用此文件并叠加硬件相关的 batch_size 等参数。
+# ============================================================
+
+# 训练默认值 — 每个阶段的 training 自动继承，阶段内的值覆盖默认值
+training_defaults:
+  episode_length: 16
+  tbptt_steps: 16
+  learning_rate: 1.0e-4
+  max_steps: 10000
+  early_stop_loss: 0.02
+  early_stop_patience: 200
+
+stages:
+  # ── 阶段 1: 基础记忆 ──
+  # 固定 tell 位置 (第一轮), distance=1
+  - name: "1_base_memory"
+    data:
+      num_train: 10000
+      no_pre_filler: true
+      no_overwrite: true
+      min_distance: 1
+      max_distance: 1
+      max_turns: 4
+    training:
+      episode_length: 4
+      tbptt_steps: 4
+      learning_rate: 3.0e-4
+      max_steps: 5000
+      early_stop_loss: 0.01
+
+  # ── 阶段 2: 随机 tell 位置 ──
+  - name: "2_random_tell"
+    data:
+      num_train: 10000
+      num_fillers: 16
+      max_pre_filler: 1
+      no_overwrite: true
+      min_distance: 1
+      max_distance: 1
+      max_turns: 5
+    training:
+      episode_length: 5
+      tbptt_steps: 5
+      max_steps: 5000
+      early_stop_loss: 0.01
+
+  # ── 阶段 3: 增大距离 ──
+  - name: "3_distance"
+    data:
+      num_train: 10000
+      num_fillers: 16
+      max_pre_filler: 1
+      no_overwrite: true
+      min_distance: 1
+      max_distance: 3
+      max_turns: 7
+    training:
+      episode_length: 7
+      tbptt_steps: 7
+      max_steps: 5000
+      early_stop_loss: 0.01
+
+  # ── 阶段 4: 完整多轮记忆 ──
+  - name: "4_full_m4"
+    data:
+      num_train: 10000
+      max_pre_filler: 2
+      no_overwrite: true
+      min_distance: 1
+      max_distance: 10
+      max_turns: 16
+    training:
+      early_stop_loss: 0.01
+
+  # ── 阶段 5: 3 类事实 ──
+  - name: "5_fact3"
+    data:
+      num_train: 10000
+      num_facts: 3
+      max_pre_filler: 2
+      no_overwrite: true
+      min_distance: 1
+      max_distance: 5
+      max_turns: 16
+    training:
+      early_stop_loss: 0.01
+
+  # ── 阶段 6: 5 类事实 ──
+  - name: "6_fact5"
+    data:
+      num_train: 10000
+      num_facts: 5
+      max_pre_filler: 2
+      no_overwrite: true
+      min_distance: 1
+      max_distance: 5
+      max_turns: 16
+    training:
+      early_stop_loss: 0.01
+
+  # ── 阶段 7: 8 类事实 ──
+  - name: "7_fact8"
+    data:
+      num_train: 10000
+      num_facts: 8
+      max_pre_filler: 2
+      no_overwrite: true
+      min_distance: 1
+      max_distance: 10
+      max_turns: 16
+
+  # ── 阶段 8: 覆写能力 ──
+  - name: "8_overwrite"
+    data:
+      num_train: 10000
+      num_facts: 8
+      max_pre_filler: 2
+      overwrite_ratio: 0.4
+      min_distance: 1
+      max_distance: 10
+      max_turns: 16
+
+  # ── 阶段 9: 实体区分 ──
+  - name: "9_entity"
+    data:
+      num_train: 10000
+      num_facts: 3
+      entity_ratio: 0.5
+      same_category: 0.5
+      no_overwrite: true
+      min_distance: 1
+      max_distance: 5
+      max_turns: 16
+
+  # ── 阶段 10: 对话回忆 ──
+  - name: "10_recall"
+    data:
+      num_train: 10000
+      recall_ratio: 0.5
+      entity_ratio: 0.2
+      no_overwrite: true
+      max_turns: 16
+
+  # ── 阶段 11: 回忆 AI 发言 ──
+  - name: "11_recall_ai"
+    data:
+      num_train: 10000
+      recall_ratio: 0.5
+      ai_recall_ratio: 1.0
+      entity_ratio: 0.2
+      no_overwrite: true
+      max_turns: 16
+
+  # ── 阶段 12: 混合回忆 ──
+  - name: "12_recall_mix"
+    data:
+      num_train: 10000
+      recall_ratio: 0.5
+      ai_recall_ratio: 0.5
+      entity_ratio: 0.2
+      no_overwrite: true
+      max_turns: 16
+
+  # ── 阶段 13: 全能力混合 ──
+  - name: "13_all"
+    data:
+      num_train: 10000
+      num_facts: 5
+      entity_ratio: 0.2
+      recall_ratio: 0.2
+      ai_recall_ratio: 0.5
+      overwrite_ratio: 0.2
+      same_category: 0.3
+      min_distance: 1
+      max_distance: 10
+      max_turns: 16
+
+  # ── 阶段 14: Think 课程 ──
+  - name: "14_think"
+    data:
+      type: think
+      num_think: 5000
+      num_memory: 5000
+      num_val_think: 100
+      num_val_memory: 100
+      ratio_fact: 0.55
+      ratio_continuation: 0.20
+      ratio_heartbeat: 0.15
+      ratio_logic: 0.10
+    training:
+      segment_length: 512
+      episode_length: 8
+      tbptt_steps: 8
+      early_stop_loss: 0.05
