@@ -88,6 +88,14 @@ QUESTIONS = {
         "",                # 纯空输入，无任何外部触发
     ],
 
+    # 上下文续聊 — 从 state 读对话上下文，自然接话
+    # backbone 自我对话生成多轮闲聊，训练时历史移入 state
+    # user 输入可能极短（"嗯"、"然后呢"），信息几乎全在 state 里
+    "continuation": [
+        # 不是固定模板，由 backbone 自我对话动态生成
+        # 话题种子: 日常/情感/兴趣/计划/闲扯 等
+    ],
+
     # 纯逻辑推理 — 不依赖 state，不依赖世界知识
     # 教 LoRA："state 无关时保持透明，让 backbone 直接推理"
     # 只放纯逻辑/数学，世界知识留给后续类别扩展自然覆盖
@@ -140,6 +148,7 @@ target: backbone 的 think 回复
 | Recall AI | 完整对话历史 + 回忆问题 | 早期对话轮次（含AI回复） | 最后一轮提问 |
 | 混合推理 | facts + 对话历史 + 推理问题 | 全部 | 推理问题 |
 | 心跳包 | 所有 facts + 对话历史 + 空输入 | 全部 | ""（纯空） |
+| 上下文续聊 | facts + 前轮对话 + 续聊输入 | facts + 前轮对话（复用 fact 告知 + recall 写入） | 续聊输入 |
 | 纯逻辑推理 | 纯逻辑题（无 fact） | 空 state / 随机噪声 state | 逻辑题 |
 
 所有场景统一模式，无需特殊处理。
@@ -166,6 +175,58 @@ state:  空 state / 随机噪声 state
 text:   纯逻辑题
 target: backbone 的 think 回复（backbone 本身就能答对）
 ```
+
+### 上下文续聊（对话连贯性训练）
+
+**目的**：教模型从 state 读对话上下文，生成连贯的自然回复。
+
+recall 训的是原样复述，fact 提问训的是精准回答，都不直接覆盖"读上下文 → 自然接话"。
+
+**核心设计**：state 写入端完全复用已训练过的能力（fact 告知 + recall 对话写入），
+只有读取端的用途变了——不复述、不精准回答，而是自然接话。
+
+```
+# episode 结构（复用记忆课程的写入流程）
+turn 1: "我叫夏" → "好的，你叫夏！"              ← fact 告知，已训练
+turn 2: "我喜欢看电影" → "好的，你喜欢看电影！"    ← fact 告知，已训练
+turn 3: "我昨天去看了流浪地球" → "真的吗？好看吗？" ← 动态闲聊，已训练（recall 用的 dynamic content）
+turn 4: "特效很震撼" → ???                         ← 续聊，backbone 生成 target
+```
+
+state 里有 facts（夏、喜欢看电影）+ 上一轮对话（流浪地球），全是已训练过的写入模式。
+模型只需要学一个新能力：读这些信息 → 自然接话。
+
+**数据生成**：
+
+```python
+# 前几轮: 复用记忆课程的 fact 告知 + 动态闲聊模板（写入 state）
+# 最后一轮: backbone 看到完整历史，开启 think 模式生成续聊回复
+messages = [
+    {"role": "user", "content": "我叫夏"},
+    {"role": "assistant", "content": "好的，你叫夏！"},
+    {"role": "user", "content": "我喜欢看电影"},
+    {"role": "assistant", "content": "好的，你喜欢看电影！"},
+    {"role": "user", "content": "我昨天去看了流浪地球"},
+    {"role": "assistant", "content": "真的吗？好看吗？"},
+    {"role": "user", "content": "特效很震撼"},
+]
+response = backbone.generate(messages, enable_think=True)
+# → <think>他叫夏，喜欢看电影，昨天看了流浪地球觉得特效好...</think>确实，流浪地球的特效在国产片里算顶级的了！
+```
+
+训练时：
+```
+state:  前几轮 fact 告知 + 动态闲聊通过 forward 写入（已训练过的可靠编码）
+text:   "特效很震撼"
+target: backbone 的 think 回复
+```
+
+**关键特点**：
+- state 写入完全复用已有能力，不引入新的写入模式
+- user 输入可能极短（"嗯"、"然后呢"），信息几乎全在 state 里
+- think 中会出现对 state 信息的自然推理，有助于连贯性
+
+**比例**：占 think 训练数据的 **15-20%**。
 
 ### 心跳包（自主表达）
 
