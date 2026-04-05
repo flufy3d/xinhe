@@ -1,0 +1,21 @@
+# ============================================================
+# 心核课程学习 — Qwen3.5-9B / A800 80GB
+#
+# 用法:
+#   python scripts/train.py --config configs/curriculum_qwen3.5-9b.yaml
+# ============================================================
+base: qwen3.5-9b.yaml
+curriculum_file: curriculum.yaml
+
+stage_overrides:
+  default:
+    batch_size: 4
+  1_base_memory:
+    batch_size: 8
+  2_random_tell:
+    batch_size: 8
+  3_distance:
+    batch_size: 8
+  14_think:
+    batch_size: 2
+    data_gen_batch_size: 8
