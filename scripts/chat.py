@@ -92,6 +92,7 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=256, help="最大生成 token 数")
     parser.add_argument("--temperature", type=float, default=0.85)
     parser.add_argument("--top-p", type=float, default=0.95)
+    parser.add_argument("--show-think", action="store_true", help="显示 <think> 推理过程")
     args = parser.parse_args()
 
     # 加载 checkpoint（如提供）
@@ -263,10 +264,19 @@ def main():
 
         # 解码输出 (只取新生成的部分)
         new_ids = generated_ids[0, len(input_ids):].tolist()
-        response = tokenizer.decode(new_ids, skip_special_tokens=True)
+        response = tokenizer.decode(new_ids, skip_special_tokens=False)
 
-        # 去掉可能的结束标记
-        response = response.replace("</s>", "").strip()
+        # 去掉结束标记
+        for tag in ["</s>", "<|im_end|>", "<|endoftext|>"]:
+            response = response.replace(tag, "")
+        response = response.strip()
+
+        # 处理 think 块
+        import re
+        if args.show_think:
+            response = response.replace("<think>", "\n  [思考] ").replace("</think>", "\n  [/思考]\n")
+        else:
+            response = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL).strip()
 
         print(f"\n心核: {response}")
         print(f"  [轮次 {turn_count} | scale={torch.sigmoid(model.plugin.state_scale).item():.3f}]")
