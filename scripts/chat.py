@@ -89,7 +89,7 @@ def main():
     parser.add_argument("--config", type=str, default="configs/base.yaml")
     parser.add_argument("--checkpoint", type=str, default=None, help="模型 checkpoint 路径")
     parser.add_argument("--state", type=str, default=None, help="初始状态文件路径")
-    parser.add_argument("--max-tokens", type=int, default=256, help="最大生成 token 数")
+    parser.add_argument("--max-tokens", type=int, default=512, help="最大生成 token 数")
     parser.add_argument("--temperature", type=float, default=0.85)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--think", action="store_true", help="启用思考模式 (生成时以 <think> 开头)")
