@@ -138,13 +138,17 @@ python scripts/train.py --config configs/curriculum_qwen.yaml --from-stage 14_th
 ### 聊天验证
 
 ```bash
+# 默认: 流式逐字输出 + 显示思考过程
 python scripts/chat.py --checkpoint checkpoints/latest.pt
 
-# 启用思考模式 (生成时以 <think> 开头)
-python scripts/chat.py --checkpoint checkpoints/latest.pt --think
+# 隐藏思考过程
+python scripts/chat.py --checkpoint checkpoints/latest.pt --hide-think
 
-# 思考 + 显示推理过程
-python scripts/chat.py --checkpoint checkpoints/latest.pt --think --show-think
+# 关闭流式输出 (一次性返回)
+python scripts/chat.py --checkpoint checkpoints/latest.pt --no-stream
+
+# 强制思考模式 (生成时以 <think> 开头)
+python scripts/chat.py --checkpoint checkpoints/latest.pt --think
 ```
 
 聊天命令：

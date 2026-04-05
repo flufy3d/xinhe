@@ -180,6 +180,7 @@ class XinheModel(nn.Module):
         top_p: float = 0.95,
         eos_token_id: Optional[int] = None,
         repetition_penalty: float = 1.2,
+        token_callback: Optional[callable] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         带状态的文本生成 (自回归)。
@@ -233,6 +234,9 @@ class XinheModel(nn.Module):
             probs = F.softmax(next_logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)  # (B, 1)
             generated = torch.cat([generated, next_token], dim=1)
+
+            if token_callback is not None:
+                token_callback(next_token[0, 0].item())
 
             # 检查终止
             if eos_token_id is not None and (next_token == eos_token_id).all():

@@ -14,8 +14,11 @@
     python scripts/chat.py
     python scripts/chat.py --checkpoint checkpoints/xinhe_step_5000.pt
     python scripts/chat.py --state saved_states/james.pt
+    python scripts/chat.py --hide-think      # 隐藏思考过程
+    python scripts/chat.py --no-stream       # 关闭流式逐字输出
 """
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -93,7 +96,8 @@ def main():
     parser.add_argument("--temperature", type=float, default=0.85)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--think", action="store_true", help="启用思考模式 (生成时以 <think> 开头)")
-    parser.add_argument("--show-think", action="store_true", help="显示 <think> 推理过程")
+    parser.add_argument("--hide-think", action="store_true", help="隐藏 <think> 推理过程")
+    parser.add_argument("--no-stream", action="store_true", help="关闭流式输出")
     args = parser.parse_args()
 
     # 加载 checkpoint（如提供）
@@ -254,35 +258,86 @@ def main():
 
         # eos token id
         eos_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+        show_think = not args.hide_think
+        stream = not args.no_stream
 
-        # 生成回复
-        with torch.no_grad():
-            generated_ids, state = model.generate_with_state(
-                input_ids=input_tensor,
-                state=state,
-                max_new_tokens=args.max_tokens,
-                temperature=args.temperature,
-                top_p=args.top_p,
-                eos_token_id=eos_id,
-            )
+        # --- 流式输出 ---
+        if stream:
+            print(f"\n心核: ", end="", flush=True)
+            token_buf = []       # 累积 token id，用于增量解码
+            printed_len = 0      # 已打印的字符数
+            in_think = False     # 当前是否在 <think> 块中
+            suppressing = False  # hide-think 时抑制输出
+            skip_ids = {tokenizer.convert_tokens_to_ids(t)
+                        for t in ["</s>", "<|im_end|>", "<|endoftext|>"]} - {None}
 
-        # 解码输出 (只取新生成的部分)
-        new_ids = generated_ids[0, len(input_ids):].tolist()
-        response = tokenizer.decode(new_ids, skip_special_tokens=False)
+            def _stream_token(token_id: int):
+                nonlocal printed_len, in_think, suppressing
+                if token_id in skip_ids:
+                    return
+                token_buf.append(token_id)
+                text = tokenizer.decode(token_buf, skip_special_tokens=False)
+                new_text = text[printed_len:]
+                if not new_text:
+                    return
 
-        # 去掉结束标记
-        for tag in ["</s>", "<|im_end|>", "<|endoftext|>"]:
-            response = response.replace(tag, "")
-        response = response.strip()
+                # 检测 think 标签
+                if "<think>" in new_text:
+                    in_think = True
+                    if show_think:
+                        new_text = new_text.replace("<think>", "\n  [思考] ")
+                    else:
+                        suppressing = True
+                        printed_len = len(text)
+                        return
+                if "</think>" in new_text:
+                    in_think = False
+                    if show_think:
+                        new_text = new_text.replace("</think>", "\n  [/思考]\n")
+                    else:
+                        suppressing = False
+                        printed_len = len(text)
+                        return
+                if suppressing:
+                    printed_len = len(text)
+                    return
 
-        # 处理 think 块
-        import re
-        if args.show_think:
-            response = response.replace("<think>", "\n  [思考] ").replace("</think>", "\n  [/思考]\n")
+                print(new_text, end="", flush=True)
+                printed_len = len(text)
+
+            with torch.no_grad():
+                generated_ids, state = model.generate_with_state(
+                    input_ids=input_tensor,
+                    state=state,
+                    max_new_tokens=args.max_tokens,
+                    temperature=args.temperature,
+                    top_p=args.top_p,
+                    eos_token_id=eos_id,
+                    token_callback=_stream_token,
+                )
+            print()  # 换行
         else:
-            response = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL).strip()
+            # --- 非流式输出 ---
+            with torch.no_grad():
+                generated_ids, state = model.generate_with_state(
+                    input_ids=input_tensor,
+                    state=state,
+                    max_new_tokens=args.max_tokens,
+                    temperature=args.temperature,
+                    top_p=args.top_p,
+                    eos_token_id=eos_id,
+                )
+            new_ids = generated_ids[0, len(input_ids):].tolist()
+            response = tokenizer.decode(new_ids, skip_special_tokens=False)
+            for tag in ["</s>", "<|im_end|>", "<|endoftext|>"]:
+                response = response.replace(tag, "")
+            response = response.strip()
+            if show_think:
+                response = response.replace("<think>", "\n  [思考] ").replace("</think>", "\n  [/思考]\n")
+            else:
+                response = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL).strip()
+            print(f"\n心核: {response}")
 
-        print(f"\n心核: {response}")
         print(f"  [轮次 {turn_count} | scale={torch.sigmoid(model.plugin.state_scale).item():.3f}]")
 
 
