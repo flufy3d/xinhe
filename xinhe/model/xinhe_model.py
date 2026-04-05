@@ -65,6 +65,7 @@ class XinheModel(nn.Module):
         input_ids: torch.Tensor,
         state: torch.Tensor,
         labels: Optional[torch.Tensor] = None,
+        pad_token_id: Optional[int] = None,
     ) -> dict:
         """
         带状态的前向传播。
@@ -73,6 +74,7 @@ class XinheModel(nn.Module):
             input_ids: (B, T) token ids
             state: (B, n_state, D) 当前持久状态
             labels: (B, T) 可选，用于计算 loss
+            pad_token_id: 可选，padding token id，提供时自动遮蔽 padding
 
         返回:
             dict:
@@ -83,8 +85,9 @@ class XinheModel(nn.Module):
         # 1. 嵌入内容 token
         content_emb = self.backbone.embed(input_ids)  # (B, T, D)
 
-        # 2. 注入状态
-        hidden_states, mask = self.plugin.inject(state, content_emb)
+        # 2. 注入状态 (自动检测 padding)
+        content_mask = (input_ids != pad_token_id) if pad_token_id is not None else None
+        hidden_states, mask = self.plugin.inject(state, content_emb, content_mask=content_mask)
 
         # 3. Transformer forward
         output = self.backbone.forward_blocks(hidden_states, attention_mask=mask)

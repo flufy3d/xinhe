@@ -75,6 +75,7 @@ class StatePlugin(nn.Module):
         self,
         state: torch.Tensor,
         content_emb: torch.Tensor,
+        content_mask: torch.Tensor = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         构建 [Read-State | Content | Write-State] 序列。
@@ -82,10 +83,12 @@ class StatePlugin(nn.Module):
         参数:
             state: (B, n_state, D) 当前持久状态 (上一轮的输出)
             content_emb: (B, T, D) 内容 token 的嵌入
+            content_mask: (B, T) 可选，True=真实 token, False=padding
+                          提供时 padding 位置对所有后续 token 不可见
 
         返回:
             hidden_states: (B, n_state + T + n_state, D)
-            mask: (1, 1, L, L) 标准因果 attention mask
+            mask: (B, 1, L, L) 因果 attention mask (padding 位置被遮蔽)
         """
         B, T, D = content_emb.shape
         scale = torch.sigmoid(self.state_scale)
@@ -113,7 +116,22 @@ class StatePlugin(nn.Module):
                 device=content_emb.device, dtype=content_emb.dtype,
             ),
             diagonal=1,
-        ).unsqueeze(0).unsqueeze(0)  # (1, 1, L, L)
+        ).unsqueeze(0)  # (1, L, L)
+
+        # 遮蔽 padding: padding 列设为 -inf，任何 token 都看不到 padding
+        if content_mask is not None:
+            # content_mask (B, T) → 完整序列 mask (B, L): read=True, content=mask, write=True
+            full_mask = torch.cat([
+                torch.ones(B, self.n_state, device=content_mask.device, dtype=torch.bool),
+                content_mask,
+                torch.ones(B, self.n_state, device=content_mask.device, dtype=torch.bool),
+            ], dim=1)  # (B, L)
+            # padding 列设为 -inf: (B, 1, L) 广播到 (B, L, L)
+            padding_mask = torch.zeros(B, 1, total_len, device=content_emb.device, dtype=content_emb.dtype)
+            padding_mask.masked_fill_(~full_mask.unsqueeze(1), float("-inf"))
+            mask = mask.unsqueeze(0) + padding_mask.unsqueeze(2)  # (B, 1, L, L)
+        else:
+            mask = mask.unsqueeze(0)  # (1, 1, L, L)
 
         return hidden_states, mask
 

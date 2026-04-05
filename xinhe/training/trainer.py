@@ -39,11 +39,13 @@ class Trainer:
         config: XinheConfig,
         train_dataloader: DataLoader,
         val_dataloader: Optional[DataLoader] = None,
+        pad_token_id: Optional[int] = None,
     ):
         self.model = model
         self.config = config
         self.train_dataloader = train_dataloader
         self.val_dataloader = val_dataloader
+        self.pad_token_id = pad_token_id
 
         # 设备和精度
         self.device = torch.device(config.device)
@@ -167,7 +169,7 @@ class Trainer:
 
             # Forward
             with torch.amp.autocast("cuda", dtype=self.dtype):
-                result = self.model(segment, state, labels=labels)
+                result = self.model(segment, state, labels=labels, pad_token_id=self.pad_token_id)
 
             state = result["state_next"]
             seg_loss = result["loss"]
@@ -205,7 +207,7 @@ class Trainer:
                 labels = labels.to(self.device)
 
                 with torch.amp.autocast("cuda", dtype=self.dtype):
-                    result = self.model(segment, state, labels=labels)
+                    result = self.model(segment, state, labels=labels, pad_token_id=self.pad_token_id)
 
                 state = result["state_next"]
                 total_loss += result["loss"].item()

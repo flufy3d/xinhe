@@ -140,7 +140,7 @@ def train_single(config, args):
     print(f"训练集: {n_train} episodes | 验证集: {n_val} episodes")
 
     model = XinheModel(config)
-    trainer = Trainer(model, config, train_loader, val_loader)
+    trainer = Trainer(model, config, train_loader, val_loader, pad_token_id=tokenizer.pad_token_id)
 
     resume_path = args.resume or (config.resume_from if config.resume_from else None)
     if resume_path:
@@ -239,7 +239,7 @@ def train_curriculum(base_config, stages, args):
 
         # 训练
         if trainer is None:
-            trainer = Trainer(model, stage_config, train_loader, val_loader)
+            trainer = Trainer(model, stage_config, train_loader, val_loader, pad_token_id=tokenizer.pad_token_id)
         else:
             trainer.reset_for_new_stage(stage_config, train_loader, val_loader)
 
