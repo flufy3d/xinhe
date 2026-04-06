@@ -13,7 +13,7 @@ training_defaults:
   tbptt_steps: 16
   learning_rate: 1.0e-4
   max_steps: 10000
-  early_stop_loss: 0.02
+  early_stop_loss: 0.05
   early_stop_patience: 200
 
 stages:
@@ -32,7 +32,7 @@ stages:
       tbptt_steps: 4
       learning_rate: 3.0e-4
       max_steps: 5000
-      early_stop_loss: 0.01
+
 
   # ── 阶段 2: 随机 tell 位置 ──
   - name: "2_random_tell"
@@ -48,7 +48,7 @@ stages:
       episode_length: 5
       tbptt_steps: 5
       max_steps: 5000
-      early_stop_loss: 0.01
+
 
   # ── 阶段 3: 增大距离 ──
   - name: "3_distance"
@@ -64,7 +64,7 @@ stages:
       episode_length: 7
       tbptt_steps: 7
       max_steps: 5000
-      early_stop_loss: 0.01
+
 
   # ── 阶段 4: 完整多轮记忆 ──
   - name: "4_full_m4"
@@ -75,8 +75,7 @@ stages:
       min_distance: 1
       max_distance: 10
       max_turns: 16
-    training:
-      early_stop_loss: 0.01
+
 
   # ── 阶段 5: 3 类事实 ──
   - name: "5_fact3"
@@ -88,8 +87,7 @@ stages:
       min_distance: 1
       max_distance: 5
       max_turns: 16
-    training:
-      early_stop_loss: 0.01
+
 
   # ── 阶段 6: 5 类事实 ──
   - name: "6_fact5"
@@ -101,8 +99,7 @@ stages:
       min_distance: 1
       max_distance: 5
       max_turns: 16
-    training:
-      early_stop_loss: 0.01
+
 
   # ── 阶段 7: 8 类事实 ──
   - name: "7_fact8"
@@ -193,9 +190,9 @@ stages:
       ratio_continuation: 0.20
       ratio_heartbeat: 0.15
       ratio_logic: 0.10
-      max_new_tokens: 1024
+      max_new_tokens: 512
     training:
       segment_length: 512
       episode_length: 8
       tbptt_steps: 8
-      early_stop_loss: 0.05
+      early_stop_loss: 0.08

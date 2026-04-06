@@ -399,9 +399,12 @@ def load_backbone(model_path: str, device: str = "cuda"):
 
     print(f"加载 backbone: {model_path}")
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
     model = AutoModelForCausalLM.from_pretrained(
         model_path, dtype=torch.float16, device_map=device,
     )
+    model.generation_config.pad_token_id = tokenizer.pad_token_id
     model.eval()
     print(f"  backbone 加载完成 ({device})")
     return model, tokenizer
@@ -468,11 +471,13 @@ def generate_think_responses_batch(
         new_ids = outputs[i][input_len:]
         response = tokenizer.decode(new_ids, skip_special_tokens=False)
 
-        if "<think>" not in response and "</think>" in response:
-            response = "<think>\n" + response
-
         for tag in ["<|im_end|>", "<|endoftext|>", "</s>"]:
             response = response.replace(tag, "")
+
+        # generation prompt 已含 <think>\n，生成内容从 think 内部开始
+        # 补回 <think> 开头，截断的不补 </think>
+        if "<think>" not in response:
+            response = "<think>\n" + response
 
         results.append(response.strip())
 
@@ -515,40 +520,23 @@ def inject_fact_summary(response: str, meta: dict) -> str:
     if "<think>" in response:
         response = response.replace("<think>", "<think>\n" + summary, 1)
 
-    # single 类型：替换回答为正确答案
-    if meta.get("subtype") == "single" and "</think>" in response:
-        target_fact = meta.get("target_fact")
-        if target_fact:
-            cat = target_fact["category"]
-            # 从 RECALL_TEMPLATES 取回答模板
-            recall_answers = [t[1] for t in RECALL_TEMPLATES[cat]]
-            answer = recall_answers[0].format(v=target_fact["value"])
-            # 替换 </think> 后的内容
-            think_end = response.find("</think>")
-            response = response[:think_end + len("</think>")] + "\n" + answer
-
     return response
 
 
 def validate_think_response(response: str, allow_empty_answer: bool = False) -> bool:
-    """验证 think 回复质量。allow_empty_answer=True 时允许 think 后无回答（心跳沉默）。"""
-    if "<think>" not in response or "</think>" not in response:
+    """验证 think 回复质量。支持截断的 think（无 </think>）。"""
+    if "<think>" not in response:
         return False
 
-    # tag 顺序正确
-    think_start = response.find("<think>")
-    think_end = response.find("</think>")
-    if think_start >= think_end:
-        return False
-
-    # think 块后必须有实际内容 (心跳允许沉默)
-    if not allow_empty_answer:
-        answer = response[think_end + len("</think>"):].strip()
-        if len(answer) < 2:
+    # 有 </think> 的回复：检查 tag 顺序
+    if "</think>" in response:
+        think_start = response.find("<think>")
+        think_end = response.find("</think>")
+        if think_start >= think_end:
             return False
 
     # 长度检查
-    if len(response) < 10 or len(response) > 2000:
+    if len(response) < 10:
         return False
 
     return True

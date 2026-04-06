@@ -139,7 +139,7 @@ def main():
     args = parser.parse_args()
 
     from xinhe.model.config import XinheConfig
-    _, curriculum = XinheConfig.from_yaml(args.config)
+    config, curriculum = XinheConfig.from_yaml(args.config)
 
     if not curriculum:
         print("配置文件中没有课程定义")
@@ -166,7 +166,8 @@ def main():
         print(f"  生成数据: {name} (type={data_type})")
         print(f"{'='*50}")
         train_path, val_path = generate_stage_data(
-            stage, name, force=args.force, model_path=args.model_path,
+            stage, name, force=args.force,
+            model_path=args.model_path or config.backbone_model_path,
         )
         print(f"  → {train_path}")
         print(f"  → {val_path}")

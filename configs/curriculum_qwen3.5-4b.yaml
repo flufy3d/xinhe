@@ -1,5 +1,5 @@
 # ============================================================
-# 心核课程学习 — Qwen3.5-4B / A800 80GB
+# 心核课程学习 — Qwen3.5-4B
 #
 # 用法:
 #   python scripts/train.py --config configs/curriculum_qwen3.5-4b.yaml
@@ -9,7 +9,7 @@ curriculum_file: curriculum.yaml
 
 stage_overrides:
   default:
-    batch_size: 8
-  14_think:
     batch_size: 4
-    data_gen_batch_size: 16
+  14_think:
+    batch_size: 2
+    data_gen_batch_size: 32

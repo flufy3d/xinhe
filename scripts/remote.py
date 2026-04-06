@@ -70,7 +70,7 @@ def ssh_base(host, port):
     return ["ssh", "-T", "-p", port] + ssh_opts() + [host]
 
 
-def run(cmd, check=True, verbose=True, **kwargs):
+def run(cmd, check=True, verbose=False, **kwargs):
     if verbose:
         print(f"  $ {' '.join(cmd)}")
     kwargs.setdefault("stdin", subprocess.DEVNULL)
@@ -105,15 +105,33 @@ def cmd_deploy(args):
     ssh_proc.wait()
     tar_proc.wait()
 
-    # 2. 模型软链接（幂等）
+    # 2. 模型软链接 + 指纹校验
     print("\n[2/3] 模型链接...")
     if models:
-        link_cmds = [f"mkdir -p {remote_dir}/models"]
+        fp_dir = f"{remote_dir}/models/.fingerprints"
+        link_cmds = [f"mkdir -p {remote_dir}/models {fp_dir}"]
         for name, target in models.items():
             link = f"{remote_dir}/models/{name}"
+            fp_file = f"{fp_dir}/{name}.sha256"
+            # 创建/更新软链接
+            link_cmds.append(f'ln -sfn {target} {link}')
+            # 计算指纹: config.json sha256 + 权重文件总大小
             link_cmds.append(
-                f'test -L {link} && echo "  {name} -> 已存在，跳过" '
-                f'|| {{ ln -sfn {target} {link} && echo "  {name} -> {target}"; }}'
+                f'FP=$(sha256sum {target}/config.json 2>/dev/null | cut -d" " -f1)'
+                f'_$(du -sb {target}/*.safetensors 2>/dev/null | awk "{{s+=\\$1}}END{{print s}}")'
+                f' && if test -f {fp_file}; then'
+                f'   OLD=$(cat {fp_file});'
+                f'   if [ "$FP" != "$OLD" ]; then'
+                f'     echo "  ⚠ {name} 指纹变化! 权重可能被更新";'
+                f'     echo "    旧: $OLD";'
+                f'     echo "    新: $FP";'
+                f'   else'
+                f'     echo "  {name} -> 指纹一致 ✓";'
+                f'   fi;'
+                f' else'
+                f'   echo "  {name} -> 首次记录指纹";'
+                f' fi'
+                f' && echo "$FP" > {fp_file}'
             )
         run(ssh_base(host, port) + [" && ".join(link_cmds)])
     else:

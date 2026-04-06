@@ -101,10 +101,10 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
     return replace(base_config, **overrides)
 
 
-def generate_stage_data(stage: dict, stage_name: str) -> tuple[str, str]:
+def generate_stage_data(stage: dict, stage_name: str, model_path: str = None) -> tuple[str, str]:
     """为课程阶段生成数据，自动分发到 memory/think 生成器"""
     from generate_data import generate_stage_data as _gen
-    return _gen(stage, stage_name)
+    return _gen(stage, stage_name, model_path=model_path)
 
 
 def train_single(config, args):
@@ -199,7 +199,7 @@ def train_curriculum(base_config, stages, args):
 
         # 准备数据 (统一分发: memory/think 自动识别)
         print(f"[数据生成] type={data_cfg.get('type', 'memory')}")
-        train_path, val_path = generate_stage_data(stage, stage_name)
+        train_path, val_path = generate_stage_data(stage, stage_name, model_path=base_config.backbone_model_path)
 
         # 构建本阶段 config
         stage_config = apply_stage_overrides(base_config, stage)
