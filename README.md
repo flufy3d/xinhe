@@ -131,10 +131,16 @@ python -m xinhe.data.generate_think_data --preview 3
 
 ```bash
 # 课程学习（14 个阶段，自动跳过已完成的）
-python scripts/train.py --config configs/curriculum_qwen.yaml
+python scripts/train.py --config configs/curriculum_qwen3.5-4b.yaml
 
-# 从指定阶段开始
-python scripts/train.py --config configs/curriculum_qwen.yaml --from-stage 14_think
+# 从指定阶段开始（自动加载前一阶段 checkpoint）
+python scripts/train.py --config configs/curriculum_qwen3.5-4b.yaml --from-stage 14_think
+
+# 从指定 checkpoint 恢复训练
+python scripts/train.py --config configs/curriculum_qwen3.5-4b.yaml --resume checkpoints/curriculum/5_fact3.pt
+
+# 加载权重但重置 step 和优化器（换阶段微调用）
+python scripts/train.py --config configs/curriculum_qwen3.5-4b.yaml --resume checkpoints/xinhe.pt --reset-step
 ```
 
 ### 聊天验证
