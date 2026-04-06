@@ -193,6 +193,7 @@ stages:
       ratio_continuation: 0.20
       ratio_heartbeat: 0.15
       ratio_logic: 0.10
+      max_new_tokens: 1024
     training:
       segment_length: 512
       episode_length: 8
