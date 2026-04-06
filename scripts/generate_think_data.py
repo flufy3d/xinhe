@@ -530,8 +530,8 @@ def inject_fact_summary(response: str, meta: dict) -> str:
     return response
 
 
-def validate_think_response(response: str) -> bool:
-    """验证 think 回复质量"""
+def validate_think_response(response: str, allow_empty_answer: bool = False) -> bool:
+    """验证 think 回复质量。allow_empty_answer=True 时允许 think 后无回答（心跳沉默）。"""
     if "<think>" not in response or "</think>" not in response:
         return False
 
@@ -541,10 +541,11 @@ def validate_think_response(response: str) -> bool:
     if think_start >= think_end:
         return False
 
-    # think 块后必须有实际内容
-    answer = response[think_end + len("</think>"):].strip()
-    if len(answer) < 2:
-        return False
+    # think 块后必须有实际内容 (心跳允许沉默)
+    if not allow_empty_answer:
+        answer = response[think_end + len("</think>"):].strip()
+        if len(answer) < 2:
+            return False
 
     # 长度检查
     if len(response) < 10 or len(response) > 2000:
@@ -669,7 +670,8 @@ def generate_think_episodes(
             failed_in_batch = []
             for j in range(cur_batch):
                 response = responses[j]
-                if validate_think_response(response):
+                is_heartbeat = batch_metas[j].get("type") == "heartbeat"
+                if validate_think_response(response, allow_empty_answer=is_heartbeat):
                     # 注入 fact 摘要 + single 替换回答
                     response = inject_fact_summary(response, batch_metas[j])
                     batch_turns[j][-1]["assistant"] = response
@@ -694,7 +696,8 @@ def generate_think_episodes(
                     response = generate_think_response(
                         model, tokenizer, messages, max_new_tokens,
                     )
-                    if validate_think_response(response):
+                    is_heartbeat = meta.get("type") == "heartbeat"
+                    if validate_think_response(response, allow_empty_answer=is_heartbeat):
                         response = inject_fact_summary(response, meta)
                         turns[-1]["assistant"] = response
                         episodes.append(turns)
