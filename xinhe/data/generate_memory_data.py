@@ -22,6 +22,8 @@ import json
 import random
 from pathlib import Path
 
+from xinhe.data.think_lang import THINK_LANG, fact_summary, wrap_think
+
 
 # ── 随机姓名素材 ──
 
@@ -521,6 +523,10 @@ ENTITY_RECALL_TEMPLATES = {
     ],
 }
 
+
+# Think 模板和函数从 xinhe.data.think_lang 导入 (集中维护多语言模板)
+
+
 # ── 对话回忆模板 ──
 
 # 回忆 user 发言
@@ -739,11 +745,15 @@ def generate_episode(
     fillers: list = None,
     pre_filler: bool = True,
     max_pre_filler: int = 3,
+    think_ratio: float = 0.0,
+    think_lang: str = "en",
 ) -> list[dict]:
     """
     生成一个 episode 的对话轮次。
 
     结构: [前置闲聊 0~N轮] [告知事实] [闲聊填充 x distance] [回忆提问(train_loss=true)] [闲聊补充...]
+    think_ratio: tell/recall turn 按此概率包裹 <think> 块。
+    think_lang: think 块语言 ("en"/"zh")。
     """
     if fillers is None:
         fillers = FILLERS
@@ -761,6 +771,9 @@ def generate_episode(
         cat = fact["category"]
         template = rng.choice(FACT_TEMPLATES[cat])
         turn = make_turn(template, fact["value"], train_loss=True)
+        if think_ratio > 0 and rng.random() < think_ratio:
+            summary = fact_summary(fact, lang=think_lang)
+            turn["assistant"] = wrap_think(turn["assistant"], "tell", summary, rng, lang=think_lang)
         turns.append(turn)
 
     # 闲聊填充 (不计算 loss)
@@ -777,6 +790,9 @@ def generate_episode(
         template = rng.choice(RECALL_TEMPLATES[cat])
         turn = make_turn(template, recall_fact["value"], train_loss=True,
                          recall_value=recall_fact["value"])
+        if think_ratio > 0 and rng.random() < think_ratio:
+            summary = fact_summary(recall_fact, lang=think_lang)
+            turn["assistant"] = wrap_think(turn["assistant"], "recall", summary, rng, lang=think_lang)
         turns.append(turn)
 
     # 补充闲聊到 max_turns (不计算 loss)
@@ -795,11 +811,14 @@ def generate_overwrite_episode(
     fillers: list = None,
     pre_filler: bool = True,
     max_pre_filler: int = 2,
+    think_ratio: float = 0.0,
+    think_lang: str = "en",
 ) -> list[dict]:
     """
     生成覆写 episode: [前置闲聊] [tell_old] [filler] [tell_new(覆写)] [filler] [recall(应答新值)]
 
     训练模型学会：遇到新信息时覆盖旧信息，recall 应答最新值。
+    think_ratio: train_loss=True 的 turn 按此概率包裹 <think> 块。
     """
     if fillers is None:
         fillers = FILLERS
@@ -811,6 +830,10 @@ def generate_overwrite_episode(
     while new_value == old_value:
         new_value = generators[cat](rng)
 
+    old_fact = {"category": cat, "value": old_value}
+    new_fact = {"category": cat, "value": new_value}
+    use_think = think_ratio > 0
+
     turns = []
 
     # 前置闲聊
@@ -821,7 +844,11 @@ def generate_overwrite_episode(
 
     # 告知旧值
     template = rng.choice(FACT_TEMPLATES[cat])
-    turns.append(make_turn(template, old_value, train_loss=True))
+    turn = make_turn(template, old_value, train_loss=True)
+    if use_think and rng.random() < think_ratio:
+        summary = fact_summary(old_fact, lang=think_lang)
+        turn["assistant"] = wrap_think(turn["assistant"], "tell", summary, rng, lang=think_lang)
+    turns.append(turn)
 
     # 中间闲聊
     d1 = rng.randint(min_distance, max(min_distance, max_distance // 2))
@@ -831,7 +858,11 @@ def generate_overwrite_episode(
 
     # 覆写为新值
     overwrite_template = rng.choice(OVERWRITE_TEMPLATES[cat])
-    turns.append(make_turn(overwrite_template, new_value, train_loss=True))
+    turn = make_turn(overwrite_template, new_value, train_loss=True)
+    if use_think and rng.random() < think_ratio:
+        summary = fact_summary(new_fact, lang=think_lang)
+        turn["assistant"] = wrap_think(turn["assistant"], "overwrite", summary, rng, lang=think_lang)
+    turns.append(turn)
 
     # 覆写后闲聊
     d2 = rng.randint(min_distance, max(min_distance, max_distance // 2))
@@ -841,8 +872,12 @@ def generate_overwrite_episode(
 
     # 回忆（应答新值）
     recall_template = rng.choice(RECALL_TEMPLATES[cat])
-    turns.append(make_turn(recall_template, new_value, train_loss=True,
-                           recall_value=new_value))
+    turn = make_turn(recall_template, new_value, train_loss=True,
+                     recall_value=new_value)
+    if use_think and rng.random() < think_ratio:
+        summary = fact_summary(new_fact, lang=think_lang)
+        turn["assistant"] = wrap_think(turn["assistant"], "recall", summary, rng, lang=think_lang)
+    turns.append(turn)
 
     # 补充到 max_turns
     while len(turns) < max_turns:
@@ -862,12 +897,15 @@ def generate_entity_episode(
     pre_filler: bool = True,
     max_pre_filler: int = 3,
     same_category: bool = False,
+    think_ratio: float = 0.0,
+    think_lang: str = "en",
 ) -> list[dict]:
     """
     生成实体区分 episode: 不同实体(我/你/他/她/它)的事实，recall 时需区分。
 
     结构: [前置闲聊] [tell×N(不同实体)] [闲聊填充] [recall×N(打乱顺序)] [补充]
     same_category=True 时所有实体共享一个类别，迫使模型学会绑定 entity→value。
+    think_ratio: tell/recall turn 按此概率包裹 <think> 块。
     """
     if fillers is None:
         fillers = FILLERS
@@ -895,6 +933,7 @@ def generate_entity_episode(
             "value": generators[categories[i]](),
         })
 
+    use_think = think_ratio > 0
     turns = []
 
     # 前置闲聊
@@ -910,7 +949,11 @@ def generate_entity_episode(
         template = rng.choice(ENTITY_FACT_TEMPLATES[cat])
         user_text = template[0].format(e=e["tell"], v=fact["value"])
         asst_text = template[1].format(e=e["tell"], ea=e["recall_a"], v=fact["value"])
-        turns.append({"user": user_text, "assistant": asst_text, "train_loss": True})
+        turn = {"user": user_text, "assistant": asst_text, "train_loss": True}
+        if use_think and rng.random() < think_ratio:
+            summary = fact_summary(fact, entity=e["tell"], lang=think_lang)
+            turn["assistant"] = wrap_think(turn["assistant"], "tell", summary, rng, lang=think_lang)
+        turns.append(turn)
 
     # 闲聊填充
     distance = rng.randint(min_distance, max_distance)
@@ -929,8 +972,12 @@ def generate_entity_episode(
         asst_text = template[1].format(ea=e["recall_a"], v=fact["value"])
         # value 包含实体代词+值，因为代词是绑定信号
         recall_val = asst_text.rstrip("。！!.").lstrip()
-        turns.append({"user": user_text, "assistant": asst_text,
-                       "train_loss": True, "value": recall_val})
+        turn = {"user": user_text, "assistant": asst_text,
+                "train_loss": True, "value": recall_val}
+        if use_think and rng.random() < think_ratio:
+            summary = fact_summary(fact, entity=e["recall_a"], lang=think_lang)
+            turn["assistant"] = wrap_think(turn["assistant"], "recall", summary, rng, lang=think_lang)
+        turns.append(turn)
 
     # 补充闲聊到 max_turns
     while len(turns) < max_turns:
@@ -945,12 +992,15 @@ def generate_recall_episode(
     max_turns: int = 16,
     fillers: list = None,
     ai_recall_ratio: float = 0.0,
+    think_ratio: float = 0.0,
+    think_lang: str = "en",
 ) -> list[dict]:
     """
     生成对话回忆 episode: 几轮闲聊后回忆上一轮内容。
 
     结构: [闲聊×(N-1)] [动态内容(被回忆)] [回忆提问] [补充闲聊]
     ai_recall_ratio: 回忆 AI 发言的概率 (0=只回忆 user, 0.5=各半)。
+    think_ratio: recall turn 按此概率包裹 <think> 块。
     最后一轮使用动态生成内容（随机值注入），确保每 episode 唯一。
     """
     if fillers is None:
@@ -969,7 +1019,8 @@ def generate_recall_episode(
     turns.append({"user": dynamic_user, "assistant": dynamic_asst, "train_loss": False})
 
     # 选择回忆 user 还是 AI 的发言
-    if rng.random() < ai_recall_ratio:
+    is_ai_recall = rng.random() < ai_recall_ratio
+    if is_ai_recall:
         template = rng.choice(CONV_RECALL_AI_TEMPLATES)
         recalled_text = dynamic_asst
     else:
@@ -978,8 +1029,17 @@ def generate_recall_episode(
 
     user_text = template[0]
     asst_text = template[1].format(v=recalled_text)
-    turns.append({"user": user_text, "assistant": asst_text,
-                   "train_loss": True, "value": recalled_text})
+    turn = {"user": user_text, "assistant": asst_text,
+            "train_loss": True, "value": recalled_text}
+
+    if think_ratio > 0 and rng.random() < think_ratio:
+        v_short = recalled_text[:8] if len(recalled_text) > 8 else recalled_text
+        tpls = THINK_LANG[think_lang]
+        key = "recall_ai" if is_ai_recall else "recall_conv"
+        tpl = rng.choice(tpls[key])
+        turn["assistant"] = tpl.format(v_short=v_short, answer=asst_text)
+
+    turns.append(turn)
 
     # 补充闲聊到 max_turns
     while len(turns) < max_turns:
@@ -1035,6 +1095,8 @@ def generate_data(
     recall_ratio: float = 0.0,
     same_category: float = 0.0,
     ai_recall_ratio: float = 0.0,
+    think_ratio: float = 0.0,
+    think_lang: str = "en",
     seed: int = 42,
 ):
     """
@@ -1045,6 +1107,9 @@ def generate_data(
         recall_ratio → 对话回忆 episode
         overwrite_ratio → 覆写 episode (剩余空间内)
         其余 → 普通记忆 episode
+
+    think_ratio: train_loss=True 的 turn 按此概率包裹 <think> 块。
+    think_lang: think 块语言 ("en"/"zh")，默认 "en" 匹配 Qwen3.5 backbone。
 
     返回: (train_path, val_path)
     """
@@ -1071,6 +1136,8 @@ def generate_data(
                     pre_filler=use_pre_filler,
                     max_pre_filler=max_pre_filler,
                     same_category=rng.random() < same_category,
+                    think_ratio=think_ratio,
+                    think_lang=think_lang,
                 )
             elif r < entity_ratio + recall_ratio:
                 turns = generate_recall_episode(
@@ -1078,6 +1145,8 @@ def generate_data(
                     max_turns=max_turns,
                     fillers=active_fillers,
                     ai_recall_ratio=ai_recall_ratio,
+                    think_ratio=think_ratio,
+                    think_lang=think_lang,
                 )
             elif r < entity_ratio + recall_ratio + overwrite_ratio:
                 turns = generate_overwrite_episode(
@@ -1088,6 +1157,8 @@ def generate_data(
                     fillers=active_fillers,
                     pre_filler=use_pre_filler,
                     max_pre_filler=max_pre_filler,
+                    think_ratio=think_ratio,
+                    think_lang=think_lang,
                 )
             else:
                 turns = generate_episode(
@@ -1099,6 +1170,8 @@ def generate_data(
                     fillers=active_fillers,
                     pre_filler=use_pre_filler,
                     max_pre_filler=max_pre_filler,
+                    think_ratio=think_ratio,
+                    think_lang=think_lang,
                 )
             episodes.append(turns)
         return episodes

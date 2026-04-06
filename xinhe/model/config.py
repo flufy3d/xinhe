@@ -106,13 +106,20 @@ class XinheConfig:
             with open(cur_path, "r", encoding="utf-8") as f:
                 cur_raw = yaml.safe_load(f)
             training_defaults = cur_raw.get("training_defaults", {})
+            data_defaults = {}
+            if "think_lang" in cur_raw:
+                data_defaults["think_lang"] = cur_raw["think_lang"]
             curriculum = cur_raw.get("stages", [])
 
-            # 合并 training_defaults → 每个阶段
+            # 合并 training_defaults / data_defaults → 每个阶段
             for stage in curriculum:
                 merged = dict(training_defaults)
                 merged.update(stage.get("training", {}))
                 stage["training"] = merged
+                if data_defaults:
+                    data = stage.setdefault("data", {})
+                    for k, v in data_defaults.items():
+                        data.setdefault(k, v)
 
         # 合并 stage_overrides (硬件相关，优先级最高)
         # training 字段 → stage["training"], data 字段 → stage["data"]

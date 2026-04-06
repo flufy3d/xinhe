@@ -21,7 +21,6 @@ from pathlib import Path
 
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
-sys.path.insert(0, str(project_root / "scripts"))
 
 
 def generate_stage_data(
@@ -53,7 +52,7 @@ def generate_stage_data(
 
 def _generate_memory(data_cfg: dict, out_dir: str) -> tuple[str, str]:
     """生成记忆训练数据"""
-    from generate_memory_data import generate_data
+    from xinhe.data.generate_memory_data import generate_data
 
     return generate_data(
         out_dir=out_dir,
@@ -72,6 +71,8 @@ def _generate_memory(data_cfg: dict, out_dir: str) -> tuple[str, str]:
         recall_ratio=data_cfg.get("recall_ratio", 0.0),
         same_category=data_cfg.get("same_category", 0.0),
         ai_recall_ratio=data_cfg.get("ai_recall_ratio", 0.0),
+        think_ratio=data_cfg.get("think_ratio", 0.0),
+        think_lang=data_cfg.get("think_lang", "en"),
         seed=data_cfg.get("seed", 42),
     )
 
@@ -100,7 +101,7 @@ def _generate_think(
                   str(Path(out_dir) / "_think_val.jsonl")]:
             Path(f).unlink(missing_ok=True)
 
-    from generate_think_data import generate_think_data
+    from xinhe.data.generate_think_data import generate_think_data
 
     mp = model_path or data_cfg.get("model_path", "./models/qwen3-0.6b")
 
@@ -120,6 +121,8 @@ def _generate_think(
         memory_recall_ratio=data_cfg.get("memory_recall_ratio", 0.2),
         memory_overwrite_ratio=data_cfg.get("memory_overwrite_ratio", 0.2),
         memory_same_category=data_cfg.get("memory_same_category", 0.3),
+        memory_think_ratio=data_cfg.get("memory_think_ratio", 0.0),
+        memory_think_lang=data_cfg.get("memory_think_lang", "en"),
         ratio_fact=data_cfg.get("ratio_fact", 0.55),
         ratio_continuation=data_cfg.get("ratio_continuation", 0.20),
         ratio_heartbeat=data_cfg.get("ratio_heartbeat", 0.15),

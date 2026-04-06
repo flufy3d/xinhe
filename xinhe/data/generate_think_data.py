@@ -24,12 +24,11 @@ from pathlib import Path
 import torch
 from tqdm import tqdm
 
-# 添加项目根目录和 scripts 目录到 path
-project_root = Path(__file__).resolve().parent.parent
+# 添加项目根目录到 path
+project_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(project_root))
-sys.path.insert(0, str(project_root / "scripts"))
 
-from generate_memory_data import (
+from xinhe.data.generate_memory_data import (
     sample_facts, FACT_TEMPLATES, RECALL_TEMPLATES, FILLERS,
     DYNAMIC_CONTENT_TEMPLATES, generate_dynamic_content,
     make_turn, episode_to_jsonl, generate_data,
@@ -484,23 +483,14 @@ def generate_think_responses_batch(
     return results
 
 
-# fact 摘要模板 (复用 heartbeat 的第三人称描述)
-FACT_SUMMARY_TEMPLATES = {
-    "name": "用户叫{v}",
-    "number": "用户的编号是{v}",
-    "city": "用户住在{v}",
-    "food": "用户喜欢吃{v}",
-    "job": "用户的职业是{v}",
-    "hobby": "用户喜欢{v}",
-    "age": "用户{v}岁",
-    "pet": "用户养了{v}",
-}
+from xinhe.data.think_lang import THINK_LANG, fact_summary as _fact_summary
 
 
-def inject_fact_summary(response: str, meta: dict) -> str:
+def inject_fact_summary(response: str, meta: dict, lang: str = "en") -> str:
     """
-    在 think 开头注入 fact 摘要，single 类型还替换回答。
+    在 think 开头注入 fact 摘要。
     只对 fact 类 episode 生效，其他类型原样返回。
+    lang 控制摘要语言 ("en"/"zh")。
     """
     if meta.get("type") != "fact":
         return response
@@ -509,14 +499,10 @@ def inject_fact_summary(response: str, meta: dict) -> str:
     if not facts:
         return response
 
-    # 构造摘要
-    summary_parts = []
-    for fact in facts:
-        tpl = FACT_SUMMARY_TEMPLATES.get(fact["category"], "用户提到{v}")
-        summary_parts.append(tpl.format(v=fact["value"]))
-    summary = "我记得：" + "，".join(summary_parts) + "。\n"
+    tpls = THINK_LANG[lang]
+    summary_parts = [_fact_summary(f, lang=lang) for f in facts]
+    summary = tpls["inject_prefix"] + tpls["inject_join"].join(summary_parts) + tpls["inject_suffix"]
 
-    # 注入到 <think> 后
     if "<think>" in response:
         response = response.replace("<think>", "<think>\n" + summary, 1)
 
@@ -726,6 +712,8 @@ def generate_think_data(
     memory_ai_recall_ratio: float = 0.5,
     memory_overwrite_ratio: float = 0.2,
     memory_same_category: float = 0.3,
+    memory_think_ratio: float = 0.0,
+    memory_think_lang: str = "en",
     # think 类型比例
     ratio_fact: float = 0.55,
     ratio_continuation: float = 0.20,
@@ -786,6 +774,8 @@ def generate_think_data(
         ai_recall_ratio=memory_ai_recall_ratio,
         overwrite_ratio=memory_overwrite_ratio,
         same_category=memory_same_category,
+        think_ratio=memory_think_ratio,
+        think_lang=memory_think_lang,
         min_distance=1,
         max_distance=10,
         max_turns=memory_max_turns,

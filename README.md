@@ -76,16 +76,18 @@ xinhe/
 ├── docs/             # 架构详解、设计决策、实验路线
 ├── xinhe/            # 核心代码
 │   ├── model/        # backbone 抽象 + 适配器 + StatePlugin + LoRA
-│   ├── data/         # 多轮对话数据集
+│   ├── data/         # 数据集 + 数据生成
+│   │   ├── conversation.py         # 多轮对话数据集
+│   │   ├── generate_memory_data.py # 记忆数据生成
+│   │   ├── generate_think_data.py  # Think 数据生成
+│   │   └── think_lang.py           # Think 模板语言包 (en/zh)
 │   ├── training/     # 训练循环 (截断 BPTT)
 │   ├── evaluation/   # 记忆保留 / wipe / 时间尺度分析
 │   └── utils/        # checkpoint、logging
 ├── scripts/
 │   ├── train.py                 # 训练入口
 │   ├── chat.py                  # 交互式聊天
-│   ├── generate_data.py         # 统一数据生成入口
-│   ├── generate_memory_data.py  # 记忆数据生成
-│   └── generate_think_data.py   # Think 数据生成
+│   └── generate_data.py         # 统一数据生成入口
 └── tests/            # pytest 测试
 ```
 
@@ -105,22 +107,22 @@ uv sync
 
 ### 生成训练数据
 
-训练时会自动生成数据，也可以提前手动生成：
+训练时会自动生成数据，也可以提前手动生成。统一入口是 `scripts/generate_data.py`：
 
 ```bash
-# 统一入口: 为指定阶段生成数据
-python scripts/generate_data.py --config configs/curriculum_qwen.yaml --stage 13_all
+# 为指定阶段生成数据
+python scripts/generate_data.py --config configs/curriculum_qwen3.5-4b.yaml --stage 13_all
 
 # 生成所有阶段数据
-python scripts/generate_data.py --config configs/curriculum_qwen.yaml --all
+python scripts/generate_data.py --config configs/curriculum_qwen3.5-4b.yaml --all
 
 # Think 数据需要 backbone 推理 (~1-2 小时)，生成后自动缓存
 # 重新生成用 --force
-python scripts/generate_data.py --config configs/curriculum_qwen.yaml --stage 14_think --force
+python scripts/generate_data.py --config configs/curriculum_qwen3.5-4b.yaml --stage 14_think --force
 
 # 预览数据（不写文件）
-python scripts/generate_memory_data.py --preview 3
-python scripts/generate_think_data.py --preview 3
+python -m xinhe.data.generate_memory_data --preview 3
+python -m xinhe.data.generate_think_data --preview 3
 ```
 
 数据格式见 [docs/data_spec.md](docs/data_spec.md)
@@ -229,6 +231,7 @@ curriculum_qwen.yaml     ← backbone 选择 + batch_size 覆盖 (硬件相关)
 | Qwen3 / RTX 5080 16GB | `curriculum_qwen.yaml` |
 | Qwen3 / 24GB 云 GPU | `curriculum_qwen_24gb.yaml` |
 | MiniMind / 轻量实验 | `curriculum_minimind.yaml` |
+
 
 ---
 
