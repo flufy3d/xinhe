@@ -245,7 +245,14 @@ def build_fact_think_episode(
     turns.append({"user": question, "assistant": "", "train_loss": True})
     messages.append({"role": "user", "content": question})
 
-    return turns, messages
+    # 元数据：用于注入 fact 摘要和替换回答
+    meta = {
+        "type": "fact",
+        "subtype": question_type,
+        "facts": facts,
+        "target_fact": target_fact if question_type == "single" else None,
+    }
+    return turns, messages, meta
 
 
 def build_continuation_episode(
@@ -284,7 +291,7 @@ def build_continuation_episode(
     turns.append({"user": continuation, "assistant": "", "train_loss": True})
     messages.append({"role": "user", "content": continuation})
 
-    return turns, messages
+    return turns, messages, {"type": "continuation"}
 
 
 def build_heartbeat_episode(
@@ -345,7 +352,7 @@ def build_heartbeat_episode(
     # 训练: 空输入 + think 回复
     turns.append({"user": "", "assistant": "", "train_loss": True})
 
-    return turns, messages_for_backbone
+    return turns, messages_for_backbone, {"type": "heartbeat"}
 
 
 def build_pure_logic_episode(
@@ -381,7 +388,7 @@ def build_pure_logic_episode(
     # backbone 只看逻辑题（干净 prompt，不含噪声 facts）
     messages_for_backbone = [{"role": "user", "content": question}]
 
-    return turns, messages_for_backbone
+    return turns, messages_for_backbone, {"type": "logic"}
 
 
 # ── Backbone 推理 ──
@@ -472,6 +479,57 @@ def generate_think_responses_batch(
     return results
 
 
+# fact 摘要模板 (复用 heartbeat 的第三人称描述)
+FACT_SUMMARY_TEMPLATES = {
+    "name": "用户叫{v}",
+    "number": "用户的编号是{v}",
+    "city": "用户住在{v}",
+    "food": "用户喜欢吃{v}",
+    "job": "用户的职业是{v}",
+    "hobby": "用户喜欢{v}",
+    "age": "用户{v}岁",
+    "pet": "用户养了{v}",
+}
+
+
+def inject_fact_summary(response: str, meta: dict) -> str:
+    """
+    在 think 开头注入 fact 摘要，single 类型还替换回答。
+    只对 fact 类 episode 生效，其他类型原样返回。
+    """
+    if meta.get("type") != "fact":
+        return response
+
+    facts = meta.get("facts", [])
+    if not facts:
+        return response
+
+    # 构造摘要
+    summary_parts = []
+    for fact in facts:
+        tpl = FACT_SUMMARY_TEMPLATES.get(fact["category"], "用户提到{v}")
+        summary_parts.append(tpl.format(v=fact["value"]))
+    summary = "我记得：" + "，".join(summary_parts) + "。\n"
+
+    # 注入到 <think> 后
+    if "<think>" in response:
+        response = response.replace("<think>", "<think>\n" + summary, 1)
+
+    # single 类型：替换回答为正确答案
+    if meta.get("subtype") == "single" and "</think>" in response:
+        target_fact = meta.get("target_fact")
+        if target_fact:
+            cat = target_fact["category"]
+            # 从 RECALL_TEMPLATES 取回答模板
+            recall_answers = [t[1] for t in RECALL_TEMPLATES[cat]]
+            answer = recall_answers[0].format(v=target_fact["value"])
+            # 替换 </think> 后的内容
+            think_end = response.find("</think>")
+            response = response[:think_end + len("</think>")] + "\n" + answer
+
+    return response
+
+
 def validate_think_response(response: str) -> bool:
     """验证 think 回复质量"""
     if "<think>" not in response or "</think>" not in response:
@@ -536,7 +594,7 @@ def generate_think_episodes(
     ]
 
     def _build_one(rng):
-        """构造单个 episode，返回 (turns, messages)"""
+        """构造单个 episode，返回 (turns, messages, meta)"""
         r = rng.random()
         if r < TYPE_BOUNDS[0]:  # fact 推理
             sr = rng.random()
@@ -585,10 +643,12 @@ def generate_think_episodes(
             cur_batch = min(batch_size, remaining - pos)
             batch_turns = []
             batch_messages = []
+            batch_metas = []
             for _ in range(cur_batch):
-                turns, messages = _build_one(rng)
+                turns, messages, meta = _build_one(rng)
                 batch_turns.append(turns)
                 batch_messages.append(messages)
+                batch_metas.append(meta)
 
             # batch 推理
             try:
@@ -610,6 +670,8 @@ def generate_think_episodes(
             for j in range(cur_batch):
                 response = responses[j]
                 if validate_think_response(response):
+                    # 注入 fact 摘要 + single 替换回答
+                    response = inject_fact_summary(response, batch_metas[j])
                     batch_turns[j][-1]["assistant"] = response
                     episodes.append(batch_turns[j])
                     if fout:
@@ -617,7 +679,7 @@ def generate_think_episodes(
                         fout.flush()
                 else:
                     failed += 1
-                    failed_in_batch.append((batch_turns[j], batch_messages[j]))
+                    failed_in_batch.append((batch_turns[j], batch_messages[j], batch_metas[j]))
 
             retry_queue.extend(failed_in_batch)
             pos += cur_batch
@@ -627,12 +689,13 @@ def generate_think_episodes(
         if retry_queue:
             print(f"\n  补生成 {len(retry_queue)} 条失败 episodes...")
             recovered = 0
-            for turns, messages in tqdm(retry_queue, desc="补生成"):
+            for turns, messages, meta in tqdm(retry_queue, desc="补生成"):
                 try:
                     response = generate_think_response(
                         model, tokenizer, messages, max_new_tokens,
                     )
                     if validate_think_response(response):
+                        response = inject_fact_summary(response, meta)
                         turns[-1]["assistant"] = response
                         episodes.append(turns)
                         if fout:
