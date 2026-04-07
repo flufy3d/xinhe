@@ -84,6 +84,8 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
         "batch_size": "batch_size",
         "grad_accum_steps": "grad_accum_steps",
         "learning_rate": "learning_rate",
+        "plugin_lr_multiplier": "plugin_lr_multiplier",
+        "freeze_lora": "freeze_lora",
         "weight_decay": "weight_decay",
         "grad_clip": "grad_clip",
         "warmup_steps": "warmup_steps",

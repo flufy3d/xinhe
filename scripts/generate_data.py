@@ -57,7 +57,7 @@ def _generate_memory(data_cfg: dict, out_dir: str) -> tuple[str, str]:
     return generate_data(
         out_dir=out_dir,
         num_train=data_cfg.get("num_train", 5000),
-        num_val=data_cfg.get("num_val", 200),
+        num_val=data_cfg.get("num_val", 100),
         min_distance=data_cfg.get("min_distance", 1),
         max_distance=data_cfg.get("max_distance", 4),
         max_turns=data_cfg.get("max_turns", 16),
@@ -73,6 +73,7 @@ def _generate_memory(data_cfg: dict, out_dir: str) -> tuple[str, str]:
         ai_recall_ratio=data_cfg.get("ai_recall_ratio", 0.0),
         think_ratio=data_cfg.get("think_ratio", 0.0),
         think_lang=data_cfg.get("think_lang", "en"),
+        categories=data_cfg.get("categories", None),
         seed=data_cfg.get("seed", 42),
     )
 
@@ -109,8 +110,8 @@ def _generate_think(
         out_dir=out_dir,
         num_think=data_cfg.get("num_think", 5000),
         num_memory=data_cfg.get("num_memory", 5000),
-        num_val_think=data_cfg.get("num_val_think", 100),
-        num_val_memory=data_cfg.get("num_val_memory", 100),
+        num_val_think=data_cfg.get("num_val_think", 50),
+        num_val_memory=data_cfg.get("num_val_memory", 50),
         model_path=mp,
         device=data_cfg.get("device", "cuda"),
         max_new_tokens=data_cfg.get("max_new_tokens", 512),

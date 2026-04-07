@@ -17,6 +17,7 @@ from torch.utils.data import DataLoader
 
 from ..model.xinhe_model import XinheModel
 from ..model.config import XinheConfig
+from ..model.lora import get_lora_params
 
 
 class Trainer:
@@ -51,13 +52,9 @@ class Trainer:
         self.device = torch.device(config.device)
         self.dtype = getattr(torch, config.dtype, torch.float32)
 
-        # 只优化可训练参数 (StatePlugin + LoRA)
-        trainable_params = model.get_trainable_params()
-        self.optimizer = torch.optim.AdamW(
-            trainable_params,
-            lr=config.learning_rate,
-            weight_decay=config.weight_decay,
-        )
+        # 分组优化: Plugin 和 LoRA 独立学习率
+        self._apply_lora_freeze(config)
+        self.optimizer = self._build_optimizer(config)
 
         # 学习率调度: cosine with warmup
         self.scheduler = self._build_scheduler()
@@ -75,6 +72,24 @@ class Trainer:
         # EMA 用于日志显示 (alpha≈0.04, ~50步窗口)
         self._ema_loss = None
         self._ema_acc = None
+
+    def _apply_lora_freeze(self, config: XinheConfig):
+        """按配置冻结/解冻 LoRA 参数"""
+        freeze = getattr(config, "freeze_lora", False)
+        for p in get_lora_params(self.model.backbone):
+            p.requires_grad = not freeze
+
+    def _build_optimizer(self, config: XinheConfig) -> torch.optim.AdamW:
+        """构建 optimizer，Plugin 和 LoRA 使用独立学习率。freeze_lora 时只训 plugin。"""
+        multiplier = getattr(config, "plugin_lr_multiplier", 1.0)
+        plugin_params = [p for p in self.model.plugin.parameters() if p.requires_grad]
+        param_groups = [
+            {"params": plugin_params, "lr": config.learning_rate * multiplier},
+        ]
+        if not getattr(config, "freeze_lora", False):
+            lora_params = get_lora_params(self.model.backbone)
+            param_groups.append({"params": lora_params, "lr": config.learning_rate})
+        return torch.optim.AdamW(param_groups, weight_decay=config.weight_decay)
 
     def _build_scheduler(self):
         """Cosine schedule with linear warmup"""
@@ -283,11 +298,8 @@ class Trainer:
         self._ema_loss = None
         self._ema_acc = None
 
-        self.optimizer = torch.optim.AdamW(
-            self.model.get_trainable_params(),
-            lr=config.learning_rate,
-            weight_decay=config.weight_decay,
-        )
+        self._apply_lora_freeze(config)
+        self.optimizer = self._build_optimizer(config)
         self.scheduler = self._build_scheduler()
         self.optimizer.zero_grad()
 

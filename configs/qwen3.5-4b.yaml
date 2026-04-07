@@ -15,8 +15,9 @@ backbone:
 
 state:
   state_dim: 2560
+  gate_bias_init: 1.0
 
 lora:
-  rank: 8
-  alpha: 16
+  rank: 16
+  alpha: 32
   target_modules: ["q_proj", "v_proj", "in_proj_qkv", "out_proj"]

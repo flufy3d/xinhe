@@ -190,13 +190,13 @@ def build_fact_think_episode(
         messages.append({"role": "user", "content": filler[0]})
         messages.append({"role": "assistant", "content": filler[1]})
 
-    # 告知阶段
+    # 告知阶段 (不计算 loss，state 写入靠 question turn 的 TBPTT 梯度)
     for fact in facts:
         cat = fact["category"]
         template = rng.choice(FACT_TEMPLATES[cat])
         user_text = template[0].format(v=fact["value"])
         asst_text = template[1].format(v=fact["value"])
-        turns.append({"user": user_text, "assistant": asst_text, "train_loss": True})
+        turns.append({"user": user_text, "assistant": asst_text, "train_loss": False})
         messages.append({"role": "user", "content": user_text})
         messages.append({"role": "assistant", "content": asst_text})
 
@@ -268,13 +268,13 @@ def build_continuation_episode(
     turns = []
     messages = []
 
-    # fact 告知
+    # fact 告知 (不计算 loss)
     for fact in facts:
         cat = fact["category"]
         template = rng.choice(FACT_TEMPLATES[cat])
         user_text = template[0].format(v=fact["value"])
         asst_text = template[1].format(v=fact["value"])
-        turns.append({"user": user_text, "assistant": asst_text, "train_loss": True})
+        turns.append({"user": user_text, "assistant": asst_text, "train_loss": False})
         messages.append({"role": "user", "content": user_text})
         messages.append({"role": "assistant", "content": asst_text})
 
@@ -326,7 +326,7 @@ def build_heartbeat_episode(
         template = rng.choice(FACT_TEMPLATES[cat])
         user_text = template[0].format(v=fact["value"])
         asst_text = template[1].format(v=fact["value"])
-        turns.append({"user": user_text, "assistant": asst_text, "train_loss": True})
+        turns.append({"user": user_text, "assistant": asst_text, "train_loss": False})
         context_text = HEARTBEAT_CONTEXT.get(cat, "用户提到{v}").format(v=fact["value"])
         fact_lines.append(context_text)
 
@@ -374,7 +374,7 @@ def build_pure_logic_episode(
         template = rng.choice(FACT_TEMPLATES[cat])
         user_text = template[0].format(v=fact["value"])
         asst_text = template[1].format(v=fact["value"])
-        turns.append({"user": user_text, "assistant": asst_text, "train_loss": True})
+        turns.append({"user": user_text, "assistant": asst_text, "train_loss": False})
 
     # 1 轮 filler
     filler = rng.choice(FILLERS)

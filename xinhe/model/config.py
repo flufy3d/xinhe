@@ -39,6 +39,8 @@ class XinheConfig:
     tbptt_steps: int = 4
     batch_size: int = 4
     learning_rate: float = 3e-4
+    plugin_lr_multiplier: float = 1.0  # plugin 学习率 = learning_rate × multiplier
+    freeze_lora: bool = False           # 冻结 LoRA，只训练 plugin
     weight_decay: float = 0.01
     grad_clip: float = 1.0
     grad_accum_steps: int = 1        # 梯度累积步数 (模拟更大 batch)
@@ -185,6 +187,8 @@ class XinheConfig:
                 "tbptt_steps": "tbptt_steps",
                 "batch_size": "batch_size",
                 "learning_rate": "learning_rate",
+                "plugin_lr_multiplier": "plugin_lr_multiplier",
+                "freeze_lora": "freeze_lora",
                 "weight_decay": "weight_decay",
                 "grad_clip": "grad_clip",
                 "grad_accum_steps": "grad_accum_steps",
