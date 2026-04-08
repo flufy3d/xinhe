@@ -123,8 +123,8 @@ class XinheModel(nn.Module):
                 valid_mask = shift_labels.view(-1) != -100
                 preds = shift_logits.view(-1, shift_logits.size(-1))[valid_mask].argmax(dim=-1)
                 targets = shift_labels.view(-1)[valid_mask]
-                result["correct"] = (preds == targets).sum().item()
-                result["total"] = valid_count.item()
+                result["correct"] = (preds == targets).sum()
+                result["total"] = valid_count
             else:
                 loss = torch.tensor(0.0, device=logits.device, requires_grad=True)
                 result["correct"] = 0

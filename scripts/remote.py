@@ -141,7 +141,15 @@ def cmd_deploy(args):
     print("\n[3/3] 远端依赖...")
     init_script = f"""set -e
 cd {remote_dir}
-export PATH="/opt/conda/bin:$HOME/.local/bin:$PATH"
+export PATH="/usr/local/cuda/bin:/opt/conda/bin:$HOME/.local/bin:$PATH"
+export CUDA_HOME="/usr/local/cuda"
+export UV_CACHE_DIR="/root/shared-storage/.uv-cache"
+# 持久化环境变量到 bashrc (SSH 登录也生效)
+grep -q UV_CACHE_DIR ~/.bashrc 2>/dev/null || cat >> ~/.bashrc << 'ENVEOF'
+export PATH="/usr/local/cuda/bin:$PATH"
+export CUDA_HOME="/usr/local/cuda"
+export UV_CACHE_DIR="/root/shared-storage/.uv-cache"
+ENVEOF
 if command -v uv >/dev/null 2>&1; then
   echo '  uv 已安装，跳过'
 else
@@ -151,6 +159,11 @@ else
 fi
 echo '  uv sync...'
 uv sync
+# causal-conv1d 需要 --no-build-isolation 用 venv 的 torch 编译
+if ! uv pip show causal-conv1d >/dev/null 2>&1; then
+  echo '  安装 causal-conv1d (首次编译，需几分钟)...'
+  uv pip install causal-conv1d --no-build-isolation
+fi
 """
     run(ssh_base(host, port) + [init_script])
 

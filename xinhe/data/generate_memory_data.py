@@ -773,11 +773,11 @@ def generate_episode(
         filler = rng.choice(fillers)
         turns.append({"user": filler[0], "assistant": filler[1], "train_loss": False})
 
-    # 告知阶段: 不计算 loss，state 写入纯靠 recall 的 TBPTT 梯度训练
+    # 告知阶段
     for fact in facts:
         cat = fact["category"]
         template = rng.choice(FACT_TEMPLATES[cat])
-        turn = make_turn(template, fact["value"], train_loss=False)
+        turn = make_turn(template, fact["value"], train_loss=True)
         if use_think:
             summary = fact_summary(fact, lang=think_lang)
             turn["assistant"] = wrap_think(turn["assistant"], "tell", summary, rng, lang=think_lang)
@@ -849,9 +849,9 @@ def generate_overwrite_episode(
         filler = rng.choice(fillers)
         turns.append({"user": filler[0], "assistant": filler[1], "train_loss": False})
 
-    # 告知旧值 (不计算 loss)
+    # 告知旧值
     template = rng.choice(FACT_TEMPLATES[cat])
-    turn = make_turn(template, old_value, train_loss=False)
+    turn = make_turn(template, old_value, train_loss=True)
     if use_think:
         summary = fact_summary(old_fact, lang=think_lang)
         turn["assistant"] = wrap_think(turn["assistant"], "tell", summary, rng, lang=think_lang)
@@ -863,9 +863,9 @@ def generate_overwrite_episode(
         filler = rng.choice(fillers)
         turns.append({"user": filler[0], "assistant": filler[1], "train_loss": False})
 
-    # 覆写为新值 (不计算 loss)
+    # 覆写为新值
     overwrite_template = rng.choice(OVERWRITE_TEMPLATES[cat])
-    turn = make_turn(overwrite_template, new_value, train_loss=False)
+    turn = make_turn(overwrite_template, new_value, train_loss=True)
     if use_think:
         summary = fact_summary(new_fact, lang=think_lang)
         turn["assistant"] = wrap_think(turn["assistant"], "overwrite", summary, rng, lang=think_lang)
@@ -949,14 +949,14 @@ def generate_entity_episode(
         filler = rng.choice(fillers)
         turns.append({"user": filler[0], "assistant": filler[1], "train_loss": False})
 
-    # 告知阶段: 不计算 loss，state 写入纯靠 recall 的 TBPTT 梯度训练
+    # 告知阶段
     for fact in facts:
         e = fact["entity"]
         cat = fact["category"]
         template = rng.choice(ENTITY_FACT_TEMPLATES[cat])
         user_text = template[0].format(e=e["tell"], v=fact["value"])
         asst_text = template[1].format(e=e["tell"], ea=e["recall_a"], v=fact["value"])
-        turn = {"user": user_text, "assistant": asst_text, "train_loss": False}
+        turn = {"user": user_text, "assistant": asst_text, "train_loss": True}
         if use_think:
             summary = fact_summary(fact, entity=e["tell"], lang=think_lang)
             turn["assistant"] = wrap_think(turn["assistant"], "tell", summary, rng, lang=think_lang)

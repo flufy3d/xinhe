@@ -109,6 +109,19 @@ class Trainer:
         self.model.setup_device(self.device)
         self.model.train()
 
+        # TF32 加速 (float32 矩阵乘法用 TensorFloat32)
+        torch.set_float32_matmul_precision('high')
+
+        # torch.compile: Linux + Triton 可用时启用
+        import sys
+        if sys.platform == "linux" and not getattr(self, "_compiled", False):
+            try:
+                self.model = torch.compile(self.model)
+                self._compiled = True
+                print("[torch.compile] 已启用")
+            except Exception as e:
+                print(f"[torch.compile] 跳过: {e}")
+
         total_params = self.model.get_total_param_count()
         trainable_params = self.model.get_trainable_param_count()
         print(f"总参数: {total_params:,} | 可训练: {trainable_params:,} ({trainable_params/total_params*100:.1f}%)")
@@ -189,8 +202,10 @@ class Trainer:
             state = result["state_next"]
             seg_loss = result["loss"]
             accumulated_loss = accumulated_loss + seg_loss
-            episode_correct += result.get("correct", 0)
-            episode_total += result.get("total", 0)
+            correct = result.get("correct", 0)
+            total = result.get("total", 0)
+            episode_correct += correct.item() if hasattr(correct, 'item') else correct
+            episode_total += total.item() if hasattr(total, 'item') else total
             # 只有真正有 loss 的 segment 才计数
             has_valid_labels = (labels != -100).any()
             if has_valid_labels:
