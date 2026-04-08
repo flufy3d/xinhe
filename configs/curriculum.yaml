@@ -40,7 +40,7 @@ stages:
       max_steps: 5000
 
   # ── 阶段 1: 基础记忆 ──
-  # 加 distance=1 filler, 只训练名字
+  # 加 distance=1 filler
   - name: "1_base_memory"
     data:
       num_train: 10000
