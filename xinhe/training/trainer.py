@@ -112,13 +112,14 @@ class Trainer:
         # TF32 加速 (float32 矩阵乘法用 TensorFloat32)
         torch.set_float32_matmul_precision('high')
 
-        # torch.compile: Linux + Triton 可用时启用
+        # torch.compile: 只编译 backbone (transformer blocks)，不编译 plugin 的 state 操作
         import sys
         if sys.platform == "linux" and not getattr(self, "_compiled", False):
             try:
-                self.model = torch.compile(self.model)
+                self.model.backbone.forward_blocks = torch.compile(
+                    self.model.backbone.forward_blocks)
                 self._compiled = True
-                print("[torch.compile] 已启用")
+                print("[torch.compile] backbone 已编译")
             except Exception as e:
                 print(f"[torch.compile] 跳过: {e}")
 
