@@ -71,7 +71,7 @@ training:
 |------|------|
 | OS | Linux（torch.compile 需要 Triton） |
 | CUDA toolkit | 与 PyTorch CUDA 版本一致 |
-| GPU | Ampere+ (A100/H100/RTX 4090 等) |
+| GPU | Ampere+ (16GB+，4B 模型建议 24GB+) |
 
 ## deploy 自动化
 

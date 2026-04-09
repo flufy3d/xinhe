@@ -234,8 +234,8 @@ curriculum_qwen.yaml     ← backbone 选择 + batch_size 覆盖 (硬件相关)
 
 | 场景 | 入口文件 |
 |------|---------|
-| Qwen3 / RTX 5080 16GB | `curriculum_qwen.yaml` |
-| Qwen3 / 24GB 云 GPU | `curriculum_qwen_24gb.yaml` |
+| Qwen3-0.6B | `curriculum_qwen.yaml` |
+| Qwen3.5-4B | `curriculum_qwen3.5-4b.yaml` |
 | MiniMind / 轻量实验 | `curriculum_minimind.yaml` |
 
 
@@ -248,7 +248,7 @@ curriculum_qwen.yaml     ← backbone 选择 + batch_size 覆盖 (硬件相关)
 | MiniMind 64M | 122MB | ~4-6GB |
 | Qwen3-0.6B | 1.4GB | ~6-8GB |
 
-RTX 5080 16GB / 24GB 云 GPU 均可训练。
+16GB+ 显存的 GPU 均可训练（4B 模型建议 24GB+）。
 
 ---
 
