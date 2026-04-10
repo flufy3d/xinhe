@@ -12,7 +12,7 @@ curriculum_file: curriculum.yaml
 
 stage_overrides:
   default:
-    batch_size: 4          # ep=16, tbptt=16
+    batch_size: 2          # ep=16, tbptt=16
   0_state_init:
     batch_size: 8          # ep=2, tbptt=2
   1_base_memory:
