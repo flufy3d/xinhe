@@ -3,12 +3,12 @@
 
 用法:
     # 单阶段训练
-    python scripts/train.py --config configs/qwen3-0.6b.yaml
-    python scripts/train.py --config configs/qwen3-0.6b.yaml --resume checkpoints/xinhe_step_1000.pt
+    python scripts/train.py --config configs/qwen3.5-0.8b.yaml
+    python scripts/train.py --config configs/qwen3.5-0.8b.yaml --resume checkpoints/xinhe_step_1000.pt
 
     # 课程学习 (config 中包含 curriculum 段)
-    python scripts/train.py --config configs/curriculum_qwen.yaml
-    python scripts/train.py --config configs/curriculum_qwen.yaml --from-stage 3_distance
+    python scripts/train.py --config configs/curriculum_qwen3.5-0.8b.yaml
+    python scripts/train.py --config configs/curriculum_qwen3.5-0.8b.yaml --from-stage 3_distance
 """
 import argparse
 import sys
@@ -177,7 +177,9 @@ def train_curriculum(base_config, stages, args):
 
     if init_ckpt:
         ckpt = torch.load(init_ckpt, map_location=base_config.device, weights_only=False)
-        model.plugin.load_state_dict(ckpt["plugin_state"])
+        result = model.plugin.load_state_dict(ckpt["plugin_state"], strict=False)
+        if result.missing_keys:
+            print(f"  注意: checkpoint 缺少 {result.missing_keys}，使用默认初始化")
         from xinhe.model.lora import LoRALinear
         lora_state = ckpt.get("lora_state", {})
         for name, module in model.backbone.named_modules():
@@ -243,7 +245,8 @@ def main():
     config, curriculum = XinheConfig.from_yaml(args.config)
     print(f"=== 心核 (Xinhe) 训练 ===")
     print(f"Backbone: {config.backbone_type} ({config.backbone_model_path}) | 设备: {config.device} | 精度: {config.dtype}")
-    print(f"状态 token: {config.n_state} | 维度: {config.state_dim}")
+    proj = f" → proj ↔ {config.hidden_size}" if config.state_dim != config.hidden_size else ""
+    print(f"状态 token: {config.n_state} | 维度: {config.state_dim}{proj}")
     print(f"LoRA rank: {config.lora_rank} | 目标模块: {config.lora_target_modules}")
 
     if curriculum:

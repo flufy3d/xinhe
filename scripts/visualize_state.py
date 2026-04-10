@@ -144,14 +144,9 @@ def main():
 
     # 生成状态历史 (用合成对话)
     print("  生成状态历史...")
-    minimind_path = Path(config.backbone_model_path).resolve()
-    try:
-        from transformers import AutoTokenizer
-        tokenizer = AutoTokenizer.from_pretrained(str(minimind_path / "model"))
-    except Exception:
-        sys.path.insert(0, str(minimind_path))
-        from model.tokenizer import Tokenizer
-        tokenizer = Tokenizer(str(minimind_path / "model" / "tokenizer.json"))
+    from transformers import AutoTokenizer
+    model_path = Path(config.backbone_model_path).resolve()
+    tokenizer = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
 
     state = model.init_state(1).to(device)
     state_history = [state[0].clone()]

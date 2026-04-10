@@ -114,11 +114,11 @@ QUESTIONS = {
 
 ### 第四步：预生成 think 回复
 
-单独脚本，用干净 Qwen3-0.6B 跑 batch inference：
+单独脚本，用干净 backbone 跑 batch inference：
 
 ```python
 # generate_think_data.py
-backbone = load_clean_qwen3("./models/qwen3-0.6b")
+backbone = load_clean_qwen3("./models/qwen3.5-0.8b")
 for episode in episodes:
     prompt = episode_to_prompt(episode)
     response = backbone.generate(prompt, enable_think=True)

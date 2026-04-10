@@ -73,7 +73,7 @@
 - 小 LLM 的语言能力足够验证 state 机制是否有效
 - 16GB GPU 跑 600M 模型轻松
 
-**Backbone 可切换**：StatePlugin 完全独立于 backbone，切换只需改 yaml 配置。已实现 MiniMind（64M，早期流程验证）和 Qwen3-0.6B（600M，当前主力）两个 backbone，实际效果验证主要基于 Qwen3-0.6B。
+**Backbone 可切换**：StatePlugin 完全独立于 backbone，切换只需改 yaml 配置。当前使用 Qwen3.5 系列 (0.8B / 4B / 9B)。
 
 ---
 
@@ -90,7 +90,7 @@
 
 **为什么三层而不是一层**：任何单独一层都可能因为初始化随机性而失效。三层独立保护，概率叠乘，几乎不可能同时失效。
 
-**验证**：加完 StatePlugin 后直接聊天，应该和原始 MiniMind 一模一样。
+**验证**：加完 StatePlugin 后直接聊天，应该和原始 backbone 一模一样。
 
 ---
 

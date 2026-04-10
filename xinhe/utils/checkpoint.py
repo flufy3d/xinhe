@@ -50,7 +50,9 @@ def load_checkpoint(path: str, model, optimizer=None, scheduler=None, device=Non
 
     checkpoint = torch.load(path, map_location=device or "cpu", weights_only=False)
 
-    model.plugin.load_state_dict(checkpoint["plugin_state"])
+    result = model.plugin.load_state_dict(checkpoint["plugin_state"], strict=False)
+    if result.missing_keys:
+        print(f"  注意: checkpoint 缺少 {result.missing_keys}，使用默认初始化")
 
     lora_state = checkpoint.get("lora_state", {})
     for name, module in model.backbone.named_modules():

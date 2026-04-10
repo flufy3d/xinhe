@@ -1,7 +1,7 @@
 """
 XinheModel — 顶层模型
 
-组合 backbone (MiniMind) + StatePlugin，实现:
+组合 backbone + StatePlugin，实现:
 - 带持久状态的 forward pass
 - 带状态的文本生成
 - Burn-in 初始化
@@ -32,12 +32,9 @@ class XinheModel(nn.Module):
         # Backbone
         if backbone is not None:
             self.backbone = backbone
-        elif config.backbone_type == "qwen":
+        else:
             from .qwen_backbone import QwenBackbone
             self.backbone = QwenBackbone(config)
-        else:
-            from .minimind_backbone import MiniMindBackbone
-            self.backbone = MiniMindBackbone(config)
 
         # 注入 LoRA
         if config.freeze_backbone and config.lora_rank > 0:
@@ -53,6 +50,7 @@ class XinheModel(nn.Module):
         self.plugin = StatePlugin(
             n_state=config.n_state,
             state_dim=config.state_dim,
+            hidden_size=config.hidden_size,
             state_scale_init=config.state_scale_init,
             gate_bias_init=config.gate_bias_init,
         )
@@ -89,8 +87,18 @@ class XinheModel(nn.Module):
         content_mask = (input_ids != pad_token_id) if pad_token_id is not None else None
         hidden_states, mask = self.plugin.inject(state, content_emb, content_mask=content_mask)
 
+        # 2.5 构建 position_ids: state=0, content=0..T-1, state=0
+        n = self.plugin.n_state
+        T = input_ids.shape[1]
+        device = hidden_states.device
+        position_ids = torch.cat([
+            torch.zeros(n, dtype=torch.long, device=device),
+            torch.arange(T, dtype=torch.long, device=device),
+            torch.zeros(n, dtype=torch.long, device=device),
+        ]).unsqueeze(0)
+
         # 3. Transformer forward
-        output = self.backbone.forward_blocks(hidden_states, attention_mask=mask)
+        output = self.backbone.forward_blocks(hidden_states, attention_mask=mask, position_ids=position_ids)
 
         # 4. 提取新状态 + gate 更新（多卡时将输出移回 plugin 所在设备）
         plugin_device = next(self.plugin.parameters()).device

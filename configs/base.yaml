@@ -1,12 +1,12 @@
 # ============================================================
 # Xinhe (心核) 共用默认配置
-# 默认使用 Qwen3-0.6B，切换 backbone 用 --config 指定
+# 默认使用 Qwen3.5-0.8B，切换 backbone 用 --config 指定
 # ============================================================
 
 # --- 默认 backbone (可被 backbone yaml 覆盖) ---
 backbone:
   type: "qwen"
-  model_path: "./models/qwen3-0.6b"
+  model_path: "./models/qwen3.5-0.8b"
   weights_path: ""
   hidden_size: 1024
   freeze: true

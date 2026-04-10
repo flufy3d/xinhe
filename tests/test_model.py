@@ -1,7 +1,7 @@
 """
 测试 XinheModel 整体前向传播
 
-使用 mock backbone 替代 MiniMind，避免依赖预训练权重。
+使用 mock backbone 替代真实模型，避免依赖预训练权重。
 """
 import torch
 import pytest
@@ -26,7 +26,7 @@ class MockBackbone(nn.Module, BackboneBase):
     def embed(self, input_ids):
         return self.embed_layer(input_ids)
 
-    def forward_blocks(self, hidden_states, attention_mask=None):
+    def forward_blocks(self, hidden_states, attention_mask=None, position_ids=None):
         return self.linear(hidden_states)
 
     def get_lm_head(self):
@@ -143,3 +143,36 @@ def test_trainable_params(model):
     assert len(params) > 0
     count = model.get_trainable_param_count()
     assert count > 0
+
+
+def test_forward_with_decoupled_dims():
+    """state_dim != hidden_size 全流程正确"""
+    config = XinheConfig(
+        hidden_size=64,
+        n_state=4,
+        state_dim=32,
+        state_scale_init=0.0,  # scale=0.5，确保 state tokens 有梯度信号
+        lora_rank=0,
+        freeze_backbone=False,
+    )
+    backbone = MockBackbone(hidden_size=64, vocab_size=100)
+    model = XinheModel(config, backbone=backbone)
+
+    B, T = 2, 16
+    state = model.init_state(B)
+    assert state.shape == (B, 4, 32)  # state_dim=32
+
+    input_ids = torch.randint(0, 100, (B, T))
+    labels = torch.randint(0, 100, (B, T))
+    result = model(input_ids, state, labels=labels)
+
+    assert result["logits"].shape == (B, T, 100)
+    assert result["state_next"].shape == (B, 4, 32)  # state stays in state_dim
+    assert result["loss"].item() > 0
+
+    # 梯度流通过投影层 (通过 state_next → gate → proj_down)
+    state_loss = result["state_next"].sum() + result["loss"]
+    state_loss.backward()
+    assert model.plugin.proj_up is not None
+    assert model.plugin.proj_up.weight.grad is not None
+    assert model.plugin.proj_down.weight.grad is not None

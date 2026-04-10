@@ -31,7 +31,7 @@
 │              ↓ inject (拼接读/写状态)               │
 │   ┌─────────────────────────────────┐             │
 │   │   Backbone (可切换)              │  ← 冻结+LoRA │
-│   │  Qwen3-0.6B / MiniMind 64M 等   │             │
+│   │  Qwen3.5-0.8B / Qwen3.5-4B 等   │             │
 │   │  LoRA 注入 q_proj / v_proj      │             │
 │   │  标准因果 attention (无自定义mask)│             │
 │   └─────────────────────────────────┘             │
@@ -53,8 +53,7 @@ class BackboneBase(ABC):
 ```
 
 已实现的 backbone：
-- `QwenBackbone`：Qwen3-0.6B (600M)，当前主力
-- `MiniMindBackbone`：64M 参数，早期流程验证用
+- `QwenBackbone`：支持 Qwen3.5 系列 (0.8B / 4B / 9B)
 
 切换 backbone 只需改 yaml 配置，StatePlugin 代码不变。
 
@@ -108,7 +107,7 @@ Write行:     [ 全可见      | 全可见      | 因果自身  ]  ← 吸收所
 | 配置 | 值 |
 |------|-----|
 | n_state | 32 tokens (读写各 32) |
-| state_dim | 1024 (= hidden_size) |
+| state_dim | 1024 (可独立于 hidden_size) |
 | 原始大小 | 32 × 1024 = 32,768 floats ≈ 128KB |
 | 有效信息 | ~40KB（压缩表示，非原文） |
 

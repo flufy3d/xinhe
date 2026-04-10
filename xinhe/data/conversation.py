@@ -16,7 +16,7 @@ import torch
 from torch.utils.data import Dataset
 
 
-# ── ChatML fallback template (用于没有 chat_template 的 tokenizer，如 MiniMind) ──
+# ── ChatML fallback template (用于没有 chat_template 的 tokenizer) ──
 
 CHATML_FALLBACK_TEMPLATE = (
     "{% for message in messages %}"

@@ -1,7 +1,7 @@
 """
 LoRA (Low-Rank Adaptation) 实现
 
-注入到 MiniMind 的 attention 层，让冻结的 backbone 学会与状态 token 交互。
+注入到 backbone 的 attention 层，让冻结的 backbone 学会与状态 token 交互。
 LoRA 初始化为零增量，训练开始时不影响原始模型行为。
 """
 import math

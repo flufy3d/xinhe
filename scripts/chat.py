@@ -130,7 +130,9 @@ def main():
             if (ckpt_cfg.backbone_type != config.backbone_type) or (ckpt_cfg.hidden_size != config.hidden_size):
                 print("  警告: --config 与 checkpoint 不匹配。")
         try:
-            model.plugin.load_state_dict(checkpoint["plugin_state"])
+            result = model.plugin.load_state_dict(checkpoint["plugin_state"], strict=False)
+            if result.missing_keys:
+                print(f"  注意: checkpoint 缺少 {result.missing_keys}，使用默认初始化")
         except RuntimeError as e:
             raise RuntimeError(
                 "checkpoint 与 --config 不匹配。"

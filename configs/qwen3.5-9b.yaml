@@ -14,7 +14,7 @@ backbone:
   freeze: true
 
 state:
-  state_dim: 4096
+  state_dim: 1024
 
 lora:
   rank: 8

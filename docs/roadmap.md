@@ -27,7 +27,7 @@
 
 **操作**：
 - 下载预训练权重到 `models/` 目录
-- 加载 MiniMindBackbone 或 QwenBackbone，不加 StatePlugin
+- 加载 QwenBackbone，不加 StatePlugin
 - 直接聊天验证
 
 **通过标准**：对话流畅，回答合理
@@ -188,7 +188,7 @@
 ## 未来方向（验证成功后）
 
 ### 近期
-- ~~**Qwen 迁移**~~：已完成 QwenBackbone（支持 Qwen3-0.6B），切换只需改 yaml
+- ~~**Qwen 迁移**~~：已完成 QwenBackbone（支持 Qwen3.5 系列），切换只需改 yaml
 - **更多事实类别**：从 3 类（name/city/number）扩展到 8 类（+food/job/hobby/age/pet），验证 state 容量上限
 - **LLM 生成训练数据**：用大模型生成自然对话替代手写模板，提升泛化能力
 - **更大 backbone**：Qwen3-4B 等更强模型（需量化或更大显存）

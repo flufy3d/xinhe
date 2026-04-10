@@ -354,7 +354,9 @@ class Trainer:
         """加载 checkpoint"""
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
 
-        self.model.plugin.load_state_dict(checkpoint["plugin_state"])
+        result = self.model.plugin.load_state_dict(checkpoint["plugin_state"], strict=False)
+        if result.missing_keys:
+            print(f"  注意: checkpoint 缺少 {result.missing_keys}，使用默认初始化")
         self.global_step = checkpoint["global_step"]
 
         # 恢复 LoRA 参数

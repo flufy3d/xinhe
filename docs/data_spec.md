@@ -78,8 +78,8 @@ batch: [(ids_batch, labels_batch), ...] 每个 shape (B, T)
 {content}<|im_end|>
 ```
 
-- Qwen: tokenizer 自带 chat_template，直接使用
-- MiniMind: 无 chat_template，由 `ensure_chat_template()` 自动设置 ChatML fallback
+- Qwen3.5: tokenizer 自带 chat_template，直接使用
+- 其他 backbone: 无 chat_template 时由 `ensure_chat_template()` 自动设置 ChatML fallback
 
 ---
 

@@ -104,7 +104,7 @@ def _generate_think(
 
     from xinhe.data.generate_think_data import generate_think_data
 
-    mp = model_path or data_cfg.get("model_path", "./models/qwen3-0.6b")
+    mp = model_path or data_cfg.get("model_path", "./models/qwen3.5-0.8b")
 
     return generate_think_data(
         out_dir=out_dir,

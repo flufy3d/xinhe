@@ -21,7 +21,7 @@ class DummyBackbone(nn.Module, BackboneBase):
     def embed(self, input_ids):
         return self._embed(input_ids)
 
-    def forward_blocks(self, hidden_states, attention_mask=None):
+    def forward_blocks(self, hidden_states, attention_mask=None, position_ids=None):
         return self._blocks(hidden_states)
 
     def get_lm_head(self):
@@ -61,4 +61,14 @@ def test_forward_blocks_with_mask():
 
     # 不应报错
     out = backbone.forward_blocks(emb, attention_mask=mask)
+    assert out.shape == (2, 10, 32)
+
+
+def test_forward_blocks_with_position_ids():
+    """forward_blocks 接受 position_ids"""
+    backbone = DummyBackbone()
+    emb = torch.randn(2, 10, 32)
+    pos_ids = torch.zeros(1, 10, dtype=torch.long)
+
+    out = backbone.forward_blocks(emb, position_ids=pos_ids)
     assert out.shape == (2, 10, 32)

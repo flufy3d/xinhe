@@ -119,3 +119,45 @@ def test_scale_init_near_zero():
     plugin = StatePlugin(n_state=8, state_dim=64, state_scale_init=-5.0)
     scale = torch.sigmoid(plugin.state_scale).item()
     assert scale < 0.01, f"初始 scale 应接近 0，实际为 {scale}"
+
+
+# --- 维度解耦测试 ---
+
+def test_projection_shapes():
+    """state_dim != hidden_size 时投影层工作正确"""
+    plugin = StatePlugin(n_state=8, state_dim=32, hidden_size=64)
+    state = plugin.blank_state(2)          # (2, 8, 32) — state_dim
+    content = torch.randn(2, 16, 64)       # (2, 16, 64) — hidden_size
+
+    hidden, mask = plugin.inject(state, content)
+    assert hidden.shape == (2, 8 + 16 + 8, 64)  # 全部在 hidden_size 空间
+
+    output = torch.randn(2, 8 + 16 + 8, 64)     # backbone 输出 hidden_size
+    content_out, state_next = plugin.extract_and_update(output, state)
+    assert content_out.shape == (2, 16, 64)      # hidden_size
+    assert state_next.shape == (2, 8, 32)        # state_dim
+
+
+def test_no_projection_when_equal():
+    """state_dim == hidden_size 时无投影层"""
+    plugin = StatePlugin(n_state=8, state_dim=64, hidden_size=64)
+    assert plugin.proj_up is None
+    assert plugin.proj_down is None
+
+
+def test_projection_gradient_flow():
+    """梯度能通过投影层流动"""
+    plugin = StatePlugin(n_state=4, state_dim=16, hidden_size=32)
+    state = plugin.blank_state(1)
+    content = torch.randn(1, 8, 32)
+
+    hidden, _ = plugin.inject(state, content)
+    # 模拟 backbone: 简单 identity
+    output = hidden.clone()
+    content_out, state_next = plugin.extract_and_update(output, state)
+
+    loss = state_next.sum()
+    loss.backward()
+
+    assert plugin.proj_up.weight.grad is not None
+    assert plugin.proj_down.weight.grad is not None

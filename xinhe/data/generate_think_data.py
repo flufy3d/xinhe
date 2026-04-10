@@ -701,7 +701,7 @@ def generate_think_data(
     num_memory: int = 5000,
     num_val_think: int = 100,
     num_val_memory: int = 100,
-    model_path: str = "./models/qwen3-0.6b",
+    model_path: str = "./models/qwen3.5-0.8b",
     device: str = "cuda",
     max_new_tokens: int = 512,
     seed: int = 42,

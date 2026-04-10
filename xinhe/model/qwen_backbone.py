@@ -19,7 +19,7 @@ class QwenBackbone(nn.Module, BackboneBase):
     """
     Qwen backbone: 通过 transformers AutoModel 加载。
 
-    相比 MiniMind，Qwen 语言能力更强，用于验证 state 机制的实际效果。
+    支持 Qwen3.5 系列 (0.8B / 4B / 9B)，混合 attention 架构。
     """
 
     def __init__(self, config: XinheConfig):
@@ -49,11 +49,13 @@ class QwenBackbone(nn.Module, BackboneBase):
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         # Qwen 使用 RoPE，需要构建 position embeddings
         seq_len = hidden_states.shape[1]
         device = hidden_states.device
-        position_ids = torch.arange(seq_len, device=device).unsqueeze(0)
+        if position_ids is None:
+            position_ids = torch.arange(seq_len, device=device).unsqueeze(0)
         position_embeddings = self.model.model.rotary_emb(hidden_states, position_ids)
 
         # 逐层跑 transformer blocks（多卡时跟随 layer 设备移动）

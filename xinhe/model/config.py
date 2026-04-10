@@ -2,7 +2,6 @@
 XinheConfig — 心核配置
 
 包含状态机制、LoRA、训练等全部超参数。
-Backbone 参数由 MiniMind 自己的 config 管理。
 """
 from dataclasses import dataclass, field
 from typing import Optional
@@ -12,15 +11,15 @@ import yaml
 @dataclass
 class XinheConfig:
     # --- Backbone ---
-    backbone_type: str = "minimind"  # "minimind" 或 "qwen"
-    backbone_model_path: str = "./models/minimind"
-    backbone_weights_path: str = "./models/minimind/model.safetensors"
-    hidden_size: int = 768
+    backbone_type: str = "qwen"
+    backbone_model_path: str = "./models/qwen3.5-0.8b"
+    backbone_weights_path: str = ""
+    hidden_size: int = 1024
     freeze_backbone: bool = True
 
     # --- 持久状态 ---
     n_state: int = 32               # 状态 token 数
-    state_dim: int = 768            # 状态维度 (= hidden_size)
+    state_dim: int = 1024           # 状态维度 (可独立于 hidden_size)
     state_scale_init: float = -5.0  # sigmoid(-5) ≈ 0.007，空状态几乎无影响
     gate_bias_init: float = 0.0     # gate 静态偏置初始值
 

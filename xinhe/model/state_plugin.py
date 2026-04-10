@@ -7,6 +7,7 @@ StatePlugin — 可插拔的持久状态机制 (读写分离架构)
 - 标准因果 attention 自然防止信息泄漏: content 只能从旧 state 读，不能偷看当前答案
 - 双层 Gate: 静态偏置 (脑区分化) + 动态投影 (内容选择)
 - 渐进 scale: 控制 state token 的影响力
+- 维度解耦: state_dim 可独立于 backbone hidden_size，通过投影层桥接
 
 序列结构: [Read-State(旧) | Content | Write-State(新)]
 - Read-State 只看到自己 → 携带旧记忆
@@ -24,7 +25,8 @@ class StatePlugin(nn.Module):
 
     参数:
         n_state: 状态 token 数量 (读和写各 n_state 个)
-        state_dim: 状态维度 (应等于 backbone 的 hidden_size)
+        state_dim: 状态维度 (可独立于 hidden_size)
+        hidden_size: backbone 的隐藏维度 (None 时等于 state_dim)
         state_scale_init: 渐进影响力初始值 (sigmoid 前)
         gate_bias_init: gate 静态偏置初始值
     """
@@ -33,12 +35,14 @@ class StatePlugin(nn.Module):
         self,
         n_state: int = 32,
         state_dim: int = 768,
+        hidden_size: int = None,
         state_scale_init: float = -5.0,
         gate_bias_init: float = 0.0,
     ):
         super().__init__()
         self.n_state = n_state
         self.state_dim = state_dim
+        self.hidden_size = hidden_size if hidden_size is not None else state_dim
 
         # 初始空白状态 (可学习参数，近零初始化)
         self.state_emb = nn.Parameter(torch.randn(n_state, state_dim) * 0.01)
@@ -64,6 +68,14 @@ class StatePlugin(nn.Module):
         # 输出投影: 将 transformer 输出的写状态映射回状态空间
         self.state_out_proj = nn.Linear(state_dim, state_dim, bias=False)
         nn.init.eye_(self.state_out_proj.weight)  # 初始化为恒等映射
+
+        # --- 维度投影 (仅 state_dim != hidden_size 时创建) ---
+        if self.state_dim != self.hidden_size:
+            self.proj_up = nn.Linear(state_dim, self.hidden_size, bias=False)
+            self.proj_down = nn.Linear(self.hidden_size, state_dim, bias=False)
+        else:
+            self.proj_up = None
+            self.proj_down = None
 
     def blank_state(self, batch_size: int, device: torch.device = None) -> torch.Tensor:
         """创建空白初始状态。返回: (B, n_state, state_dim)"""
@@ -97,6 +109,8 @@ class StatePlugin(nn.Module):
         # Read tokens: 旧 state + 读位置编码, 按 scale 缩放
         read_tokens = (state + self.read_pos(pos_ids).unsqueeze(0)) * scale
         read_tokens = read_tokens.to(dtype=content_emb.dtype)
+        if self.proj_up is not None:
+            read_tokens = self.proj_up(read_tokens)
 
         # Write tokens: 可学习查询 + 写位置编码, 按 scale 缩放
         write_tokens = (
@@ -104,6 +118,8 @@ class StatePlugin(nn.Module):
             + self.write_pos(pos_ids).unsqueeze(0)
         ) * scale
         write_tokens = write_tokens.to(dtype=content_emb.dtype)
+        if self.proj_up is not None:
+            write_tokens = self.proj_up(write_tokens)
 
         # [Read | Content | Write]
         hidden_states = torch.cat([read_tokens, content_emb, write_tokens], dim=1)
@@ -155,8 +171,12 @@ class StatePlugin(nn.Module):
 
         # 分离三部分
         # read_output = output[:, :n, :]       # 不需要，读状态已完成使命
-        content_output = output[:, n:-n, :]    # (B, T, D)
-        write_raw = output[:, -n:, :]          # (B, n_state, D)
+        content_output = output[:, n:-n, :]    # (B, T, hidden_size)
+        write_raw = output[:, -n:, :]          # (B, n_state, hidden_size)
+
+        # 投影回 state_dim (仅维度不同时)
+        if self.proj_down is not None:
+            write_raw = self.proj_down(write_raw.to(self.proj_down.weight.dtype))
 
         # 输出投影 (对齐 dtype)
         state_new = self.state_out_proj(write_raw.to(self.state_out_proj.weight.dtype))

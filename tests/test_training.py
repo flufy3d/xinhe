@@ -24,7 +24,7 @@ class TinyBackbone(nn.Module, BackboneBase):
     def embed(self, input_ids):
         return self._embed(input_ids)
 
-    def forward_blocks(self, hidden_states, attention_mask=None):
+    def forward_blocks(self, hidden_states, attention_mask=None, position_ids=None):
         return self._block(hidden_states)
 
     def get_lm_head(self):

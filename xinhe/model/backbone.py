@@ -3,7 +3,7 @@ Backbone 抽象接口
 
 任何 transformer backbone 只需实现:
   - embed(input_ids) -> (B, T, D)
-  - forward_blocks(hidden_states, attention_mask) -> (B, T, D)
+  - forward_blocks(hidden_states, attention_mask, position_ids) -> (B, T, D)
   - get_lm_head() -> nn.Module
   - get_hidden_size() -> int
 """
@@ -27,8 +27,12 @@ class BackboneBase(ABC):
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """transformer blocks 前向传播, (B, T, D) -> (B, T, D)"""
+        """transformer blocks 前向传播, (B, T, D) -> (B, T, D)
+
+        position_ids: (1, T) 自定义位置索引 (用于 RoPE)。None 时默认 0..T-1。
+        """
         ...
 
     @abstractmethod
