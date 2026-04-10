@@ -8,5 +8,5 @@ curriculum_file: curriculum_think.yaml
 
 stage_overrides:
   default:
-    batch_size: 3
+    batch_size: 2
     data_gen_batch_size: 8

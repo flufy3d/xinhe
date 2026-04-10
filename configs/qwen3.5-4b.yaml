@@ -15,7 +15,6 @@ backbone:
 
 state:
   state_dim: 1024
-  gate_bias_init: 1.0
 
 lora:
   rank: 16

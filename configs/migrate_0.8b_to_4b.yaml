@@ -10,8 +10,8 @@ curriculum_file: curriculum_migrate.yaml
 
 stage_overrides:
   default:
-    batch_size: 2          # M2/M3: ep=16, tbptt=16
+    batch_size: 1          # M2/M3: ep=16, tbptt=16
   M0_proj_warmup:
-    batch_size: 6          # ep=2, tbptt=2
+    batch_size: 3          # ep=2, tbptt=2
   M1_lora_adapt:
-    batch_size: 4          # ep=4, tbptt=4
+    batch_size: 2          # ep=4, tbptt=4

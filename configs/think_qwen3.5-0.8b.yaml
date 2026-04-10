@@ -9,4 +9,4 @@ curriculum_file: curriculum_think.yaml
 
 stage_overrides:
   default:
-    batch_size: 4
+    batch_size: 2
