@@ -16,6 +16,7 @@ training_defaults:
   tbptt_steps: 16
   learning_rate: 1.0e-4
   plugin_lr_multiplier: 2.0
+  grad_accum_steps: 2
   max_steps: 5000
   early_stop_loss: 0.05
   early_stop_patience: 200
