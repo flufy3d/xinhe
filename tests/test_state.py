@@ -3,7 +3,7 @@
 """
 import torch
 import pytest
-from xinhe.model.state_plugin import StatePlugin
+from xinhe.model.state_plugin import StatePlugin, CORE_PARAM_PREFIXES, PROJECTION_PARAM_PREFIXES
 
 
 @pytest.fixture
@@ -161,3 +161,93 @@ def test_projection_gradient_flow():
 
     assert plugin.proj_up.weight.grad is not None
     assert plugin.proj_down.weight.grad is not None
+
+
+# --- 参数分类与迁移测试 ---
+
+def test_core_parameters_classification():
+    """core vs projection 参数分类正确"""
+    plugin = StatePlugin(n_state=4, state_dim=16, hidden_size=32)
+
+    core_params = plugin.core_parameters()
+    proj_params = plugin.projection_parameters()
+
+    # core 包含所有核心参数
+    core_names = {n for n, _ in plugin.named_parameters()
+                  if any(n.startswith(p) for p in CORE_PARAM_PREFIXES)}
+    assert len(core_params) == len(core_names)
+    assert len(core_params) > 0
+
+    # projection 包含 proj_up, proj_down
+    proj_names = {n for n, _ in plugin.named_parameters()
+                  if any(n.startswith(p) for p in PROJECTION_PARAM_PREFIXES)}
+    assert len(proj_params) == len(proj_names)
+    assert len(proj_params) == 2  # proj_up.weight + proj_down.weight
+
+    # 无重叠
+    core_ids = {id(p) for p in core_params}
+    proj_ids = {id(p) for p in proj_params}
+    assert core_ids.isdisjoint(proj_ids)
+
+    # 覆盖所有参数
+    all_ids = {id(p) for p in plugin.parameters()}
+    assert core_ids | proj_ids == all_ids
+
+
+def test_core_parameters_no_projection():
+    """state_dim == hidden_size 时没有投影参数"""
+    plugin = StatePlugin(n_state=4, state_dim=32, hidden_size=32)
+    assert len(plugin.projection_parameters()) == 0
+    assert len(plugin.core_parameters()) == len(list(plugin.parameters()))
+
+
+def test_freeze_core():
+    """freeze/unfreeze core 正确设置 requires_grad"""
+    plugin = StatePlugin(n_state=4, state_dim=16, hidden_size=32)
+
+    plugin.freeze_core()
+    for p in plugin.core_parameters():
+        assert not p.requires_grad
+    # projection 不受影响
+    for p in plugin.projection_parameters():
+        assert p.requires_grad
+
+    plugin.unfreeze_core()
+    for p in plugin.core_parameters():
+        assert p.requires_grad
+
+
+def test_core_state_dict():
+    """core_state_dict 只返回核心参数"""
+    plugin = StatePlugin(n_state=4, state_dim=16, hidden_size=32)
+    core = plugin.core_state_dict()
+
+    for k in core:
+        assert any(k.startswith(p) for p in CORE_PARAM_PREFIXES), f"非 core key: {k}"
+
+    # 不含 proj
+    for k in core:
+        assert not any(k.startswith(p) for p in PROJECTION_PARAM_PREFIXES)
+
+
+def test_core_state_dict_roundtrip():
+    """从小 plugin 提取 core 加载到大 plugin (不同 hidden_size)"""
+    # 源: state_dim=16, hidden_size=16 (无投影)
+    src = StatePlugin(n_state=4, state_dim=16, hidden_size=16)
+    # 修改 core 参数使其非零
+    with torch.no_grad():
+        src.gate_bias.fill_(1.23)
+
+    core = src.core_state_dict()
+
+    # 目标: state_dim=16, hidden_size=64 (有投影)
+    dst = StatePlugin(n_state=4, state_dim=16, hidden_size=64)
+    assert dst.proj_up is not None
+
+    result = dst.load_state_dict(core, strict=False)
+    # proj_up/proj_down 应在 missing_keys 中
+    assert any("proj_up" in k for k in result.missing_keys)
+    assert any("proj_down" in k for k in result.missing_keys)
+
+    # core 参数应该已加载
+    assert torch.allclose(dst.gate_bias, torch.full_like(dst.gate_bias, 1.23))

@@ -1,25 +1,20 @@
 # ============================================================
-# 心核课程学习 — Qwen3.5-4B
+# 基础记忆课程 — Qwen3.5-4B / 4090 24GB
 #
-# 用法:
-#   python scripts/train.py --config configs/curriculum_qwen3.5-4b.yaml
+# 4B bf16 ≈ 8GB, 24GB 余 ~15GB 给激活
+# hidden_size=2560, 32层, LoRA rank=16
 # ============================================================
 base: qwen3.5-4b.yaml
 curriculum_file: curriculum.yaml
 
 stage_overrides:
   default:
-    batch_size: 1
+    batch_size: 2          # ep=16, tbptt=16
   0_state_init:
-    batch_size: 4
+    batch_size: 6          # ep=2, tbptt=2
   1_base_memory:
-    batch_size: 4
+    batch_size: 6          # ep=4, tbptt=4
   2_random_tell:
-    batch_size: 3
+    batch_size: 4          # ep=5, tbptt=5
   3_distance:
-    batch_size: 3
-  4_full_m4:
-    batch_size: 3
-  14_think:
-    batch_size: 1
-    data_gen_batch_size: 32
+    batch_size: 3          # ep=7, tbptt=7

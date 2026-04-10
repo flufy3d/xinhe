@@ -1,0 +1,12 @@
+# ============================================================
+# 思考泛化课程 — Qwen3.5-9B / A800 80GB
+#
+# segment_length=512, ep=8, tbptt=8, plugin 全冻结
+# ============================================================
+base: qwen3.5-9b.yaml
+curriculum_file: curriculum_think.yaml
+
+stage_overrides:
+  default:
+    batch_size: 3
+    data_gen_batch_size: 8

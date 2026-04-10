@@ -212,6 +212,49 @@ Memory LoRA 通过残差连接**叠加**到 backbone 输出上（加法，非替
 
 ---
 
+## 参数分类与基座迁移
+
+StatePlugin 的参数分为两类，迁移时只保留核心参数（灵魂），丢弃身体适配层：
+
+### 参数分类
+
+| 类别 | 参数 | 依赖 backbone? | 迁移时 |
+|------|------|---------------|--------|
+| **Core（灵魂）** | state_emb, read_pos, write_emb, write_pos, state_scale, gate_bias, gate_proj, state_out_proj | 否 | 保留 |
+| **Projection（身体适配）** | proj_up (state_dim→hidden_size), proj_down (hidden_size→state_dim) | 是 | 重新初始化 |
+| **LoRA** | q_proj/v_proj 上的 LoRA A/B | 是 | 重新初始化 |
+
+Core 参数只在 state_dim 空间操作，编码了"记忆怎么读写、什么该记什么该忘"的核心技能。这些能力不依赖具体的 backbone。
+
+### 迁移流程
+
+```
+源 backbone (0.8B):  完成基础记忆课程 → 保存 checkpoint
+                         ↓ extract_plugin_core()
+                     提取 Core 参数 (丢弃 proj/LoRA/optimizer)
+                         ↓
+目标 backbone (4B):  加载 Core → 新 proj_up/proj_down 随机初始化 → 新 LoRA 零初始化
+                         ↓
+                     迁移课程 (M0-M3): 渐进解冻训练
+```
+
+### 迁移课程 (4 阶段)
+
+| 阶段 | 冻结策略 | 训练目标 | 数据 |
+|------|---------|---------|------|
+| M0_proj_warmup | Core + LoRA 冻结 | 只训 proj_up/proj_down | 名字, 2轮 |
+| M1_lora_adapt | Core 冻结 | proj + LoRA | 基础记忆, 4轮 |
+| M2_joint_basic | 全解冻, Core 0.1x LR | 联合微调 | 3类事实, 16轮 |
+| M3_full_recovery | 全解冻, Core 0.1x LR | 全能力恢复 | 覆写+实体+回忆 |
+
+```bash
+python scripts/train.py \
+  --config configs/migrate_0.8b_to_4b.yaml \
+  --migrate-from checkpoints/curriculum/13_all.pt
+```
+
+---
+
 ## .pt = AI 的灵魂
 
 ```python

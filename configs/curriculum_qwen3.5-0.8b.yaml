@@ -1,20 +1,23 @@
 # ============================================================
-# 心核课程学习 — Qwen3.5-0.8B
+# 基础记忆课程 — Qwen3.5-0.8B / 4090 24GB
 #
 # 用法:
 #   python scripts/train.py --config configs/curriculum_qwen3.5-0.8b.yaml
+#
+# 0.8B bf16 ≈ 1.6GB, 24GB 余量充足
+# batch 主要受 tbptt_steps × segment_length 限制
 # ============================================================
 base: qwen3.5-0.8b.yaml
 curriculum_file: curriculum.yaml
 
 stage_overrides:
   default:
-    batch_size: 2
+    batch_size: 6          # ep=16, tbptt=16
   0_state_init:
-    batch_size: 8
+    batch_size: 16         # ep=2, tbptt=2
   1_base_memory:
-    batch_size: 8
+    batch_size: 16         # ep=4, tbptt=4
   2_random_tell:
-    batch_size: 4
+    batch_size: 10         # ep=5, tbptt=5
   3_distance:
-    batch_size: 4
+    batch_size: 8          # ep=7, tbptt=7

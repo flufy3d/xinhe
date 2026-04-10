@@ -5,6 +5,27 @@ from pathlib import Path
 
 import torch
 
+from ..model.state_plugin import CORE_PARAM_PREFIXES
+
+
+def extract_plugin_core(source, device="cpu") -> dict:
+    """
+    从 checkpoint 提取 backbone 无关的 plugin 核心参数 (用于跨 backbone 迁移)。
+
+    参数:
+        source: str/Path (checkpoint 路径) 或 dict (已加载的 checkpoint)
+        device: 目标设备
+
+    返回:
+        dict: 只含核心参数的 state_dict, 可用于 plugin.load_state_dict(core, strict=False)
+    """
+    if isinstance(source, (str, Path)):
+        source = torch.load(source, map_location=device, weights_only=False)
+    plugin_state = source.get("plugin_state", {})
+    return {k: v.to(device) if hasattr(v, 'to') else v
+            for k, v in plugin_state.items()
+            if any(k.startswith(prefix) for prefix in CORE_PARAM_PREFIXES)}
+
 
 def save_state(state: torch.Tensor, path: str):
     """保存持久状态到文件"""
@@ -19,7 +40,8 @@ def load_state(path: str, device: torch.device = None) -> torch.Tensor:
     return state
 
 
-def save_checkpoint(model, optimizer, scheduler, global_step: int, path: str):
+def save_checkpoint(model, optimizer, scheduler, global_step: int, path: str,
+                    curriculum_stage: str = None):
     """保存完整 checkpoint"""
     from ..model.lora import LoRALinear
 
@@ -37,6 +59,7 @@ def save_checkpoint(model, optimizer, scheduler, global_step: int, path: str):
         "lora_state": lora_state,
         "optimizer_state": optimizer.state_dict() if optimizer else None,
         "scheduler_state": scheduler.state_dict() if scheduler else None,
+        "curriculum_stage": curriculum_stage,
     }
 
     path = Path(path)

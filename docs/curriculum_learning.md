@@ -35,18 +35,52 @@ M4 阶段我们尝试一步到位训练多轮记忆（多样 filler + 随机 tel
 - 自动重置 optimizer，保留模型权重
 - 每阶段设置 `early_stop_loss` + `early_stop_patience`，收敛后自动进入下一阶段
 
+## 课程三大类
+
+三类课程各自独立的定义文件，职责清晰：
+
+| 类别 | 阶段 | 定义文件 | 训练内容 |
+|------|------|---------|---------|
+| **基础记忆** | 0-13 | `curriculum.yaml` | 纯 state 读写，不含 think 数据 |
+| **思考泛化** | T0 | `curriculum_think.yaml` | 从 state 推理 + 恢复长回复 |
+| **基座迁移** | M0-M3 | `curriculum_migrate.yaml` | 将 plugin core 适配到新 backbone |
+
+基础记忆只训 state 读写能力，保持简洁高效。Think 数据完全独立，避免污染 state 学习。
+
+执行顺序：
+```
+源 backbone:  [基础记忆 0-13]
+                    ↓ extract_plugin_core (提取灵魂)
+目标 backbone: [基座迁移 M0-M3] → [思考泛化 T0]
+```
+
+### 迁移课程说明
+
+迁移时 plugin core（灵魂）已训好，只需训新的投影层 + LoRA：
+
+| 阶段 | 冻结策略 | 说明 |
+|------|---------|------|
+| M0_proj_warmup | Core + LoRA 冻结 | 只训 proj_up/proj_down，学会维度桥接 |
+| M1_lora_adapt | Core 冻结 | proj + LoRA 一起训，LoRA 学会读写 state |
+| M2_joint_basic | 全解冻, Core 0.1x LR | Core 低学习率微调，全部协同 |
+| M3_full_recovery | 全解冻, Core 0.1x LR | 全能力数据，恢复覆写/实体/回忆 |
+
 ## 使用方法
 
-课程学习已集成到训练主流程，在一个 YAML 中定义所有阶段：
+课程学习已集成到训练主流程：
 
 ```bash
-# 从头训练完所有阶段
-python scripts/train.py --config configs/curriculum_qwen.yaml
+# ① 基础记忆（14 阶段，自动跳过已完成的）
+python scripts/train.py --config configs/curriculum_qwen3.5-0.8b.yaml
+python scripts/train.py --config configs/curriculum_qwen3.5-0.8b.yaml --from-stage 3_distance
 
-# 从指定阶段开始（自动加载前一阶段 checkpoint）
-python scripts/train.py --config configs/curriculum_qwen.yaml --from-stage 3_distance
+# ② 基座迁移（0.8B → 4B）
+python scripts/train.py \
+  --config configs/migrate_0.8b_to_4b.yaml \
+  --migrate-from checkpoints/curriculum/13_all.pt
+
+# ③ 思考泛化（在目标 backbone 上）
+python scripts/train.py --config configs/think_qwen3.5-4b.yaml
 ```
 
 每个阶段自动生成数据、训练、保存 checkpoint 到 `checkpoints/curriculum/{stage_name}.pt`。已完成的阶段会自动跳过。
-
-扩展新能力（如 M5 覆写）只需在 `curriculum_qwen.yaml` 末尾追加新阶段。

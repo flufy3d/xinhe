@@ -19,6 +19,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+# 参数分类: Core 是灵魂 (backbone-agnostic), Projection 是身体适配 (backbone-specific)
+CORE_PARAM_PREFIXES = (
+    "state_emb", "read_pos", "write_pos", "write_emb",
+    "state_scale", "gate_bias", "gate_proj", "state_out_proj",
+)
+PROJECTION_PARAM_PREFIXES = ("proj_up", "proj_down")
+
+
 class StatePlugin(nn.Module):
     """
     持久状态管理器 (读写分离)。
@@ -76,6 +84,35 @@ class StatePlugin(nn.Module):
         else:
             self.proj_up = None
             self.proj_down = None
+
+    # ---- 参数分类 API (用于迁移 / 冻结) ----
+
+    def core_parameters(self) -> list[nn.Parameter]:
+        """返回 backbone 无关的核心参数 (灵魂)"""
+        return [p for n, p in self.named_parameters()
+                if any(n.startswith(prefix) for prefix in CORE_PARAM_PREFIXES)]
+
+    def projection_parameters(self) -> list[nn.Parameter]:
+        """返回 backbone 相关的投影参数 (身体适配)"""
+        return [p for n, p in self.named_parameters()
+                if any(n.startswith(prefix) for prefix in PROJECTION_PARAM_PREFIXES)]
+
+    def freeze_core(self):
+        """冻结核心参数 (迁移时只训投影层 + LoRA)"""
+        for p in self.core_parameters():
+            p.requires_grad = False
+
+    def unfreeze_core(self):
+        """解冻核心参数"""
+        for p in self.core_parameters():
+            p.requires_grad = True
+
+    def core_state_dict(self) -> dict:
+        """提取核心参数 state_dict (用于跨 backbone 迁移)"""
+        return {k: v for k, v in self.state_dict().items()
+                if any(k.startswith(prefix) for prefix in CORE_PARAM_PREFIXES)}
+
+    # ---- 状态操作 ----
 
     def blank_state(self, batch_size: int, device: torch.device = None) -> torch.Tensor:
         """创建空白初始状态。返回: (B, n_state, state_dim)"""

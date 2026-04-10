@@ -1,0 +1,45 @@
+# ============================================================
+# 思考泛化课程 (所有 backbone / 硬件共享)
+#
+# 基础记忆课程完成后，教模型从 state 中推理 + 恢复长回复。
+# 基础记忆见 curriculum.yaml，迁移课程见 curriculum_migrate.yaml。
+#
+# 用法 (在目标 backbone 上跑):
+#   python scripts/train.py --config configs/think_qwen3.5-4b.yaml
+# ============================================================
+
+think_lang: en
+
+training_defaults:
+  episode_length: 16
+  tbptt_steps: 16
+  learning_rate: 1.0e-4
+  # 冻结整个 StatePlugin: think 模板大变样，防止破坏 state 读写能力
+  freeze_plugin_core: true       # 冻结核心 (gate_bias/gate_proj 等)
+  plugin_lr_multiplier: 0.0     # 冻结投影层 (proj_up/proj_down)
+  # 只训 LoRA: 学会从 state 推理 + 生成 think 格式
+  grad_accum_steps: 2
+  max_steps: 5000
+  early_stop_loss: 0.08
+  early_stop_patience: 200
+
+stages:
+  # ── Think 课程 ──
+  # 50% think 数据 (推理/续写/心跳/纯逻辑) + 50% memory 数据 (维持 state 读写)
+  - name: "T0_think"
+    data:
+      type: think
+      num_think: 5000
+      num_memory: 5000
+      num_val_think: 50
+      num_val_memory: 50
+      memory_think_ratio: 0.5
+      ratio_fact: 0.55
+      ratio_continuation: 0.20
+      ratio_heartbeat: 0.15
+      ratio_logic: 0.10
+      max_new_tokens: 512
+    training:
+      segment_length: 512
+      episode_length: 8
+      tbptt_steps: 8

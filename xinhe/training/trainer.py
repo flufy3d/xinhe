@@ -52,12 +52,15 @@ class Trainer:
         self.device = torch.device(config.device)
         self.dtype = getattr(torch, config.dtype, torch.float32)
 
-        # 分组优化: Plugin 和 LoRA 独立学习率
-        self._apply_lora_freeze(config)
+        # 分组优化: Plugin Core / Plugin Proj / LoRA 独立学习率
+        self._apply_freezes(config)
         self.optimizer = self._build_optimizer(config)
 
         # 学习率调度: cosine with warmup
         self.scheduler = self._build_scheduler()
+
+        # 课程阶段名 (用于 checkpoint 标记)
+        self.current_stage_name = ""
 
         # 训练状态
         self.global_step = 0
@@ -73,22 +76,40 @@ class Trainer:
         self._ema_loss = None
         self._ema_acc = None
 
-    def _apply_lora_freeze(self, config: XinheConfig):
-        """按配置冻结/解冻 LoRA 参数"""
-        freeze = getattr(config, "freeze_lora", False)
+    def _apply_freezes(self, config: XinheConfig):
+        """按配置冻结/解冻 LoRA 和 plugin 参数"""
+        # LoRA 冻结
+        freeze_lora = getattr(config, "freeze_lora", False)
         for p in get_lora_params(self.model.backbone):
-            p.requires_grad = not freeze
+            p.requires_grad = not freeze_lora
+        # Plugin core 冻结 (迁移时只训 proj + LoRA)
+        if getattr(config, "freeze_plugin_core", False):
+            self.model.plugin.freeze_core()
+        else:
+            self.model.plugin.unfreeze_core()
+        # Plugin projection 冻结 (plugin_lr_multiplier=0 时，think 课程用)
+        freeze_proj = getattr(config, "plugin_lr_multiplier", 1.0) == 0
+        for p in self.model.plugin.projection_parameters():
+            p.requires_grad = not freeze_proj
 
     def _build_optimizer(self, config: XinheConfig) -> torch.optim.AdamW:
-        """构建 optimizer，Plugin 和 LoRA 使用独立学习率。freeze_lora 时只训 plugin。"""
-        multiplier = getattr(config, "plugin_lr_multiplier", 1.0)
-        plugin_params = [p for p in self.model.plugin.parameters() if p.requires_grad]
-        param_groups = [
-            {"params": plugin_params, "lr": config.learning_rate * multiplier},
-        ]
+        """构建 optimizer，Plugin Core / Plugin Proj / LoRA 三组独立学习率。"""
+        lr = config.learning_rate
+        plugin_mult = getattr(config, "plugin_lr_multiplier", 1.0)
+        core_mult = getattr(config, "plugin_core_lr_multiplier", 1.0)
+
+        core_params = [p for p in self.model.plugin.core_parameters() if p.requires_grad]
+        proj_params = [p for p in self.model.plugin.projection_parameters() if p.requires_grad]
+
+        param_groups = []
+        if core_params:
+            param_groups.append({"params": core_params, "lr": lr * plugin_mult * core_mult})
+        if proj_params:
+            param_groups.append({"params": proj_params, "lr": lr * plugin_mult})
         if not getattr(config, "freeze_lora", False):
             lora_params = get_lora_params(self.model.backbone)
-            param_groups.append({"params": lora_params, "lr": config.learning_rate})
+            if lora_params:
+                param_groups.append({"params": lora_params, "lr": lr})
         return torch.optim.AdamW(param_groups, weight_decay=config.weight_decay)
 
     def _build_scheduler(self):
@@ -314,7 +335,7 @@ class Trainer:
         self._ema_loss = None
         self._ema_acc = None
 
-        self._apply_lora_freeze(config)
+        self._apply_freezes(config)
         self.optimizer = self._build_optimizer(config)
         self.scheduler = self._build_scheduler()
         self.optimizer.zero_grad()
@@ -345,6 +366,7 @@ class Trainer:
             "optimizer_state": self.optimizer.state_dict(),
             "scheduler_state": self.scheduler.state_dict(),
             "config": self.config,
+            "curriculum_stage": self.current_stage_name,
         }
 
         torch.save(checkpoint, path)

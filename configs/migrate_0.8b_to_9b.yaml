@@ -1,0 +1,17 @@
+# 基座迁移: Qwen3.5-0.8B → Qwen3.5-9B / A800 80GB
+#
+# 用法:
+#   python scripts/train.py \
+#     --config configs/migrate_0.8b_to_9b.yaml \
+#     --migrate-from checkpoints/curriculum/13_all.pt
+
+base: qwen3.5-9b.yaml
+curriculum_file: curriculum_migrate.yaml
+
+stage_overrides:
+  default:
+    batch_size: 4          # M2/M3: ep=16, tbptt=16
+  M0_proj_warmup:
+    batch_size: 16         # ep=2, tbptt=2
+  M1_lora_adapt:
+    batch_size: 10         # ep=4, tbptt=4

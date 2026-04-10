@@ -1,0 +1,12 @@
+# ============================================================
+# 思考泛化课程 — Qwen3.5-0.8B / 4090 24GB
+#
+# segment_length=512, ep=8, tbptt=8, plugin 全冻结
+# 只训 LoRA → 激活显存比基础记忆小 (无 plugin 梯度)
+# ============================================================
+base: qwen3.5-0.8b.yaml
+curriculum_file: curriculum_think.yaml
+
+stage_overrides:
+  default:
+    batch_size: 4

@@ -9,6 +9,10 @@
     # 课程学习 (config 中包含 curriculum 段)
     python scripts/train.py --config configs/curriculum_qwen3.5-0.8b.yaml
     python scripts/train.py --config configs/curriculum_qwen3.5-0.8b.yaml --from-stage 3_distance
+
+    # 基座迁移 (0.8B → 4B)
+    python scripts/train.py --config configs/migrate_0.8b_to_4b.yaml \
+        --migrate-from checkpoints/curriculum/13_all.pt
 """
 import argparse
 import sys
@@ -86,6 +90,8 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
         "learning_rate": "learning_rate",
         "plugin_lr_multiplier": "plugin_lr_multiplier",
         "freeze_lora": "freeze_lora",
+        "freeze_plugin_core": "freeze_plugin_core",
+        "plugin_core_lr_multiplier": "plugin_core_lr_multiplier",
         "weight_decay": "weight_decay",
         "grad_clip": "grad_clip",
         "warmup_steps": "warmup_steps",
@@ -166,9 +172,20 @@ def train_curriculum(base_config, stages, args):
     model = XinheModel(base_config)
     model.setup_device(torch.device(base_config.device))
 
+    # 迁移: 只加载 plugin core (丢弃 proj/LoRA/optimizer)
+    if args.migrate_from:
+        from xinhe.utils.checkpoint import extract_plugin_core
+        core_state = extract_plugin_core(args.migrate_from, device=base_config.device)
+        result = model.plugin.load_state_dict(core_state, strict=False)
+        print(f"[迁移] 从 {args.migrate_from} 加载 plugin core")
+        if result.missing_keys:
+            print(f"  新参数 (随机初始化): {result.missing_keys}")
+
     # 加载初始权重: --resume 优先，否则加载前一阶段的 checkpoint
     init_ckpt = None
-    if args.resume:
+    if args.migrate_from:
+        pass  # 迁移模式: 不加载 LoRA/optimizer，从 M0 开始
+    elif args.resume:
         init_ckpt = args.resume
     elif start_idx > 0:
         prev_ckpt = Path(f"checkpoints/curriculum/{stage_names[start_idx - 1]}.pt")
@@ -220,6 +237,7 @@ def train_curriculum(base_config, stages, args):
             trainer = Trainer(model, stage_config, train_loader, val_loader, pad_token_id=tokenizer.pad_token_id)
         else:
             trainer.reset_for_new_stage(stage_config, train_loader, val_loader)
+        trainer.current_stage_name = stage_name
 
         trainer.train()
 
@@ -239,7 +257,13 @@ def main():
     parser.add_argument("--resume", type=str, default=None, help="从 checkpoint 恢复")
     parser.add_argument("--reset-step", action="store_true", help="恢复权重但重置 step 和优化器")
     parser.add_argument("--from-stage", type=str, default=None, help="课程学习: 从指定阶段开始")
+    parser.add_argument("--migrate-from", type=str, default=None,
+                        help="迁移源 checkpoint（只加载 plugin core，丢弃 proj/LoRA/optimizer）")
     args = parser.parse_args()
+
+    if args.migrate_from and args.resume:
+        print("错误: --migrate-from 和 --resume 互斥")
+        sys.exit(1)
 
     # 加载配置
     config, curriculum = XinheConfig.from_yaml(args.config)

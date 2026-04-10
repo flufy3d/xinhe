@@ -1,14 +1,12 @@
 # ============================================================
-# 心核课程定义 (所有 backbone / 硬件共享)
+# 基础记忆课程 (所有 backbone / 硬件共享)
 #
-# 不要直接用这个文件训练。用入口文件:
-#   python scripts/train.py --config configs/curriculum_qwen.yaml
+# 纯粹训练 state 读写能力，不含 think 数据。
+# Think 课程见 curriculum_think.yaml，迁移课程见 curriculum_migrate.yaml。
 #
-# 入口文件引用此文件并叠加硬件相关的 batch_size 等参数。
+# 用法:
+#   python scripts/train.py --config configs/curriculum_qwen3.5-0.8b.yaml
 # ============================================================
-
-# Think 块语言: en (匹配 Qwen3.5 backbone) / zh
-think_lang: en
 
 # 训练默认值 — 每个阶段的 training 自动继承，阶段内的值覆盖默认值
 training_defaults:
@@ -67,7 +65,6 @@ stages:
       min_distance: 1
       max_distance: 1
       max_turns: 5
-      think_ratio: 0.2
     training:
       episode_length: 5
       tbptt_steps: 5
@@ -84,7 +81,6 @@ stages:
       min_distance: 1
       max_distance: 3
       max_turns: 7
-      think_ratio: 0.2
     training:
       episode_length: 7
       tbptt_steps: 7
@@ -100,7 +96,6 @@ stages:
       min_distance: 1
       max_distance: 10
       max_turns: 16
-      think_ratio: 0.2
 
 
   # ── 阶段 5: 3 类事实 ──
@@ -113,7 +108,6 @@ stages:
       min_distance: 1
       max_distance: 5
       max_turns: 16
-      think_ratio: 0.3
 
 
   # ── 阶段 6: 5 类事实 ──
@@ -126,7 +120,6 @@ stages:
       min_distance: 1
       max_distance: 5
       max_turns: 16
-      think_ratio: 0.3
 
 
   # ── 阶段 7: 8 类事实 ──
@@ -139,7 +132,6 @@ stages:
       min_distance: 1
       max_distance: 10
       max_turns: 16
-      think_ratio: 0.3
 
   # ── 阶段 8: 覆写能力 ──
   - name: "8_overwrite"
@@ -151,7 +143,6 @@ stages:
       min_distance: 1
       max_distance: 10
       max_turns: 16
-      think_ratio: 0.3
 
   # ── 阶段 9: 实体区分 ──
   - name: "9_entity"
@@ -164,7 +155,6 @@ stages:
       min_distance: 1
       max_distance: 5
       max_turns: 16
-      think_ratio: 0.4
 
   # ── 阶段 10: 对话回忆 ──
   - name: "10_recall"
@@ -174,7 +164,6 @@ stages:
       entity_ratio: 0.2
       no_overwrite: true
       max_turns: 16
-      think_ratio: 0.4
 
   # ── 阶段 11: 回忆 AI 发言 ──
   - name: "11_recall_ai"
@@ -185,7 +174,6 @@ stages:
       entity_ratio: 0.2
       no_overwrite: true
       max_turns: 16
-      think_ratio: 0.4
 
   # ── 阶段 12: 混合回忆 ──
   - name: "12_recall_mix"
@@ -196,7 +184,6 @@ stages:
       entity_ratio: 0.2
       no_overwrite: true
       max_turns: 16
-      think_ratio: 0.4
 
   # ── 阶段 13: 全能力混合 ──
   - name: "13_all"
@@ -211,24 +198,4 @@ stages:
       min_distance: 1
       max_distance: 10
       max_turns: 16
-      think_ratio: 0.5
 
-  # ── 阶段 14: Think 课程 ──
-  - name: "14_think"
-    data:
-      type: think
-      num_think: 5000
-      num_memory: 5000
-      num_val_think: 50
-      num_val_memory: 50
-      memory_think_ratio: 0.5
-      ratio_fact: 0.55
-      ratio_continuation: 0.20
-      ratio_heartbeat: 0.15
-      ratio_logic: 0.10
-      max_new_tokens: 512
-    training:
-      segment_length: 512
-      episode_length: 8
-      tbptt_steps: 8
-      early_stop_loss: 0.08
