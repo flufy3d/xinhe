@@ -25,15 +25,16 @@ training_defaults:
 
 stages:
   # ── Think 课程 ──
-  # 50% think 数据 (推理/续写/心跳/纯逻辑) + 50% memory 数据 (维持 state 读写)
+  # 100% think 数据, plugin 全冻结所以不需要 memory 混合
+  # LoRA 只学一件事: state → think 格式推理输出
   - name: "T0_think"
     data:
       type: think
-      num_think: 5000
-      num_memory: 5000
-      num_val_think: 50
-      num_val_memory: 50
-      memory_think_ratio: 0.5
+      num_think: 10000
+      num_memory: 0
+      num_val_think: 100
+      num_val_memory: 0
+      memory_think_ratio: 0.0
       ratio_fact: 0.55
       ratio_continuation: 0.20
       ratio_heartbeat: 0.15
