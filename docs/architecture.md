@@ -235,17 +235,15 @@ Core 参数只在 state_dim 空间操作，编码了"记忆怎么读写、什么
                          ↓
 目标 backbone (4B):  加载 Core → 新 proj_up/proj_down 随机初始化 → 新 LoRA 零初始化
                          ↓
-                     迁移课程 (M0-M3): 渐进解冻训练
+                     迁移课程: plugin core 冻结, 训 proj + LoRA
 ```
 
-### 迁移课程 (4 阶段)
+### 为什么迁移只需一个 stage
 
-| 阶段 | 冻结策略 | 训练目标 | 数据 |
-|------|---------|---------|------|
-| M0_proj_warmup | Core + LoRA 冻结 | 只训 proj_up/proj_down | 名字, 2轮 |
-| M1_lora_adapt | Core 冻结 | proj + LoRA | 基础记忆, 4轮 |
-| M2_joint_basic | 全解冻, Core 0.1x LR | 联合微调 | 3类事实, 16轮 |
-| M3_full_recovery | 全解冻, Core 0.1x LR | 全能力恢复 | 覆写+实体+回忆 |
+和从零训练不同，迁移时 plugin core 已经训好：
+- 不存在"放弃 state"的风险（core 信号固定且有意义）
+- proj 学维度桥接、LoRA 学读写 state，两者不冲突
+- proj 是线性层，几百步就能学好映射
 
 ```bash
 python scripts/train.py \

@@ -56,14 +56,8 @@ M4 阶段我们尝试一步到位训练多轮记忆（多样 filler + 随机 tel
 
 ### 迁移课程说明
 
-迁移时 plugin core（灵魂）已训好，只需训新的投影层 + LoRA：
-
-| 阶段 | 冻结策略 | 说明 |
-|------|---------|------|
-| M0_proj_warmup | Core + LoRA 冻结 | 只训 proj_up/proj_down，学会维度桥接 |
-| M1_lora_adapt | Core 冻结 | proj + LoRA 一起训，LoRA 学会读写 state |
-| M2_joint_basic | 全解冻, Core 0.1x LR | Core 低学习率微调，全部协同 |
-| M3_full_recovery | 全解冻, Core 0.1x LR | 全能力数据，恢复覆写/实体/回忆 |
+迁移和从零训练的本质区别：plugin core 已训好，state 信号固定，不存在"放弃 state"的风险。
+所以不需要分阶段渐进，一步到位：plugin core 冻结，proj + LoRA 同时训，全能力数据。
 
 ## 使用方法
 
