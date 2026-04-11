@@ -440,14 +440,13 @@ RECALL_TEMPLATES = {
     ],
 }
 
-# ── 实体定义 (我/你/他/她/它) ──
+# ── 实体定义 (我/你/他/她) ──
 
 ENTITIES = [
     {"tell": "我", "recall_a": "你"},
     {"tell": "你", "recall_a": "我"},
     {"tell": "他", "recall_a": "他"},
     {"tell": "她", "recall_a": "她"},
-    {"tell": "它", "recall_a": "它"},
 ]
 
 # 实体模板：{e}=告知主语, {ea}=回答主语, {v}=值
