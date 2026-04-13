@@ -172,6 +172,16 @@ def train_curriculum(base_config, stages, args):
     model = XinheModel(base_config)
     model.setup_device(torch.device(base_config.device))
 
+    # 检查: 迁移课程必须提供 --migrate-from
+    has_freeze_core = any(
+        s.get("training", {}).get("freeze_plugin_core", False)
+        for s in stages
+    )
+    if has_freeze_core and not args.migrate_from and not args.resume and start_idx == 0:
+        print("错误: 课程含 freeze_plugin_core 阶段，需要 --migrate-from 或 --resume 提供预训练权重")
+        print("  否则冻住的随机 plugin core 无法收敛")
+        sys.exit(1)
+
     # 迁移: 只加载 plugin core (丢弃 proj/LoRA/optimizer)
     if args.migrate_from:
         from xinhe.utils.checkpoint import extract_plugin_core
