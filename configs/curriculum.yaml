@@ -144,8 +144,22 @@ stages:
       max_distance: 10
       max_turns: 16
 
-  # ── 阶段 9: 实体区分 ──
-  - name: "9_entity"
+  # ── 阶段 9a: 实体区分 (不同类别) ──
+  # 先学 entity 概念: 不同实体不同类别, 只需绑定实体→类别
+  - name: "9a_entity"
+    data:
+      num_train: 10000
+      num_facts: 3
+      entity_ratio: 0.5
+      same_category: 0.0
+      no_overwrite: true
+      min_distance: 1
+      max_distance: 5
+      max_turns: 16
+
+  # ── 阶段 9b: 实体区分 (同类别绑定) ──
+  # 再学同类别绑定: 3 个实体都是 city/number, 必须精确绑 entity→value
+  - name: "9b_entity_same"
     data:
       num_train: 10000
       num_facts: 3
