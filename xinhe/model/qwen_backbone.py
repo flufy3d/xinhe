@@ -105,3 +105,8 @@ class QwenBackbone(nn.Module, BackboneBase):
 
     def get_num_layers(self) -> int:
         return len(self.model.model.layers)
+
+    def get_hook_layer_indices(self) -> list[int]:
+        """只在 full attention 层前执行 hook（DeltaNet 层跳过）"""
+        return [i for i, layer in enumerate(self.model.model.layers)
+                if getattr(layer, 'layer_type', None) == 'full_attention']

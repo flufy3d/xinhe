@@ -47,12 +47,15 @@ class XinheModel(nn.Module):
             )
 
         # StateInterface (v2: 对称 cross-attention)
-        n_layers = self.backbone.get_num_layers()
+        # 只在 full attention 层前注入 state（DeltaNet 层跳过）
+        self._hook_layer_indices = self.backbone.get_hook_layer_indices()
+        n_hook_layers = len(self._hook_layer_indices)
+        self._hook_layer_set = set(self._hook_layer_indices)
         self.state_interface = StateInterface(
             n_state=config.n_state,
             state_dim=config.state_dim,
             hidden_size=config.hidden_size,
-            n_layers=n_layers,
+            n_layers=n_hook_layers,
             state_scale_init=config.state_scale_init,
         )
 
@@ -87,14 +90,19 @@ class XinheModel(nn.Module):
         # 1. 嵌入内容 token
         content_emb = self.backbone.embed(input_ids)  # (B, T, D)
 
-        # 2. 读侧: 生成每层 state K/V
+        # 2. 读侧: 生成 hook 层的 state K/V
         state_kv = self.state_interface.generate_read_kv(state)
 
-        # 3. 构建 layer_hook: 每层之前执行 state cross-attention
-        #    torch.compiler.disable 避免 dynamo 对每个 layer_idx 重复编译
+        # 3. 构建 layer_hook: 只在 full attention 层前执行 state cross-attention
+        #    建立 backbone layer_idx → state_kv 索引的映射
+        hook_layer_set = self._hook_layer_set
+        hook_idx_map = {layer_idx: kv_idx for kv_idx, layer_idx in enumerate(self._hook_layer_indices)}
+
         @torch.compiler.disable
         def state_read_hook(hidden_states, layer_idx):
-            return self.state_interface.read_layer(hidden_states, state_kv[layer_idx])
+            if layer_idx not in hook_layer_set:
+                return hidden_states
+            return self.state_interface.read_layer(hidden_states, state_kv[hook_idx_map[layer_idx]])
 
         # 4. 标准因果 mask（只有 content，无 state token）
         causal = torch.triu(

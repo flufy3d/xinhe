@@ -13,7 +13,7 @@ training_defaults:
   episode_length: 16
   tbptt_steps: 16
   learning_rate: 1.0e-4
-  plugin_lr_multiplier: 2.0
+  plugin_lr_multiplier: 1.0
   grad_accum_steps: 1
   max_steps: 5000
   early_stop_loss: 0.05

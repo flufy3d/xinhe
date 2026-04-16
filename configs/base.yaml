@@ -15,7 +15,7 @@ backbone:
 state:
   n_state: 32
   state_dim: 1024
-  state_scale_init: 0.0
+  state_scale_init: -3.0
 
 # --- Sleep (对话 buffer replay + 权重更新，里程碑 9 实现) ---
 sleep:

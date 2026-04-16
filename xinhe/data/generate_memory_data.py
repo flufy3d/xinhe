@@ -837,6 +837,7 @@ def generate_overwrite_episode(
     max_pre_filler: int = 2,
     think_ratio: float = 0.0,
     think_lang: str = "en",
+    allowed_categories: list = None,
 ) -> list[dict]:
     """
     生成覆写 episode: [前置闲聊] [tell_old] [filler] [tell_new(覆写)] [filler] [recall(应答新值)]
@@ -846,9 +847,16 @@ def generate_overwrite_episode(
     """
     if fillers is None:
         fillers = FILLERS
-    # 选一个类别，生成旧值和新值
-    generators = {"name": random_name, "number": random_number, "city": random_city}
-    cat = rng.choice(list(generators.keys()))
+    # 选一个类别，生成旧值和新值（只从有覆写模板的类别中选）
+    generators = {
+        "name": random_name, "number": random_number, "city": random_city,
+        "food": random_food, "job": random_job, "hobby": random_hobby,
+        "age": random_age, "pet": random_pet,
+    }
+    pool = list(OVERWRITE_TEMPLATES.keys())
+    if allowed_categories is not None:
+        pool = [c for c in pool if c in allowed_categories]
+    cat = rng.choice(pool)
     old_value = generators[cat](rng)
     new_value = generators[cat](rng)
     while new_value == old_value:
@@ -923,6 +931,7 @@ def generate_entity_episode(
     same_category: bool = False,
     think_ratio: float = 0.0,
     think_lang: str = "en",
+    allowed_categories: list = None,
 ) -> list[dict]:
     """
     生成实体区分 episode: 不同实体(我/你/他/她/它)的事实，recall 时需区分。
@@ -942,12 +951,13 @@ def generate_entity_episode(
         "job": lambda: random_job(rng), "hobby": lambda: random_hobby(rng),
         "age": lambda: random_age(rng), "pet": lambda: random_pet(rng),
     }
+    pool = list(generators.keys()) if allowed_categories is None else allowed_categories
     # 同类别绑定: 所有实体共享一个类别，各自不同值
     if same_category:
-        shared_cat = rng.choice(list(generators.keys()))
+        shared_cat = rng.choice(pool)
         categories = [shared_cat] * min(num_facts, len(entities))
     else:
-        categories = rng.sample(list(generators.keys()), min(num_facts, len(generators)))
+        categories = rng.sample(pool, min(num_facts, len(pool)))
 
     facts = []
     for i in range(min(len(entities), len(categories))):
@@ -1159,6 +1169,7 @@ def generate_data(
                     same_category=rng.random() < same_category,
                     think_ratio=think_ratio,
                     think_lang=think_lang,
+                    allowed_categories=categories,
                 )
             elif r < entity_ratio + recall_ratio:
                 turns = generate_recall_episode(
@@ -1179,6 +1190,7 @@ def generate_data(
                     max_pre_filler=max_pre_filler,
                     think_ratio=think_ratio,
                     think_lang=think_lang,
+                    allowed_categories=categories,
                 )
             else:
                 turns = generate_episode(

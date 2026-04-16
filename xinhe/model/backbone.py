@@ -51,3 +51,7 @@ class BackboneBase(ABC):
     def get_num_layers(self) -> int:
         """返回 transformer 层数"""
         ...
+
+    def get_hook_layer_indices(self) -> list[int]:
+        """返回需要 layer_hook 的层索引。默认全部层。子类可覆盖。"""
+        return list(range(self.get_num_layers()))

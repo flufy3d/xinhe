@@ -158,8 +158,8 @@ class StateInterface(nn.Module):
             state_next: (B, n_state, state_dim) 更新后的状态
         """
         Q = self.write_q(state_old)      # (B, n_state, hidden_size)
-        K = content_hidden               # (B, T, hidden_size)
-        V = content_hidden
+        K = content_hidden.to(dtype=Q.dtype)  # (B, T, hidden_size)
+        V = K
 
         d = Q.shape[-1]
         attn = torch.softmax(Q @ K.transpose(-2, -1) / (d ** 0.5), dim=-1)
