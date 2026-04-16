@@ -19,8 +19,8 @@ M4 阶段我们尝试一步到位训练多轮记忆（多样 filler + 随机 tel
 ## 失败的教训
 
 1. **不要一次改多个变量**。我们最初同时改了 filler 数量、tell 位置、distance、episode 长度、batch size，浪费了大量算力却无法定位问题
-2. **Scale 是最重要的监控指标**。Scale 持续下降 = 模型在放弃 state，不需要等 loss 收敛就能判定失败
-3. **Gate bias 调参无法解决根本问题**。我们试了 gate_bias=2.0，完全无效。问题不是"记不住"，而是"根本没学会写入"。参数调优解决不了学习路径的问题
+2. **read_scale 是最重要的监控指标**。read_scale 持续下降 = 模型在放弃 state，不需要等 loss 收敛就能判定失败
+3. **参数调优无法解决学习路径问题**。v1 时我们试了 gate_bias=2.0，完全无效。问题不是"记不住"，而是"根本没学会写入"。参数调优解决不了学习路径的问题
 4. **Batch size 不是万能解释**。我们一度怀疑 batch=1 的梯度噪声是元凶，实验证明不是
 
 ## 对后续训练的指导
@@ -43,21 +43,21 @@ M4 阶段我们尝试一步到位训练多轮记忆（多样 filler + 随机 tel
 |------|------|---------|---------|
 | **基础记忆** | 0-13 | `curriculum.yaml` | 纯 state 读写，不含 think 数据 |
 | **思考泛化** | T0 | `curriculum_think.yaml` | 从 state 推理 + 恢复长回复 |
-| **基座迁移** | M0-M3 | `curriculum_migrate.yaml` | 将 plugin core 适配到新 backbone |
+| **基座迁移** | M0-M3 | `curriculum_migrate.yaml` | 将 core (state_emb, gate_proj) 适配到新 backbone |
 
 基础记忆只训 state 读写能力，保持简洁高效。Think 数据完全独立，避免污染 state 学习。
 
 执行顺序：
 ```
 源 backbone:  [基础记忆 0-13]
-                    ↓ extract_plugin_core (提取灵魂)
+                    ↓ extract_core (提取灵魂)
 目标 backbone: [基座迁移 M0-M3] → [思考泛化 T0]
 ```
 
 ### 迁移课程说明
 
-迁移和从零训练的本质区别：plugin core 已训好，state 信号固定，不存在"放弃 state"的风险。
-所以不需要分阶段渐进，一步到位：plugin core 冻结，proj + LoRA 同时训，全能力数据。
+迁移和从零训练的本质区别：core 已训好（state_emb + gate_proj），state 信号固定，不存在"放弃 state"的风险。
+所以不需要分阶段渐进，一步到位：core 冻结，read/write projections + LoRA 同时训，全能力数据。
 
 ## 使用方法
 

@@ -4,66 +4,94 @@
 
 ---
 
-## 1. 为什么用 State-as-Tokens，而不是外部记忆模块？
+## 1. State 的读写机制：从 State-as-Tokens 到对称 Cross-Attention
 
-**决策**：状态实现为额外 token，拼在输入前面，复用 transformer 的 self-attention 做读写。
+**v1 决策**：状态实现为额外 token，拼在输入序列中，复用 transformer 的 self-attention 做读写。
 
-**替代方案**：
-- 外部记忆库 + 检索（RAG 式）
-- 专门的读/写头（Neural Turing Machine 式）
-- 额外的 cross-attention 层
-
-**为什么选当前方案**：
+**v1 的设计初衷**：
 - **零新架构原语**：不引入任何 transformer 没有的东西。self-attention 本身就是一个通用的读写机制，为什么要再造一个？
-- **让模型自己分化**：不预设"这个是读 token，那个是写 token"。给一堆无差别的状态 token，让训练过程自己发现怎么分工。如果智能真的能涌现，它应该能自己搞定这种分化。
-- **实现极简**：拼接 + mask，几十行代码。越简单的东西越不容易出 bug，越容易调试。
+- **让模型自己分化**：给一堆无差别的状态 token，让训练过程自己发现怎么分工
+- **实现极简**：拼接 + mask，几十行代码
 
-**风险承认**：模型可能会忽略状态 token（塌缩为常数）。应对：渐进 scale + copy 任务强制使用。
+**v1 验证了什么**：0.8B 上跑完 14 阶段课程达到 99% 准确率，证明 state 机制可行。
+
+**v1 暴露的问题**：4B 上 entity 区分卡在 87%。根因是 LoRA 全局共享——state token 和 content token 共享同一组 LoRA 的 K/V 投影，LoRA 被迫同时做语言适配、state 读路由、state 写路由三件事，低秩参数里三个目标互相冲突。小模型能 hack 过去，大模型不行。
+
+**v2 决策**：state 从序列中移出，通过 `past_key_values` API 注入每层 attention cache，用专用全参投影生成 K/V。
+
+**为什么 v2 仍然"零侵入 backbone"**：
+- `past_key_values` 是 HuggingFace transformer 的标准 API，不需要修改 backbone 内部代码
+- 唯一改动是 `forward_blocks` 多传一个参数
+- 设计哲学一脉相承：利用已有机制，不造新的架构原语
+
+**v2 解决了什么**：
+- State 读路由由专用全参投影负责，不受 LoRA 低秩限制
+- LoRA 回归单一职责（语言适配），优化目标更纯净
+- Backbone 只处理纯 content，序列更短（少 64 个 token）
+
+**风险承认**：state K/V 没有 RoPE，content 对 state 的 attention 是纯内容匹配。这是合理的（state 是外部记忆，不应有位置偏好），但需要训练验证。
 
 ---
 
-## 2. 为什么区分读/写 token？
+## 2. 为什么读写分离？从序列位置到 Q/K/V 角色互换
 
-**决策**：读状态 (Read-State) 放在序列开头，写状态 (Write-State) 放在序列末尾，标准因果 attention。
+**核心原则**：读（从记忆中提取信息）和写（向记忆中写入信息）必须分离，否则信息泄漏。
 
 **设计演化**：
-- 最初设计：所有 state token 无差别放在序列开头，双向 attention。理念是"让模型自己分化"。
-- **致命问题**：双向 attention 导致 state token 在训练时能偷看同一 segment 中的答案（信息泄漏），模型不需要跨 segment 记忆就能正确预测。三次训练全部失败（loss 降低但 state 实际未工作）。
-- **修复**：读写分离 + 标准因果 attention，利用位置的方向性天然防止泄漏。
 
-**为什么这样有效**：
-- Read-State 在最前面 → 因果 attention 让它看不到任何 content → 只能携带旧信息
-- Content 在中间 → 能看到 Read-State（读记忆）+ 之前的 Content（因果思考）
-- Write-State 在最后面 → 能看到所有 → 吸收信息写入新 state
+- **最初设计**：所有 state token 无差别放在序列开头，双向 attention。理念是"让模型自己分化"。
+- **致命问题**：双向 attention 导致 state token 偷看同一 segment 中的答案（信息泄漏），三次训练全部失败。
+- **v1 修复**：读写分离 + 标准因果 attention——Read 在序列头（只携带旧信息），Write 在序列尾（吸收新信息），利用因果方向性防止泄漏。
+- **v2 演进**：读写分离通过 Q/K/V 角色互换实现更优雅的对称性。
 
-**和人脑的类比**：人脑的记忆回忆（读）和记忆编码（写）确实是不同的神经通路。海马的 CA3 做模式补全（读），CA1 做新记忆编码（写）。我们最终也走向了类似的分工。
+**v2 的读写对称**：
 
-**保留的涌现空间**：读/写的大结构是预设的，但每个 token 内部存什么、gate 怎么分化、快慢变量如何涌现，仍然完全由训练决定。
+```
+读: Content(Q)  ×  State(K,V)  →  记忆融入思考    (每层)
+写: State(Q)    ×  Content(K,V) →  信息写入记忆    (最后一层后)
+```
+
+- 读侧：state 提供 K/V（通过 past_key_values），content 的 Q 去查询 → 记忆自然融入每层思考
+- 写侧：state 提供 Q，content 提供 K/V → 从思考中提取要记住的信息
+- Q 和 K/V 角色互换，结构完全对称
+
+**v2 为什么不存在泄漏问题**：State 不在序列中，backbone 只处理纯 content。不存在 state 偷看答案的可能——state 只能通过专用投影参与 attention，读和写在时机和方向上完全分离。
+
+**和人脑的类比**：人脑的记忆回忆（读）和记忆编码（写）确实是不同的神经通路。海马的 CA3 做模式补全（读），CA1 做新记忆编码（写）。v2 的对称 cross-attention 是这种分工的更直接对应。
+
+**保留的涌现空间**：读/写的大结构是预设的，但每个投影学到的匹配模式、gate 怎么决定更新、32 个 slot 如何分工，仍然完全由训练决定。
 
 ---
 
-## 3. 为什么用双层 Gate，而不是单一全局 gate 或纯动态 gate？
+## 3. Gate 设计：从双层 Gate 到纯动态工作记忆刷新器
 
-**决策**：`gate = sigmoid(static_bias + dynamic_projection)`，一个 sigmoid 合并两层。
+**v2 决策**：`gate = sigmoid(gate_proj(cat[state_old, state_new]))`，纯动态决策。
 
 **设计演化过程**：
-1. 最初设计：单一全局 gate → 被质疑"一个变量怎么同时表示长期和短期"
-2. 改为 per-dimension：每个维度有自己的 gate → 可以快慢分化
-3. 但纯静态不够：训练完后 gate 固定，无法根据内容决定"这条信息重要吗"
-4. 加入动态部分：`gate_proj(cat[old, new])` 根据内容调整
 
-**为什么合在一个 sigmoid 里**：
-- 人脑的脑区分化是固定的（海马天生负责短期记忆，皮层天生负责长期），但区域内部"记什么忘什么"是内容决定的
-- `gate_bias`（静态）= 脑区天生倾向 → 训练后固定
-- `gate_proj`（动态）= 区域内的选择性 → 根据每次输入变化
-- 合在一个 sigmoid 里 = 只多一个线性层，没有额外复杂度
-- 静态偏置提供稳定的基础（多时间尺度保证），动态部分提供灵活性（内容敏感）
+1. **最初设计**：单一全局 gate → 被质疑"一个变量怎么同时表示长期和短期"
+2. **v1 双层 Gate**：`sigmoid(static_bias + dynamic_proj)` → 期望 static_bias 涌现快慢维度分化（脑区类比）
+3. **v1 训练发现**：课程全是 16 轮以内的短 episode，没有长短期分化的训练信号。gate_bias 大概率学了近似均匀值，等于没用。State 被迫同时承担工作记忆和长期记忆两个角色，两个都做不好
+4. **v2 简化**：去掉 gate_bias，gate 只做纯动态决策
+
+**为什么 v2 不再需要静态偏置**：
+
+v1 试图让 gate_bias 在 state 内部涌现长短期分化，是因为当时没有 sleep 机制的设计。v2 明确了记忆体系的分层：
+
+- **State（工作记忆）**：gate_proj 管理，随时更新，只管当前对话 = 海马体
+- **MLP（长期记忆）**：sleep 机制固化，缓慢沉淀，跨对话持久 = 皮层
+- gate 只需做好"海马体的刷新控制器"这一个角色
+
+**为什么纯动态就够了**：
+- gate ≈ 1 → 保持（这条信息还有用，别覆盖）
+- gate ≈ 0 → 更新（有新信息要写入）
+- 不需要天生的快慢区分——长期记忆由 sleep/MLP 负责，不是 gate 的事
 
 ---
 
 ## 4. 为什么选小 LLM 做 backbone，而不是从零训练？
 
-**决策**：用现有的小型 LLM（600M~1B 级别）作为冻结 backbone，在上面训练 StatePlugin + LoRA。
+**决策**：用现有的小型 LLM（600M~1B 级别）作为冻结 backbone，在上面训练 StateInterface + LoRA。
 
 **最初计划**：从零训练一个 TinyTransformer（4 层，128 维）。
 
@@ -73,7 +101,7 @@
 - 小 LLM 的语言能力足够验证 state 机制是否有效
 - 16GB GPU 跑 600M 模型轻松
 
-**Backbone 可切换**：StatePlugin 完全独立于 backbone，切换只需改 yaml 配置。当前使用 Qwen3.5 系列 (0.8B / 4B / 9B)。
+**Backbone 可切换**：StateInterface 完全独立于 backbone，切换只需改 yaml 配置。当前使用 Qwen3.5 系列 (0.8B / 4B / 9B)。
 
 ---
 
@@ -81,16 +109,18 @@
 
 **决策**：LoRA 零初始化 + 状态嵌入近零 + 渐进 scale，三层独立保护。
 
-**问题**：往已经能聊天的 LLM 上加一个全新的模块（StatePlugin），如果初始行为不对，可能直接破坏聊天能力（输出乱码）。
+**问题**：往已经能聊天的 LLM 上加一个全新的模块（StateInterface），如果初始行为不对，可能直接破坏聊天能力（输出乱码）。
 
 **三层保护的逻辑**：
 1. **LoRA 零初始化**（B 矩阵全零）：backbone 的 attention 计算 = 原始值 + 0，行为不变
-2. **状态嵌入近零**：即使状态 token 被拼接，它们的值接近零，对 attention 分布的影响极小
-3. **渐进 scale**：`sigmoid(-5.0) ≈ 0.007`，状态 token 被乘以 0.007 后几乎消失
+2. **状态嵌入近零**：state_emb 近零初始化 (std=0.01)，投影输出接近零
+3. **渐进 read_scale**：`sigmoid(-5.0) ≈ 0.007`，注入的 state K/V 几乎消失
+
+**v2 的额外优势**：state 不在序列中，backbone 处理的是纯 content，不存在额外 token 干扰 attention 分布的问题。
 
 **为什么三层而不是一层**：任何单独一层都可能因为初始化随机性而失效。三层独立保护，概率叠乘，几乎不可能同时失效。
 
-**验证**：加完 StatePlugin 后直接聊天，应该和原始 backbone 一模一样。
+**验证**：加完 StateInterface 后直接聊天，应该和原始 backbone 一模一样。
 
 ---
 
@@ -134,59 +164,38 @@
 "早上好！昨天你说想换工作，我想了想..."
 ```
 
-### 6.6 Sleep 的具体设计（M4/M5 实验后更新）
+### 6.6 Sleep 的具体设计
 
-**Memory LoRA**：在 MLP 层（up_proj/down_proj/gate_proj）新增一套 LoRA，零初始化。
-- Transformer 可解释性研究已验证：Attention 层控制信息路由，MLP 层存储事实知识（Knowledge Neurons, ROME/MEMIT）
-- 因此 Skill LoRA（attention 层）教模型"怎么用 state"，Memory LoRA（MLP 层）存"记过什么"
+**Memory MLP**：xinhe 系统内部的专用 MLP 模块（SwiGLU 结构），叠加在 backbone 输出之后。
+- 输出层零初始化 + 渐进 memory_scale → 加上不影响原有行为
+- Sleep 时训练它编码长期记忆，推理时输出叠加到 backbone 结果上
+- v1 曾设计用 Memory LoRA 挂在 backbone MLP 上，但与 v2 "专用模块做专用事"的设计原则不一致——state 路由不靠 LoRA，长期记忆也不应该靠 LoRA
 
-**回放数据**：对话时保存 (state_in, content, labels) 序列。Sleep 时按原始顺序回放，不需要事实提取或模板生成——state 对本身已包含一切信息。
+**State 弱化**：Sleep 时逐步弱化 state KV 注入（read_scale → 0），模型要降低 loss 的唯一方式是靠 Memory MLP。
 
-**State 弱化——迫使记忆转移到权重**：
-- Sleep 回放时逐步弱化 state 输入（100% → 50% → 0%）
-- 模型要降低 loss 的唯一方式是把事实编码进 LoRA 权重
-- 类比：老师收走笔记考试，逼学生把知识记到脑子里
+**学习率**：只有 Memory MLP 更新（lr=1e-4），LoRA 和 StateInterface 完全冻结。
 
-**分层学习率——连续可调的保护策略**：
-```
-Memory LoRA (MLP):     lr = 1e-4  （快速学习记忆）
-Skill LoRA (attention): lr = 1e-6  （极缓慢演化，允许经验积累）
-StatePlugin:            lr = 0     （完全冻结，保护 gate/scale 机制）
-```
-不是非黑即白的冻结，而是通过学习率比例控制各组件的演化速度。Memory LoRA 学得快（记东西），Skill LoRA 几乎不动但保留微弱的经验积累通道，StatePlugin 完全保护以免 state 弱化环境干扰 gate 行为。
+**Replay Buffer**：不清空，持续积累。Sleep 采样 70% 近期 + 30% 历史。
 
-**醒来后的效果**：Memory LoRA 通过残差连接叠加到 backbone 输出上——
-- 新事实（还没 sleep）：靠 state，和以前一样
-- Sleep 过的事实：state + 权重双通道，信号更强更稳
-- State 清空后：权重兜底，仍能回答
-- 不会互相干扰，因为残差连接是加法，不是替换
-
-**Replay Buffer 策略——AI 也做"旧梦"**：
-- Buffer 不在 sleep 后清空，作为长期档案持续积累
-- Sleep 采样：70% 近期 + 30% 历史随机
-- 近期回放学新记忆，历史回放巩固旧知识 + 发现跨时间的关联
-- 经常被回放的旧记忆持续强化，不常出现的自然衰退——遗忘曲线自然涌现
-
-**长期愿景**：
-- State 从"唯一记忆载体"变为"当前对话的工作台"
-- LoRA 权重成为长期记忆的主体
-- Skill 和 Memory 在同一套权重体系中交织演化（通过学习率比例控制节奏）
-- Gate 专注对话内的信息时效管理，不再承担跨对话持久记忆的不可能任务
+**愿景**：
+- State = 当前对话的工作台
+- Memory MLP = 长期记忆的载体
+- Gate 专注对话内的信息时效管理
 
 ---
 
 ## 7. 为什么 .pt 是"灵魂"？
 
-**决策**：保存的 checkpoint 包含 plugin 权重 + LoRA 权重 + state + 对话 buffer，这就是 AI 的全部"自我"。
+**决策**：保存的 checkpoint 包含 StateInterface + Memory MLP + LoRA + state + 对话 buffer，这就是 AI 的全部"自我"。
 
 **本质理解**：
 - 传统 AI：模型是工具，所有实例一样，用完即弃
 - 心核：.pt 是个体，越用越独特，每个都不同
 
 **为什么权重也要变（不只是 state）**：
-- state 是固定容量（32×768），信息论上有硬上限
+- state 是固定容量（32×1024），信息论上有硬上限
 - 如果只靠 state 存记忆，聊久了必然丢失早期信息
-- 权重是另一个存储维度：gate_bias 的分化、gate_proj 的适应，都在编码"这个用户的 AI 应该怎么工作"
+- 权重是另一个存储维度：gate_proj 的适应、read/write 投影的演化，都在编码"这个用户的 AI 应该怎么工作"
 - 类比：state = 你今天记的笔记，权重 = 你记笔记的习惯（习惯也在变化）
 
 **分化过程**：
@@ -273,20 +282,13 @@ StatePlugin:            lr = 0     （完全冻结，保护 gate/scale 机制）
 
 **问题**：sleep 在线学习会不会破坏之前学到的？
 
-**核心防护——分层学习率**：
-- Memory LoRA (MLP) 用较高 lr → 快速记忆，允许变化
-- Skill LoRA (attention) 用极低 lr → 几乎不动，技能被保护
-- StatePlugin lr=0 → 完全冻结
-- 这不是硬冻结，而是连续可调的演化速率控制
+**核心防护——职责隔离**：
+- Sleep 只更新 Memory MLP（专用长期记忆模块）
+- LoRA（语言适配）和 StateInterface（state 读写）完全冻结
+- Memory MLP 是独立残差分支，输出叠加到 backbone 结果上，不修改 backbone 内部权重
 
 **辅助防护**：
 1. **sleep 前保存 checkpoint**：出问题可以回滚
 2. **sanity check**：sleep 后跑几个标准测试，质量下降就回滚
-
-**关于是否冻结 Skill LoRA 的思考**：
-- 人脑的技能和记忆存储在同一套突触权重中，不会"冻结"某些突触
-- 但人脑有回放混合（sleep 时同时回放旧记忆和新记忆）和慢速巩固机制
-- 心核的策略：不做硬冻结，而是通过学习率差异（1e-6 vs 1e-4 = 100 倍差距）实现"软保护"
-- 如果未来验证 Skill LoRA 更新确实有益（经验反哺技能），可以逐步提高其学习率
 
 **本质思考**：适度的"遗忘"不是 bug，是 feature。人也会忘事。关键是忘该忘的（不重要的细节），记该记的（重要的事实和模式）。gate 机制 + sleep 机制的组合就是在学习"什么该忘什么该记"。

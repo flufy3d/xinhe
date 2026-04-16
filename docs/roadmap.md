@@ -5,47 +5,47 @@
 ## 总览
 
 ```
-阶段 A: 基础验证          阶段 B: 记忆涌现          阶段 C: 在线学习
-──────────────          ──────────────          ──────────────
-1. 基线聊天 ✅            3. 1轮记忆 ✅             8. Sleep (Memory LoRA + state弱化回放)
-2. 空状态不破坏 ✅         4. 多轮记忆 ✅             9. 灵魂分化
-                        5. 信息覆写 ✅            10. 消融实验
-                        6. Wipe对比 ✅
-                        7. 时间尺度分化 (进行中)
+v1 架构验证（已完成）:
+  阶段 A: 基础验证 ✅       阶段 B: 记忆涌现 ✅ (0.8B 达到 99%)
+  1. 基线聊天 ✅             3. 1轮记忆 ✅
+  2. 空状态不破坏 ✅          4. 多轮记忆 ✅
+                           5. 信息覆写 ✅
+                           6. Wipe对比 ✅
+  → 4B entity 区分卡在 87%，确认 LoRA 瓶颈 → 触发 v2 架构重设计
 
-基座迁移 (任意阶段完成后可执行):
-  --migrate-from → M0 投影热身 → M1 LoRA 适配 → M2 联合微调 → M3 全能力恢复
+v2 架构验证（进行中）:
+  Phase 1: 0.8B 验证         Phase 2: 4B 验证         Phase 3: 迁移验证
+  ──────────────            ──────────────           ──────────────
+  v2 跑完整 14 阶段课程       4B 从零跑课程             0.8B core → 4B
+  目标: ema_acc 95%+         目标: entity 突破 87%      冻结 core, 重训 proj+LoRA
+  重点: stage 9a/9b          验证扩展瓶颈解决           验证迁移加速收敛
+
+阶段 C: 在线学习（v2 验证后）:
+  8. Sleep (Memory MLP + state弱化回放)
+  9. 灵魂分化
+  10. 消融实验
 ```
 
-**关键发现**：M4 阶段证明了课程学习是训练 state 机制的核心策略。
-详见 `docs/curriculum_learning.md`。
+**关键发现**：
+- 课程学习是训练 state 机制的核心策略（详见 `docs/curriculum_learning.md`）
+- v1 在 4B 上暴露 LoRA 全局共享瓶颈 → v2 用对称 cross-attention + 专用投影解决
 
 **课程三大类**: 基础记忆 (stages 0-13) / 思考泛化 (stage 14) / 基座迁移 (M0-M3)。
-迁移时只携带 plugin core（灵魂），投影层和 LoRA 重新训练。
+迁移时只携带 core（灵魂：state_emb + gate_proj），投影层和 LoRA 重新训练。
 
 ---
 
-## 阶段 A：基础验证
+## 阶段 A：基础验证 ✅ (v1 完成)
 
-### 1. 基线
+### 1. 基线 ✅
 
 **目标**：Backbone 正常加载能聊天
 
-**操作**：
-- 下载预训练权重到 `models/` 目录
-- 加载 QwenBackbone，不加 StatePlugin
-- 直接聊天验证
-
 **通过标准**：对话流畅，回答合理
 
-### 2. 空状态
+### 2. 空状态 ✅
 
-**目标**：加 StatePlugin (scale≈0) 后仍能正常聊天
-
-**操作**：
-- 加载完整 XinheModel（backbone + plugin），不训练
-- state_scale_init = -5.0 → sigmoid ≈ 0.007
-- 直接聊天验证
+**目标**：加 StateInterface (scale≈0) 后仍能正常聊天
 
 **通过标准**：聊天质量与基线无明显差异
 
@@ -55,85 +55,62 @@
 
 ## 阶段 B：记忆涌现
 
-### 3. 1轮记忆
+### v1 验证 ✅ (0.8B 达到 99%)
 
-**目标**：训练后能记住上一轮说的话
+v1 架构在 0.8B 上通过了全部 14 阶段课程：
+- 1轮记忆 ✅、多轮记忆 ✅、信息覆写 ✅、Wipe 对比 ✅
+- 4B 上 entity 区分卡在 87% → 确认 LoRA 瓶颈 → 触发 v2
 
-**操作**：
-- 用多轮对话数据训练（SFT 数据 / 合成记忆数据）
-- 聊天测试："我叫张三" → 下轮问 "我叫什么？"
+### v2 验证（进行中）
 
-**通过标准**：能正确回答上一轮提供的信息
+#### Phase 1: 0.8B 验证
 
-**验证了什么**：state 能在 segment 间传递信息
-
-### 4. 多轮记忆
-
-**目标**：跨多轮保留信息
+**目标**：v2 架构在 0.8B 上跑完整 14 阶段课程
 
 **操作**：
-- 第 1 轮告诉信息
-- 第 5 轮、第 10 轮、第 15 轮分别询问
+- 实现 v2 StateInterface（对称 cross-attention）
+- 从零训练，跑完整课程
 
 **通过标准**：
-- 5 轮后准确率 > 80%
-- 10 轮后准确率 > 50%
-- 测试 retention 曲线（准确率 vs 距离）
+- ema_acc 95%+（至少和 v1 持平）
+- 重点关注 stage 9a/9b（entity 区分）的表现
+- 如果 0.8B 上 v2 不如 v1 → 架构有回归，需排查
 
-**验证了什么**：state + gate 能实现长期保留
+#### Phase 2: 4B 验证
 
-### 5. 信息覆写
-
-**目标**：能更新旧信息
+**目标**：验证 v2 解决了 4B 扩展瓶颈
 
 **操作**：
-- "我在北京" → 几轮后 "我搬到上海了" → 问 "我在哪？"
-
-**通过标准**：回答最新信息（上海），不是旧信息（北京）
-
-**验证了什么**：gate 的动态部分在工作——能根据内容决定覆写
-
-### 6. Wipe 对比
-
-**目标**：证明模型确实依赖状态，而不是靠 backbone 本身"记住"
-
-**操作**：
-- 正常聊天，告诉信息
-- `/wipe` 清除状态
-- 问同样的问题
-
-**通过标准**：wipe 后回答不出来（或明显下降）
-
-**验证了什么**：信息确实存在 state 里，不是巧合
-
-### 7. 时间尺度
-
-**目标**：快慢变量自发涌现
-
-**操作**：
-- 训练完后检查 gate_bias 分布
-- 用线性探针分析各维度存储的信息类型
+- 在 4B 上从零跑课程
 
 **通过标准**：
-- gate_bias 分布呈双峰或多峰（不是单峰）
-- 慢变量维度能解码长期信息（名字、偏好）
-- 快变量维度存储近期信息（最近话题）
+- entity 区分突破 87%
+- 如果成功 → v2 架构验证通过
 
-**验证了什么**：多时间尺度确实从统一结构中涌现
+#### Phase 3: 迁移验证
+
+**目标**：验证 core 参数跨 backbone 迁移
+
+**操作**：
+- 0.8B core（state_emb, gate_proj）迁移到 4B
+- 冻结 core，重训 projections + LoRA
+
+**通过标准**：
+- 迁移比从零训更快收敛
 
 ---
 
 ## 阶段 C：在线学习
 
-### 8. Sleep — Memory LoRA + State 弱化回放
+### 8. Sleep — Memory MLP + State 弱化回放
 
-**目标**：sleep 后对话信息固化进 MLP 权重，state 清空也能回答
+**目标**：sleep 后对话信息固化进 Memory MLP，state 清空也能回答
 
 **架构**：
-- 新增 Memory LoRA 挂在 MLP 层（up/down/gate_proj），零初始化
+- 专用 Memory MLP 叠加在 backbone 输出后（SwiGLU，零初始化）
 - 对话时保存 (state_in, content, labels) 序列到 replay buffer
-- Sleep 时回放序列，逐步弱化 state（100% → 50% → 0%），标准交叉熵 loss
-- 分层学习率：Memory LoRA 1e-4 / Skill LoRA 1e-6 / StatePlugin 冻结
+- Sleep 时回放序列，逐步弱化 state KV 注入（read_scale → 0），标准交叉熵 loss
+- Memory MLP lr=1e-4，LoRA + StateInterface 冻结
 
 **操作**：
 - 聊天一天 → `/sleep`（回放 state 序列，弱化 state，更新 LoRA）
@@ -141,19 +118,18 @@
 - 对比：不 sleep vs sleep 后
 
 **通过标准**：
-- sleep 后 Memory LoRA 权重有变化（weight diff > 0）
+- sleep 后 Memory MLP 权重有变化（weight diff > 0）
 - state 清空后仍能回忆 sleep 过的事实
-- 新事实仍靠 state 正常记忆（不受 Memory LoRA 干扰）
+- 新事实仍靠 state 正常记忆（不受 Memory MLP 干扰）
 
 **Replay Buffer 策略**：
 - Buffer 不在 sleep 后清空，作为长期档案持续积累
 - Sleep 采样：70% 近期对话 + 30% 历史随机采样
-- 混合回放巩固旧记忆 + 发现跨时间关联，防止 Memory LoRA 只记今天忘昨天
+- 混合回放巩固旧记忆 + 发现跨时间关联，防止只记今天忘昨天
 
 **验证了什么**：
-- 记忆从 state 转移到权重的通路有效
-- 残差加法不破坏原有能力
-- 分层学习率保护了 state 读写技能
+- 记忆从 state 转移到 Memory MLP 的通路有效
+- 残差叠加不破坏原有能力
 - 历史混合回放防止旧记忆被覆盖
 
 ### 9. 灵魂分化
@@ -180,13 +156,14 @@
 | 消融项 | 关闭方式 | 预期影响 |
 |--------|---------|---------|
 | state 数量 | n_state: 32→16→8→4 | 对话内 retention 下降 |
-| gate 静态偏置 | gate_bias 全零 | 时间尺度分化消失 |
-| gate 动态部分 | 去掉 gate_proj | 覆写能力下降 |
-| Memory LoRA | 不加 MLP LoRA | 跨天记忆消失，只能靠 state |
-| Skill LoRA | lora_rank: 4→2→0 | backbone 无法学会读写状态 |
-| state 弱化 | sleep 时不弱化 state | Memory LoRA 学不到东西（state 兜底了） |
+| gate 动态部分 | 去掉 gate_proj，固定 gate=0.5 | 覆写能力下降 |
+| read_scale | 固定为 1.0（不渐进） | 训练初期不稳定，可能塌缩 |
+| per-layer projection | 所有层共享一组 K/V 投影 | 层间记忆利用效率下降 |
+| 写侧 cross-attention | 去掉写侧，直接用 content mean 更新 state | state 信息提取精度下降 |
+| LoRA | lora_rank: 4→2→0 | backbone 语言适配能力下降 |
+| Memory MLP | 去掉 Memory MLP | 跨天记忆消失，只能靠 state |
+| state 弱化 | sleep 时不弱化 state | Memory MLP 学不到东西（state 兜底了） |
 | replay 混合比例 | 100% 近期 / 0% 历史 | 旧记忆快速遗忘 |
-| 分层学习率 | Skill LoRA lr 与 Memory LoRA 相同 | 可能破坏 state 读写技能 |
 | TBPTT 窗口 | tbptt_steps: 4→2→1 | 跨 segment 梯度断裂 |
 
 ---
