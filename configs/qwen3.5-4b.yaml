@@ -17,6 +17,6 @@ state:
   state_dim: 1024
 
 lora:
-  rank: 16
-  alpha: 32
+  rank: 8
+  alpha: 16
   target_modules: ["q_proj", "v_proj", "in_proj_qkv", "out_proj"]

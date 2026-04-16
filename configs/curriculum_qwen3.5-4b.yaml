@@ -14,7 +14,13 @@ stage_overrides:
     batch_size: 3          # ep=2, tbptt=2
   1_base_memory:
     batch_size: 3          # ep=4, tbptt=4
-  2_random_tell:
+  2_entity_name:
+    batch_size: 3          # ep=4, tbptt=4
+  3_recall_simple:
+    batch_size: 3          # ep=4, tbptt=4
+  4_random_tell:
     batch_size: 2          # ep=5, tbptt=5
-  3_distance:
+  5_fact3:
+    batch_size: 2          # ep=7, tbptt=7
+  6_entity_multi:
     batch_size: 2          # ep=7, tbptt=7

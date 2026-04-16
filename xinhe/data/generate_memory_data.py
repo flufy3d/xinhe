@@ -570,6 +570,24 @@ DYNAMIC_CONTENT_TEMPLATES = [
     ("我妈做的{v}特别好吃。", "家里做的{v}一定很香！", "food"),
     ("我表妹叫{v}。", "{v}这名字不错！", "name"),
     ("我之前在{v}上过学。", "{v}的学校不错。", "city"),
+    # ── 事实告知风格 ──
+    ("我叫{v}。", "好的，{v}，很高兴认识你！", "name"),
+    ("我住在{v}。", "好的，{v}是个好地方！", "city"),
+    ("我喜欢吃{v}。", "好的，{v}很好吃！", "food"),
+    ("我的职业是{v}。", "好的，你是{v}，记住了。", "job"),
+    ("我的爱好是{v}。", "{v}，不错的爱好！", "hobby"),
+    ("我今年{v}岁。", "好的，你{v}岁了。", "age"),
+    ("我养了一只{v}。", "好的，{v}一定很可爱！", "pet"),
+    ("我的编号是{v}。", "好的，我记住了，你的编号是{v}。", "number"),
+    # ── 事实问答风格 ──
+    ("我叫什么名字？", "你叫{v}。", "name"),
+    ("我住在哪里？", "你住在{v}。", "city"),
+    ("我喜欢吃什么？", "你喜欢吃{v}。", "food"),
+    ("我的职业是什么？", "你的职业是{v}。", "job"),
+    ("我的爱好是什么？", "你的爱好是{v}。", "hobby"),
+    ("我多大了？", "你{v}岁了。", "age"),
+    ("我养了什么宠物？", "你养了{v}。", "pet"),
+    ("我的编号是什么？", "你的编号是{v}。", "number"),
 ]
 
 # 动态内容生成器映射
@@ -996,43 +1014,37 @@ def generate_entity_episode(
 def generate_recall_episode(
     rng: random.Random,
     max_turns: int = 16,
-    fillers: list = None,
     ai_recall_ratio: float = 0.0,
     think_ratio: float = 0.0,
     think_lang: str = "en",
 ) -> list[dict]:
     """
-    生成对话回忆 episode: 几轮闲聊后回忆上一轮内容。
+    生成对话回忆 episode: 全部动态内容，回忆上一轮。
 
-    结构: [闲聊×(N-1)] [动态内容(被回忆)] [回忆提问] [补充闲聊]
+    结构: [动态内容×N] [回忆提问] [补充闲聊]
+    所有前置轮次统一用 generate_dynamic_content()，无 filler/target 结构差异，
+    模型必须每轮都存。回忆目标始终是紧邻的上一轮。
     ai_recall_ratio: 回忆 AI 发言的概率 (0=只回忆 user, 0.5=各半)。
-    think_ratio: 整个 episode 按此概率使用 think 模式。
-    最后一轮使用动态生成内容（随机值注入），确保每 episode 唯一。
     """
-    if fillers is None:
-        fillers = FILLERS
     use_think = think_ratio > 0 and rng.random() < think_ratio
 
     turns = []
 
-    # 前置闲聊 1~4 轮 (固定 filler，不被回忆)
-    num_pre_chat = rng.randint(1, 4)
-    pre_fillers = rng.sample(fillers, min(num_pre_chat, len(fillers)))
-    for filler in pre_fillers:
-        turns.append({"user": filler[0], "assistant": filler[1], "train_loss": False})
+    # 所有前置轮次统一用 dynamic content — 没有 filler/target 区分
+    num_pre_turns = rng.randint(2, min(5, max_turns - 1))
+    for _ in range(num_pre_turns):
+        user_text, asst_text = generate_dynamic_content(rng)
+        turns.append({"user": user_text, "assistant": asst_text, "train_loss": False})
 
-    # 最后一轮: 动态生成内容 (这轮将被回忆)
-    dynamic_user, dynamic_asst = generate_dynamic_content(rng)
-    turns.append({"user": dynamic_user, "assistant": dynamic_asst, "train_loss": False})
-
-    # 选择回忆 user 还是 AI 的发言
+    # recall 最后一轮 — 它和前面的轮次结构完全一致
+    last_turn = turns[-1]
     is_ai_recall = rng.random() < ai_recall_ratio
     if is_ai_recall:
         template = rng.choice(CONV_RECALL_AI_TEMPLATES)
-        recalled_text = dynamic_asst
+        recalled_text = last_turn["assistant"]
     else:
         template = rng.choice(CONV_RECALL_USER_TEMPLATES)
-        recalled_text = dynamic_user
+        recalled_text = last_turn["user"]
 
     user_text = template[0]
     asst_text = template[1].format(v=recalled_text)
@@ -1048,9 +1060,9 @@ def generate_recall_episode(
 
     turns.append(turn)
 
-    # 补充闲聊到 max_turns
+    # 补充到 max_turns（recall 之后用静态 filler 即可）
     while len(turns) < max_turns:
-        filler = rng.choice(fillers)
+        filler = rng.choice(FILLERS)
         turns.append({"user": filler[0], "assistant": filler[1], "train_loss": False})
 
     return turns[:max_turns]
@@ -1152,7 +1164,6 @@ def generate_data(
                 turns = generate_recall_episode(
                     rng,
                     max_turns=max_turns,
-                    fillers=active_fillers,
                     ai_recall_ratio=ai_recall_ratio,
                     think_ratio=think_ratio,
                     think_lang=think_lang,
@@ -1235,7 +1246,7 @@ def main():
                     args.max_turns, args.num_facts, active_fillers, use_pre_filler,
                     args.max_pre_filler, same_category=rng.random() < args.same_category)
             elif args.recall_ratio > 0 and r < args.entity_ratio + args.recall_ratio:
-                ep = generate_recall_episode(rng, args.max_turns, active_fillers)
+                ep = generate_recall_episode(rng, args.max_turns)
             elif overwrite_ratio > 0 and rng.random() < overwrite_ratio:
                 ep = generate_overwrite_episode(rng, args.min_distance, args.max_distance,
                     args.max_turns, active_fillers, use_pre_filler, args.max_pre_filler)

@@ -14,14 +14,19 @@ training_defaults:
   tbptt_steps: 16
   learning_rate: 1.0e-4
   plugin_lr_multiplier: 2.0
-  grad_accum_steps: 2
+  grad_accum_steps: 1
   max_steps: 5000
   early_stop_loss: 0.05
   early_stop_patience: 200
 
 stages:
+  # ================================================================
+  # Phase 1: Bootstrap + 全模式引入 (阶段 0-3)
+  # 用最低难度在前 4 阶段覆盖 fact / entity / recall 三种存储模式
+  # ================================================================
+
   # ── 阶段 0: State 启动 ──
-  # 最简任务: 只有名字, 2轮 (tell→recall), 零噪声, 纯粹训练 state 读写
+  # 最简任务: 只有名字, 2轮 (tell→recall), 零噪声
   - name: "0_state_init"
     data:
       num_train: 10000
@@ -39,7 +44,7 @@ stages:
       max_steps: 3000
 
   # ── 阶段 1: 基础记忆 ──
-  # 加 distance=1 filler
+  # 加 distance=1 filler, 证明跨轮保持
   - name: "1_base_memory"
     data:
       num_train: 10000
@@ -53,10 +58,47 @@ stages:
       tbptt_steps: 4
       learning_rate: 3.0e-4
 
+  # ── 阶段 2: Entity 绑定 (name only) ──
+  # 极早引入 entity: 只记名字, same_category=1.0 迫使靠 entity 区分
+  # 难度≈stage 1, 从"记 1 个名字"变成"记 2 个不同人的名字"
+  - name: "2_entity_name"
+    data:
+      num_train: 10000
+      num_facts: 2
+      entity_ratio: 1.0
+      same_category: 1.0
+      categories: ["name"]
+      no_pre_filler: true
+      no_overwrite: true
+      min_distance: 1
+      max_distance: 1
+      max_turns: 4
+    training:
+      episode_length: 4
+      tbptt_steps: 4
+      learning_rate: 3.0e-4
 
+  # ── 阶段 3: 对话回忆 ──
+  # 极早引入 recall: 全部前置轮用动态内容, 回忆上一轮
+  # 模型学会始终存下上一轮信息 (闲聊/事实告知/问答)
+  - name: "3_recall_simple"
+    data:
+      num_train: 10000
+      recall_ratio: 1.0
+      no_overwrite: true
+      max_turns: 4
+    training:
+      episode_length: 4
+      tbptt_steps: 4
+      learning_rate: 3.0e-4
 
-  # ── 阶段 2: 随机 tell 位置 ──
-  - name: "2_random_tell"
+  # ================================================================
+  # Phase 2: 空间扩展 (阶段 4-7)
+  # 增加 fact 数量, 多类别 entity, 三模式混合
+  # ================================================================
+
+  # ── 阶段 4: 随机 tell 位置 ──
+  - name: "4_random_tell"
     data:
       num_train: 10000
       num_fillers: 16
@@ -69,13 +111,11 @@ stages:
       episode_length: 5
       tbptt_steps: 5
 
-
-
-  # ── 阶段 3: 增大距离 ──
-  - name: "3_distance"
+  # ── 阶段 5: 3 类事实 + distance ──
+  - name: "5_fact3"
     data:
       num_train: 10000
-      num_fillers: 16
+      num_facts: 3
       max_pre_filler: 1
       no_overwrite: true
       min_distance: 1
@@ -85,33 +125,41 @@ stages:
       episode_length: 7
       tbptt_steps: 7
 
-
-
-  # ── 阶段 4: 完整多轮记忆 ──
-  - name: "4_full_m4"
-    data:
-      num_train: 10000
-      max_pre_filler: 2
-      no_overwrite: true
-      min_distance: 1
-      max_distance: 10
-      max_turns: 16
-
-
-  # ── 阶段 5: 3 类事实 ──
-  - name: "5_fact3"
+  # ── 阶段 6: Entity 多类别 ──
+  # 不同实体不同类别, 学习 entity→类别 绑定
+  - name: "6_entity_multi"
     data:
       num_train: 10000
       num_facts: 3
-      max_pre_filler: 2
+      entity_ratio: 0.5
+      same_category: 0.0
+      no_overwrite: true
+      min_distance: 1
+      max_distance: 3
+      max_turns: 7
+    training:
+      episode_length: 7
+      tbptt_steps: 7
+
+  # ── 阶段 7: 三模式混合巩固 ──
+  # fact + entity + recall 首次全混合, 巩固三种存储模式
+  - name: "7_space_mix"
+    data:
+      num_train: 10000
+      num_facts: 3
+      entity_ratio: 0.3
+      recall_ratio: 0.3
       no_overwrite: true
       min_distance: 1
       max_distance: 5
       max_turns: 16
 
+  # ================================================================
+  # Phase 3: 难度提升 (阶段 8-11)
+  # ================================================================
 
-  # ── 阶段 6: 5 类事实 ──
-  - name: "6_fact5"
+  # ── 阶段 8: 5 类事实 ──
+  - name: "8_fact5"
     data:
       num_train: 10000
       num_facts: 5
@@ -121,45 +169,9 @@ stages:
       max_distance: 5
       max_turns: 16
 
-
-  # ── 阶段 7: 8 类事实 ──
-  - name: "7_fact8"
-    data:
-      num_train: 10000
-      num_facts: 8
-      max_pre_filler: 2
-      no_overwrite: true
-      min_distance: 1
-      max_distance: 10
-      max_turns: 16
-
-  # ── 阶段 8: 覆写能力 ──
-  - name: "8_overwrite"
-    data:
-      num_train: 10000
-      num_facts: 8
-      max_pre_filler: 2
-      overwrite_ratio: 0.4
-      min_distance: 1
-      max_distance: 10
-      max_turns: 16
-
-  # ── 阶段 9a: 实体区分 (不同类别) ──
-  # 先学 entity 概念: 不同实体不同类别, 只需绑定实体→类别
-  - name: "9a_entity"
-    data:
-      num_train: 10000
-      num_facts: 3
-      entity_ratio: 0.5
-      same_category: 0.0
-      no_overwrite: true
-      min_distance: 1
-      max_distance: 5
-      max_turns: 16
-
-  # ── 阶段 9b: 实体区分 (同类别绑定) ──
-  # 再学同类别绑定: 3 个实体都是 city/number, 必须精确绑 entity→value
-  - name: "9b_entity_same"
+  # ── 阶段 9: Entity 同类别绑定 ──
+  # 必须精确绑 entity→value, 不能靠类别区分
+  - name: "9_entity_same"
     data:
       num_train: 10000
       num_facts: 3
@@ -170,17 +182,34 @@ stages:
       max_distance: 5
       max_turns: 16
 
-  # ── 阶段 10: 对话回忆 ──
-  - name: "10_recall"
+  # ── 阶段 10: 8 类事实 + 长距离 ──
+  - name: "10_fact8_distance"
     data:
       num_train: 10000
-      recall_ratio: 0.5
-      entity_ratio: 0.2
+      num_facts: 8
+      max_pre_filler: 2
       no_overwrite: true
+      min_distance: 1
+      max_distance: 10
       max_turns: 16
 
-  # ── 阶段 11: 回忆 AI 发言 ──
-  - name: "11_recall_ai"
+  # ── 阶段 11: 覆写能力 ──
+  - name: "11_overwrite"
+    data:
+      num_train: 10000
+      num_facts: 8
+      max_pre_filler: 2
+      overwrite_ratio: 0.4
+      min_distance: 1
+      max_distance: 10
+      max_turns: 16
+
+  # ================================================================
+  # Phase 4: Recall 精细化 + 全混合 (阶段 12-14)
+  # ================================================================
+
+  # ── 阶段 12: 回忆 AI 发言 ──
+  - name: "12_recall_ai"
     data:
       num_train: 10000
       recall_ratio: 0.5
@@ -189,8 +218,8 @@ stages:
       no_overwrite: true
       max_turns: 16
 
-  # ── 阶段 12: 混合回忆 ──
-  - name: "12_recall_mix"
+  # ── 阶段 13: 混合回忆 ──
+  - name: "13_recall_mix"
     data:
       num_train: 10000
       recall_ratio: 0.5
@@ -199,8 +228,8 @@ stages:
       no_overwrite: true
       max_turns: 16
 
-  # ── 阶段 13: 全能力混合 ──
-  - name: "13_all"
+  # ── 阶段 14: 全能力混合 ──
+  - name: "14_all"
     data:
       num_train: 10000
       num_facts: 5
