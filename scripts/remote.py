@@ -20,12 +20,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # ── 配置 ────────────────────────────────────────────────────
 
-def load_env():
-    """从 .env 读取配置，返回 dict。"""
-    env_path = PROJECT_ROOT / ".env"
+def load_env(env_file=".env"):
+    """从指定 env 文件读取配置，返回 dict。"""
+    env_path = Path(env_file)
+    if not env_path.is_absolute():
+        env_path = PROJECT_ROOT / env_path
     if not env_path.exists():
         print(f"错误: 找不到配置文件 {env_path}")
-        print(f"请复制 .env.example 为 .env 并填写实际值")
+        print(f"请复制 .env.example 为 {env_path.name} 并填写实际值")
         sys.exit(1)
     cfg = {}
     for line in env_path.read_text(encoding="utf-8").splitlines():
@@ -37,9 +39,9 @@ def load_env():
     return cfg
 
 
-def get_config():
+def get_config(env_file=".env"):
     """返回 (host, port, remote_dir, models) 配置。"""
-    cfg = load_env()
+    cfg = load_env(env_file)
     host = cfg.get("REMOTE_HOST")
     port = cfg.get("REMOTE_PORT", "22")
     remote_dir = cfg.get("REMOTE_DIR", "/root/workspace/xinhe")
@@ -80,7 +82,7 @@ def run(cmd, check=True, verbose=False, **kwargs):
 # ── deploy ──────────────────────────────────────────────────
 
 def cmd_deploy(args):
-    host, port, remote_dir, models = get_config()
+    host, port, remote_dir, models = get_config(args.env)
 
     print("=" * 54)
     print(f"  目标: {host}:{port}")
@@ -182,7 +184,7 @@ def _normalize(path_str):
 
 
 def cmd_upload(args):
-    host, port, remote_dir, _ = get_config()
+    host, port, remote_dir, _ = get_config(args.env)
 
     for raw in args.paths:
         path_str = _normalize(raw)
@@ -221,7 +223,7 @@ def cmd_upload(args):
 # ── download ────────────────────────────────────────────────
 
 def cmd_download(args):
-    host, port, remote_dir, _ = get_config()
+    host, port, remote_dir, _ = get_config(args.env)
 
     for raw in args.paths:
         path_str = _normalize(raw)
@@ -250,7 +252,7 @@ def cmd_download(args):
 # ── ssh ─────────────────────────────────────────────────────
 
 def cmd_ssh(args):
-    host, port, _, _ = get_config()
+    host, port, _, _ = get_config(args.env)
     result = subprocess.run(["ssh", "-p", port] + ssh_opts() + [host])
     sys.exit(result.returncode)
 
@@ -258,7 +260,7 @@ def cmd_ssh(args):
 # ── run ─────────────────────────────────────────────────────
 
 def cmd_run(args):
-    host, port, remote_dir, _ = get_config()
+    host, port, remote_dir, _ = get_config(args.env)
     command = " ".join(args.command).replace("\\", "/")
     result = run(
         ssh_base(host, port) + [f"cd {remote_dir} && {command}"],
@@ -274,7 +276,7 @@ LOG_FILE = "train.log"
 
 
 def cmd_start(args):
-    host, port, remote_dir, _ = get_config()
+    host, port, remote_dir, _ = get_config(args.env)
     command = " ".join(args.command).replace("\\", "/")
 
     # 检查是否已有进程在跑
@@ -312,7 +314,7 @@ def cmd_start(args):
 # ── logs ────────────────────────────────────────────────────
 
 def cmd_logs(args):
-    host, port, remote_dir, _ = get_config()
+    host, port, remote_dir, _ = get_config(args.env)
     log_path = f"{remote_dir}/{LOG_FILE}"
 
     if args.follow:
@@ -333,7 +335,7 @@ def cmd_logs(args):
 # ── stop ────────────────────────────────────────────────────
 
 def cmd_stop(args):
-    host, port, remote_dir, _ = get_config()
+    host, port, remote_dir, _ = get_config(args.env)
     pid_path = f"{remote_dir}/{PID_FILE}"
 
     # 读取 pid 并检查是否存活
@@ -362,6 +364,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="配置: 项目根目录 .env 文件（参考 .env.example）",
     )
+    parser.add_argument("--env", default=".env",
+                        help="配置文件路径（默认 .env，可用 .env.4b 等切换多台远端）")
     sub = parser.add_subparsers(dest="cmd", title="子命令")
 
     sub.add_parser("deploy", help="幂等部署（同步代码、模型链接、依赖）").set_defaults(func=cmd_deploy)
