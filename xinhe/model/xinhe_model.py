@@ -91,6 +91,8 @@ class XinheModel(nn.Module):
         state_kv = self.state_interface.generate_read_kv(state)
 
         # 3. 构建 layer_hook: 每层之前执行 state cross-attention
+        #    torch.compiler.disable 避免 dynamo 对每个 layer_idx 重复编译
+        @torch.compiler.disable
         def state_read_hook(hidden_states, layer_idx):
             return self.state_interface.read_layer(hidden_states, state_kv[layer_idx])
 
