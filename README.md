@@ -10,14 +10,14 @@
 
 ## 核心思路
 
-把 **持久状态** 通过对称的 cross-attention 接入 transformer：读是 Content(Q) × State(K,V)，写是 State(Q) × Content(K,V)。利用 HuggingFace `past_key_values` 标准 API 注入每层 attention cache，零侵入 backbone 内部。
+把 **持久状态** 通过对称的 cross-attention 接入 transformer：读是 Content(Q) × State(K,V)，写是 State(Q) × Content(K,V)。通过 `layer_hook` 回调在每层 backbone 之前执行显式 cross-attention，零侵入 backbone 内部。
 
 ```
 state_old
-  ├── 读: state → 专用 K/V 投影 → 注入每层 KV-Cache
+  ├── 读: state → 专用 K/V 投影 → layer_hook cross-attention
   │                                  ↓
-  │   [Content(T)] → backbone 32 层 → content_final → logits
-  │                  (每层 attend 到 state K/V)
+  │   [Content(T)] → backbone 各层 → content_final → logits
+  │                  (hook 层前 attend 到 state K/V)
   │
   └── 写: state → 专用 Q 投影 → attend to content_final
                                      ↓

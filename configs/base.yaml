@@ -11,7 +11,7 @@ backbone:
   hidden_size: 1024
   freeze: true
 
-# --- StatePlugin ---
+# --- StateInterface ---
 state:
   n_state: 32
   state_dim: 1024

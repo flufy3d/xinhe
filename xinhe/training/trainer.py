@@ -4,7 +4,7 @@ Trainer — 训练循环
 核心特性:
 - state 跨 segment (对话轮次) 传递
 - 截断 BPTT: 每 tbptt_steps 轮做 detach + backward + step
-- 只训练 StatePlugin + LoRA 参数
+- 只训练 StateInterface + LoRA 参数
 """
 import math
 import time
@@ -348,7 +348,7 @@ class Trainer:
         save_dir = Path(path).parent
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        # 收集 StatePlugin 和 LoRA 的 state_dict
+        # 收集 StateInterface 和 LoRA 的 state_dict
         plugin_state = self.model.state_interface.state_dict()
 
         # LoRA 参数

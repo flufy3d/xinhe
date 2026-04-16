@@ -339,9 +339,9 @@ Think 课程为 Sleep 打基础：
 
 ## 架构注意事项
 
-- Think token 在 content 区间内，天然可通过 causal attention 读到 read state token
-- Think token 不会写 state（write token 在序列末尾，think 在中间）
-- 不需要修改 StatePlugin 架构
+- Think token 在 content 区间内，通过 layer_hook cross-attention 读取 state
+- Think token 参与 backbone forward，state 通过 write_from_content 在最后更新
+- 不需要修改 StateInterface 架构
 - 训练时 think 部分计算 loss（这是要学的核心内容）
 
 ## 时间估算
