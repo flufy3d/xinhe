@@ -15,8 +15,8 @@ training_defaults:
   tbptt_steps: 16
   learning_rate: 1.0e-4
   # 冻结整个 StatePlugin: think 模板大变样，防止破坏 state 读写能力
-  freeze_plugin_core: true       # 冻结核心 (gate_bias/gate_proj 等)
-  plugin_lr_multiplier: 0.0     # 冻结投影层 (proj_up/proj_down)
+  freeze_plugin_core: true       # 冻结核心 (state_emb/gate_proj)
+  plugin_lr_multiplier: 0.0     # 冻结投影层 (read/write projections)
   # 只训 LoRA: 学会从 state 推理 + 生成 think 格式
   grad_accum_steps: 2
   max_steps: 5000

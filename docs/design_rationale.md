@@ -17,11 +17,13 @@
 
 **v1 暴露的问题**：4B 上 entity 区分卡在 87%。根因是 LoRA 全局共享——state token 和 content token 共享同一组 LoRA 的 K/V 投影，LoRA 被迫同时做语言适配、state 读路由、state 写路由三件事，低秩参数里三个目标互相冲突。小模型能 hack 过去，大模型不行。
 
-**v2 决策**：state 从序列中移出，通过 `past_key_values` API 注入每层 attention cache，用专用全参投影生成 K/V。
+**v2 决策**：state 从序列中移出，通过 `layer_hook` 回调在每层之前执行显式 cross-attention，用专用全参投影生成 K/V。
+
+**为什么不用 past_key_values**：Qwen3.5 是混合架构（DeltaNet 线性 attention + full attention 交替），DeltaNet 层使用 conv_state + recurrent_state，不支持 K/V cache 注入。layer_hook 对两种层类型统一生效。
 
 **为什么 v2 仍然"零侵入 backbone"**：
-- `past_key_values` 是 HuggingFace transformer 的标准 API，不需要修改 backbone 内部代码
-- 唯一改动是 `forward_blocks` 多传一个参数
+- `layer_hook` 是 `forward_blocks` 的回调参数，backbone 层的内部代码不变
+- 唯一改动是 `forward_blocks` 循环中加一行 hook 调用
 - 设计哲学一脉相承：利用已有机制，不造新的架构原语
 
 **v2 解决了什么**：
@@ -51,7 +53,7 @@
 写: State(Q)    ×  Content(K,V) →  信息写入记忆    (最后一层后)
 ```
 
-- 读侧：state 提供 K/V（通过 past_key_values），content 的 Q 去查询 → 记忆自然融入每层思考
+- 读侧：state 提供 K/V（通过 layer_hook cross-attention），content 去查询 → 记忆自然融入每层思考
 - 写侧：state 提供 Q，content 提供 K/V → 从思考中提取要记住的信息
 - Q 和 K/V 角色互换，结构完全对称
 

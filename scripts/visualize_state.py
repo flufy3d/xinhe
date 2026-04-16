@@ -3,9 +3,8 @@
 
 生成:
 1. 状态热力图 (维度 × 时间)
-2. Gate bias 分布直方图
-3. 状态 PCA 轨迹
-4. 有效秩随时间变化
+2. 状态 PCA 轨迹
+3. 有效秩随时间变化
 """
 import argparse
 import sys
@@ -22,37 +21,6 @@ sys.path.insert(0, str(project_root))
 # 支持中文显示
 rcParams['font.sans-serif'] = ['SimHei', 'Arial Unicode MS', 'DejaVu Sans']
 rcParams['axes.unicode_minus'] = False
-
-
-def plot_gate_distribution(model, save_path: str = "figures/gate_distribution.png"):
-    """绘制 gate bias 分布图"""
-    gate_values = torch.sigmoid(model.plugin.gate_bias).detach().cpu().numpy()
-
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-
-    # 每个 state token 的平均 gate 值
-    mean_gates = gate_values.mean(axis=1)
-    axes[0].bar(range(len(mean_gates)), mean_gates, color='steelblue')
-    axes[0].axhline(y=0.5, color='red', linestyle='--', alpha=0.5)
-    axes[0].axhline(y=0.7, color='orange', linestyle='--', alpha=0.5, label='慢区阈值')
-    axes[0].axhline(y=0.3, color='green', linestyle='--', alpha=0.5, label='快区阈值')
-    axes[0].set_xlabel('状态 token 编号')
-    axes[0].set_ylabel('平均 gate 值')
-    axes[0].set_title('每个状态 token 的平均 gate (高=慢区, 低=快区)')
-    axes[0].legend()
-
-    # gate 值分布直方图
-    axes[1].hist(gate_values.flatten(), bins=50, color='steelblue', alpha=0.7)
-    axes[1].set_xlabel('gate 值')
-    axes[1].set_ylabel('频次')
-    axes[1].set_title('全部 gate 值分布')
-    axes[1].axvline(x=0.5, color='red', linestyle='--', alpha=0.5)
-
-    plt.tight_layout()
-    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"  gate 分布图已保存: {save_path}")
 
 
 def plot_state_heatmap(state_history: list[torch.Tensor], save_path: str = "figures/state_heatmap.png"):
@@ -133,14 +101,11 @@ def main():
 
     model = XinheModel(config)
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
-    model.plugin.load_state_dict(checkpoint["plugin_state"])
+    model.state_interface.load_state_dict(checkpoint["plugin_state"], strict=False)
     model.to(device)
     model.eval()
 
     print("=== 心核 状态可视化 ===")
-
-    # Gate 分布
-    plot_gate_distribution(model, f"{args.output_dir}/gate_distribution.png")
 
     # 生成状态历史 (用合成对话)
     print("  生成状态历史...")

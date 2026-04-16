@@ -1,8 +1,8 @@
 """
 XinheModel — 顶层模型
 
-组合 backbone + StatePlugin，实现:
-- 带持久状态的 forward pass
+组合 backbone + StateInterface，实现:
+- 带持久状态的 forward pass（通过 layer_hook 注入 state）
 - 带状态的文本生成
 - Burn-in 初始化
 """
@@ -13,16 +13,16 @@ from typing import Optional
 
 from .config import XinheConfig
 from .backbone import BackboneBase
-from .state_plugin import StatePlugin
+from .state_plugin import StateInterface
 from .lora import inject_lora, get_lora_params
 
 
 class XinheModel(nn.Module):
     """
-    心核模型: Backbone + StatePlugin
+    心核模型: Backbone + StateInterface
 
     前向传播:
-        embed → plugin.inject → backbone.forward_blocks → plugin.extract_and_update → logits + state
+        embed → generate_read_kv → backbone.forward_blocks(layer_hook=state_read) → write_from_content → logits + state
     """
 
     def __init__(self, config: XinheConfig, backbone: Optional[BackboneBase] = None):
@@ -46,13 +46,14 @@ class XinheModel(nn.Module):
                 dropout=config.lora_dropout,
             )
 
-        # StatePlugin
-        self.plugin = StatePlugin(
+        # StateInterface (v2: 对称 cross-attention)
+        n_layers = self.backbone.get_num_layers()
+        self.state_interface = StateInterface(
             n_state=config.n_state,
             state_dim=config.state_dim,
             hidden_size=config.hidden_size,
+            n_layers=n_layers,
             state_scale_init=config.state_scale_init,
-            gate_bias_init=config.gate_bias_init,
         )
 
         # LM head (复用 backbone 的)
@@ -80,33 +81,50 @@ class XinheModel(nn.Module):
                 state_next: (B, n_state, D)
                 loss: scalar (如果提供了 labels)
         """
+        B, T = input_ids.shape
+        device = input_ids.device
+
         # 1. 嵌入内容 token
         content_emb = self.backbone.embed(input_ids)  # (B, T, D)
 
-        # 2. 注入状态 (自动检测 padding)
-        content_mask = (input_ids != pad_token_id) if pad_token_id is not None else None
-        hidden_states, mask = self.plugin.inject(state, content_emb, content_mask=content_mask)
+        # 2. 读侧: 生成每层 state K/V
+        state_kv = self.state_interface.generate_read_kv(state)
 
-        # 2.5 构建 position_ids: state=0, content=0..T-1, state=0
-        n = self.plugin.n_state
-        T = input_ids.shape[1]
-        device = hidden_states.device
-        position_ids = torch.cat([
-            torch.zeros(n, dtype=torch.long, device=device),
-            torch.arange(T, dtype=torch.long, device=device),
-            torch.zeros(n, dtype=torch.long, device=device),
-        ]).unsqueeze(0)
+        # 3. 构建 layer_hook: 每层之前执行 state cross-attention
+        def state_read_hook(hidden_states, layer_idx):
+            return self.state_interface.read_layer(hidden_states, state_kv[layer_idx])
 
-        # 3. Transformer forward
-        output = self.backbone.forward_blocks(hidden_states, attention_mask=mask, position_ids=position_ids)
+        # 4. 标准因果 mask（只有 content，无 state token）
+        causal = torch.triu(
+            torch.full((T, T), float("-inf"), device=device, dtype=content_emb.dtype),
+            diagonal=1,
+        )  # (T, T)
 
-        # 4. 提取新状态 + gate 更新（多卡时将输出移回 plugin 所在设备）
-        plugin_device = next(self.plugin.parameters()).device
-        output = output.to(plugin_device)
-        state = state.to(plugin_device)
-        content_output, state_next = self.plugin.extract_and_update(output, state)
+        if pad_token_id is not None:
+            padding_mask = (input_ids != pad_token_id)  # (B, T) True=真实 token
+            # padding 列设为 -inf
+            pad_col = torch.zeros(B, 1, T, device=device, dtype=content_emb.dtype)
+            pad_col.masked_fill_(~padding_mask.unsqueeze(1), float("-inf"))
+            mask = causal.unsqueeze(0).unsqueeze(0) + pad_col.unsqueeze(2)  # (B, 1, T, T)
+        else:
+            mask = causal.unsqueeze(0).unsqueeze(0)  # (1, 1, T, T)
 
-        # 5. 计算 logits (只对内容部分)
+        # 5. Position IDs: 简单 0..T-1
+        position_ids = torch.arange(T, dtype=torch.long, device=device).unsqueeze(0)
+
+        # 6. Backbone forward（通过 layer_hook 注入 state）
+        content_output = self.backbone.forward_blocks(
+            content_emb, attention_mask=mask, position_ids=position_ids,
+            layer_hook=state_read_hook,
+        )
+
+        # 7. 写侧: 从 content 提取信息更新 state（多卡时移回 state_interface 所在设备）
+        interface_device = next(self.state_interface.parameters()).device
+        content_output = content_output.to(interface_device)
+        state = state.to(interface_device)
+        state_next = self.state_interface.write_from_content(state, content_output)
+
+        # 8. 计算 logits (只对内容部分)
         logits = self.lm_head(content_output)  # (B, T, V)
 
         result = {
@@ -114,7 +132,7 @@ class XinheModel(nn.Module):
             "state_next": state_next,
         }
 
-        # 6. 计算 loss (如果有 labels)
+        # 9. 计算 loss (如果有 labels)
         if labels is not None:
             # 标准 next-token prediction: logits[:, :-1] vs labels[:, 1:]
             shift_logits = logits[:, :-1, :].contiguous()
@@ -144,17 +162,17 @@ class XinheModel(nn.Module):
     def setup_device(self, device: torch.device):
         """
         单卡: 整个模型移到 device。
-        多卡: backbone 已由 device_map 分配，只移 plugin。
+        多卡: backbone 已由 device_map 分配，只移 state_interface。
         """
         if torch.cuda.device_count() > 1:
-            self.plugin.to(device)
+            self.state_interface.to(device)
         else:
             self.to(device)
 
     def init_state(self, batch_size: int = 1) -> torch.Tensor:
         """创建空白初始状态"""
         device = next(self.parameters()).device
-        return self.plugin.blank_state(batch_size, device=device)
+        return self.state_interface.blank_state(batch_size, device=device)
 
     @torch.no_grad()
     def burn_in(self, token_ids_list: list[torch.Tensor], batch_size: int = 1) -> torch.Tensor:
@@ -262,11 +280,11 @@ class XinheModel(nn.Module):
         return generated, state_next
 
     def get_trainable_params(self) -> list[nn.Parameter]:
-        """收集所有可训练参数 (StatePlugin + LoRA)"""
+        """收集所有可训练参数 (StateInterface + LoRA)"""
         params = []
 
-        # StatePlugin 参数
-        for param in self.plugin.parameters():
+        # StateInterface 参数
+        for param in self.state_interface.parameters():
             if param.requires_grad:
                 params.append(param)
 
@@ -286,4 +304,4 @@ class XinheModel(nn.Module):
 
     def state_stats(self, state: torch.Tensor) -> dict:
         """获取状态分析统计"""
-        return self.plugin.get_state_stats(state)
+        return self.state_interface.get_state_stats(state)

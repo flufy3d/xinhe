@@ -84,12 +84,12 @@ class Trainer:
             p.requires_grad = not freeze_lora
         # Plugin core 冻结 (迁移时只训 proj + LoRA)
         if getattr(config, "freeze_plugin_core", False):
-            self.model.plugin.freeze_core()
+            self.model.state_interface.freeze_core()
         else:
-            self.model.plugin.unfreeze_core()
+            self.model.state_interface.unfreeze_core()
         # Plugin projection 冻结 (plugin_lr_multiplier=0 时，think 课程用)
         freeze_proj = getattr(config, "plugin_lr_multiplier", 1.0) == 0
-        for p in self.model.plugin.projection_parameters():
+        for p in self.model.state_interface.projection_parameters():
             p.requires_grad = not freeze_proj
 
     def _build_optimizer(self, config: XinheConfig) -> torch.optim.AdamW:
@@ -98,8 +98,8 @@ class Trainer:
         plugin_mult = getattr(config, "plugin_lr_multiplier", 1.0)
         core_mult = getattr(config, "plugin_core_lr_multiplier", 1.0)
 
-        core_params = [p for p in self.model.plugin.core_parameters() if p.requires_grad]
-        proj_params = [p for p in self.model.plugin.projection_parameters() if p.requires_grad]
+        core_params = [p for p in self.model.state_interface.core_parameters() if p.requires_grad]
+        proj_params = [p for p in self.model.state_interface.projection_parameters() if p.requires_grad]
 
         param_groups = []
         if core_params:
@@ -162,7 +162,7 @@ class Trainer:
                 val_loss = self._validate()
                 print(f"[Epoch {epoch}] val_loss={val_loss:.4f}")
 
-        scale = torch.sigmoid(self.model.plugin.state_scale).item()
+        scale = torch.sigmoid(self.model.state_interface.read_scale).item()
         if self._early_stopped:
             print(f"训练已收敛, 共 {self.global_step} 步, scale={scale:.4f}")
         else:
@@ -296,7 +296,7 @@ class Trainer:
 
         if self.global_step % self.config.log_every == 0:
             lr = self.scheduler.get_last_lr()[0]
-            scale = torch.sigmoid(self.model.plugin.state_scale).item()
+            scale = torch.sigmoid(self.model.state_interface.read_scale).item()
             print(f"  [Step {self.global_step}] loss={last_loss:.6f} acc={last_acc:.2%} ema_loss={self._ema_loss:.4f} ema_acc={self._ema_acc:.2%} lr={lr:.2e} scale={scale:.4f}")
 
         if self.global_step % self.config.save_every == 0:
@@ -349,7 +349,7 @@ class Trainer:
         save_dir.mkdir(parents=True, exist_ok=True)
 
         # 收集 StatePlugin 和 LoRA 的 state_dict
-        plugin_state = self.model.plugin.state_dict()
+        plugin_state = self.model.state_interface.state_dict()
 
         # LoRA 参数
         lora_state = {}
@@ -376,7 +376,7 @@ class Trainer:
         """加载 checkpoint"""
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
 
-        result = self.model.plugin.load_state_dict(checkpoint["plugin_state"], strict=False)
+        result = self.model.state_interface.load_state_dict(checkpoint["plugin_state"], strict=False)
         if result.missing_keys:
             print(f"  注意: checkpoint 缺少 {result.missing_keys}，使用默认初始化")
         self.global_step = checkpoint["global_step"]

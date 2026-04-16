@@ -27,7 +27,7 @@ def load_model_and_tokenizer(config, checkpoint_path, device):
     if checkpoint_path:
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         try:
-            result = model.plugin.load_state_dict(checkpoint["plugin_state"], strict=False)
+            result = model.state_interface.load_state_dict(checkpoint["plugin_state"], strict=False)
             if result.missing_keys:
                 print(f"  注意: checkpoint 缺少 {result.missing_keys}，使用默认初始化")
         except RuntimeError as e:

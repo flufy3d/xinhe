@@ -50,6 +50,7 @@ class QwenBackbone(nn.Module, BackboneBase):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
+        layer_hook: Optional[callable] = None,
     ) -> torch.Tensor:
         # Qwen 使用 RoPE，需要构建 position embeddings
         seq_len = hidden_states.shape[1]
@@ -59,7 +60,11 @@ class QwenBackbone(nn.Module, BackboneBase):
         position_embeddings = self.model.model.rotary_emb(hidden_states, position_ids)
 
         # 逐层跑 transformer blocks（多卡时跟随 layer 设备移动）
-        for layer in self.model.model.layers:
+        for layer_idx, layer in enumerate(self.model.model.layers):
+            # State read hook（在 backbone 层之前，checkpoint 之外）
+            if layer_hook is not None:
+                hidden_states = layer_hook(hidden_states, layer_idx)
+
             layer_device = next(layer.parameters()).device
             hidden_states = hidden_states.to(layer_device)
             if attention_mask is not None:
@@ -97,3 +102,6 @@ class QwenBackbone(nn.Module, BackboneBase):
 
     def get_hidden_size(self) -> int:
         return self._hidden_size
+
+    def get_num_layers(self) -> int:
+        return len(self.model.model.layers)

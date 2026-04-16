@@ -1,42 +1,33 @@
 """
-StatePlugin — 可插拔的持久状态机制 (读写分离架构)
+StateInterface — 对称 Cross-Attention 状态机制 (v2)
 
 核心设计:
-- 读状态 (Read-State) 放在序列开头: 携带上一轮的记忆，content 通过因果 attention 读取
-- 写状态 (Write-State) 放在序列末尾: 通过因果 attention 吸收当前 segment 全部信息
-- 标准因果 attention 自然防止信息泄漏: content 只能从旧 state 读，不能偷看当前答案
-- 双层 Gate: 静态偏置 (脑区分化) + 动态投影 (内容选择)
-- 渐进 scale: 控制 state token 的影响力
-- 维度解耦: state_dim 可独立于 backbone hidden_size，通过投影层桥接
-
-序列结构: [Read-State(旧) | Content | Write-State(新)]
-- Read-State 只看到自己 → 携带旧记忆
-- Content 看到 Read-State + 之前的 Content → 记忆融入思考
-- Write-State 看到所有 → 吸收当前 segment 信息供下一轮使用
+- 读侧: 每层 backbone 之前，content 通过 cross-attention 读取 state K/V（专用全参投影）
+- 写侧: backbone 输出后，state 通过 cross-attention 从 content 提取信息
+- 对称性: 读是 Content(Q) × State(K,V)，写是 State(Q) × Content(K,V)
+- Gate: 纯动态决策，控制 state 更新
+- State 不在序列中，backbone 只处理纯 content
+- 通过 layer_hook 回调注入，对 DeltaNet/full attention 统一生效
 """
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 # 参数分类: Core 是灵魂 (backbone-agnostic), Projection 是身体适配 (backbone-specific)
-CORE_PARAM_PREFIXES = (
-    "state_emb", "read_pos", "write_pos", "write_emb",
-    "state_scale", "gate_bias", "gate_proj", "state_out_proj",
-)
-PROJECTION_PARAM_PREFIXES = ("proj_up", "proj_down")
+CORE_PARAM_PREFIXES = ("state_emb", "gate_proj")
+PROJECTION_PARAM_PREFIXES = ("read_k_projs", "read_v_projs", "read_scale", "write_q", "write_out")
 
 
-class StatePlugin(nn.Module):
+class StateInterface(nn.Module):
     """
-    持久状态管理器 (读写分离)。
+    对称 Cross-Attention 状态管理器。
 
     参数:
-        n_state: 状态 token 数量 (读和写各 n_state 个)
+        n_state: 状态 slot 数量
         state_dim: 状态维度 (可独立于 hidden_size)
         hidden_size: backbone 的隐藏维度 (None 时等于 state_dim)
+        n_layers: backbone 层数 (每层独立 K/V 投影)
         state_scale_init: 渐进影响力初始值 (sigmoid 前)
-        gate_bias_init: gate 静态偏置初始值
     """
 
     def __init__(
@@ -44,46 +35,39 @@ class StatePlugin(nn.Module):
         n_state: int = 32,
         state_dim: int = 768,
         hidden_size: int = None,
+        n_layers: int = 24,
         state_scale_init: float = -5.0,
-        gate_bias_init: float = 0.0,
     ):
         super().__init__()
         self.n_state = n_state
         self.state_dim = state_dim
         self.hidden_size = hidden_size if hidden_size is not None else state_dim
 
-        # 初始空白状态 (可学习参数，近零初始化)
+        # ── 初始状态 ──
         self.state_emb = nn.Parameter(torch.randn(n_state, state_dim) * 0.01)
 
-        # 读状态位置编码 (序列开头，近零初始化)
-        self.read_pos = nn.Embedding(n_state, state_dim)
-        nn.init.normal_(self.read_pos.weight, std=0.01)
+        # ── 读侧: state → K/V（每层独立投影）──
+        self.read_k_projs = nn.ModuleList([
+            nn.Linear(state_dim, self.hidden_size, bias=False)
+            for _ in range(n_layers)
+        ])
+        self.read_v_projs = nn.ModuleList([
+            nn.Linear(state_dim, self.hidden_size, bias=False)
+            for _ in range(n_layers)
+        ])
+        self.read_scale = nn.Parameter(torch.tensor(state_scale_init))
 
-        # 写状态: 可学习查询嵌入 + 位置编码 (序列末尾)
-        self.write_emb = nn.Parameter(torch.randn(n_state, state_dim) * 0.01)
-        self.write_pos = nn.Embedding(n_state, state_dim)
-        nn.init.normal_(self.write_pos.weight, std=0.01)
+        # ── 写侧: state(Q) × content(K,V) → state_new ──
+        self.write_q = nn.Linear(state_dim, self.hidden_size, bias=False)
+        self.write_out = nn.Linear(self.hidden_size, state_dim, bias=False)
+        # identity-like init: 写侧初始接近恒等映射
+        with torch.no_grad():
+            nn.init.zeros_(self.write_out.weight)
+            d = min(state_dim, self.hidden_size)
+            self.write_out.weight[:d, :d] = torch.eye(d)
 
-        # 渐进影响力: sigmoid(state_scale) 控制 state token 的值缩放
-        self.state_scale = nn.Parameter(torch.tensor(state_scale_init))
-
-        # --- 双层 Gate ---
-        # 静态偏置: 维度天生的快慢倾向 (类似脑区分化)
-        self.gate_bias = nn.Parameter(torch.full((n_state, state_dim), gate_bias_init))
-        # 动态投影: 根据旧/新状态内容决定此刻该记还是该忘
+        # ── Gate: 纯动态决策 ──
         self.gate_proj = nn.Linear(2 * state_dim, state_dim, bias=False)
-
-        # 输出投影: 将 transformer 输出的写状态映射回状态空间
-        self.state_out_proj = nn.Linear(state_dim, state_dim, bias=False)
-        nn.init.eye_(self.state_out_proj.weight)  # 初始化为恒等映射
-
-        # --- 维度投影 (仅 state_dim != hidden_size 时创建) ---
-        if self.state_dim != self.hidden_size:
-            self.proj_up = nn.Linear(state_dim, self.hidden_size, bias=False)
-            self.proj_down = nn.Linear(self.hidden_size, state_dim, bias=False)
-        else:
-            self.proj_up = None
-            self.proj_down = None
 
     # ---- 参数分类 API (用于迁移 / 冻结) ----
 
@@ -120,131 +104,88 @@ class StatePlugin(nn.Module):
             device = self.state_emb.device
         return self.state_emb.unsqueeze(0).expand(batch_size, -1, -1).clone()
 
-    def inject(
-        self,
-        state: torch.Tensor,
-        content_emb: torch.Tensor,
-        content_mask: torch.Tensor = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def generate_read_kv(self, state: torch.Tensor) -> list[tuple[torch.Tensor, torch.Tensor]]:
         """
-        构建 [Read-State | Content | Write-State] 序列。
+        读侧: 生成每层的 state K/V。
 
         参数:
-            state: (B, n_state, D) 当前持久状态 (上一轮的输出)
-            content_emb: (B, T, D) 内容 token 的嵌入
-            content_mask: (B, T) 可选，True=真实 token, False=padding
-                          提供时 padding 位置对所有后续 token 不可见
+            state: (B, n_state, state_dim) 当前持久状态
 
         返回:
-            hidden_states: (B, n_state + T + n_state, D)
-            mask: (B, 1, L, L) 因果 attention mask (padding 位置被遮蔽)
+            list[(K, V)] 长度 = n_layers，每个 K/V 形状 (B, n_state, hidden_size)
         """
-        B, T, D = content_emb.shape
-        scale = torch.sigmoid(self.state_scale)
-        pos_ids = torch.arange(self.n_state, device=state.device)
+        scale = torch.sigmoid(self.read_scale)
+        kv_pairs = []
+        for k_proj, v_proj in zip(self.read_k_projs, self.read_v_projs):
+            K = k_proj(state) * scale
+            V = v_proj(state) * scale
+            kv_pairs.append((K, V))
+        return kv_pairs
 
-        # Read tokens: 旧 state + 读位置编码, 按 scale 缩放
-        read_tokens = (state + self.read_pos(pos_ids).unsqueeze(0)) * scale
-        read_tokens = read_tokens.to(dtype=content_emb.dtype)
-        if self.proj_up is not None:
-            read_tokens = self.proj_up(read_tokens)
-
-        # Write tokens: 可学习查询 + 写位置编码, 按 scale 缩放
-        write_tokens = (
-            self.write_emb.unsqueeze(0).expand(B, -1, -1)
-            + self.write_pos(pos_ids).unsqueeze(0)
-        ) * scale
-        write_tokens = write_tokens.to(dtype=content_emb.dtype)
-        if self.proj_up is not None:
-            write_tokens = self.proj_up(write_tokens)
-
-        # [Read | Content | Write]
-        hidden_states = torch.cat([read_tokens, content_emb, write_tokens], dim=1)
-
-        # 标准因果 mask: 位置 i 只能看到 0..i
-        total_len = hidden_states.shape[1]
-        mask = torch.triu(
-            torch.full(
-                (total_len, total_len), float("-inf"),
-                device=content_emb.device, dtype=content_emb.dtype,
-            ),
-            diagonal=1,
-        ).unsqueeze(0)  # (1, L, L)
-
-        # 遮蔽 padding: padding 列设为 -inf，任何 token 都看不到 padding
-        if content_mask is not None:
-            # content_mask (B, T) → 完整序列 mask (B, L): read=True, content=mask, write=True
-            full_mask = torch.cat([
-                torch.ones(B, self.n_state, device=content_mask.device, dtype=torch.bool),
-                content_mask,
-                torch.ones(B, self.n_state, device=content_mask.device, dtype=torch.bool),
-            ], dim=1)  # (B, L)
-            # padding 列设为 -inf: (B, 1, L) 广播到 (B, L, L)
-            padding_mask = torch.zeros(B, 1, total_len, device=content_emb.device, dtype=content_emb.dtype)
-            padding_mask.masked_fill_(~full_mask.unsqueeze(1), float("-inf"))
-            mask = mask.unsqueeze(0) + padding_mask.unsqueeze(2)  # (B, 1, L, L)
-        else:
-            mask = mask.unsqueeze(0)  # (1, 1, L, L)
-
-        return hidden_states, mask
-
-    def extract_and_update(
-        self,
-        output: torch.Tensor,
-        state_old: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def read_layer(self, hidden_states: torch.Tensor, state_kv: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
         """
-        从 transformer 输出中提取 content 和 write-state，通过 gate 更新状态。
+        读侧单层: content 通过 cross-attention 读取 state K/V。
 
         参数:
-            output: (B, n_state + T + n_state, D) transformer 完整输出
-            state_old: (B, n_state, D) 上一轮的状态
+            hidden_states: (B, T, hidden_size) 当前层的输入
+            state_kv: (K, V) 每个形状 (B, n_state, hidden_size)
 
         返回:
-            content_output: (B, T, D) 内容部分的输出
-            state_next: (B, n_state, D) 更新后的状态
+            hidden_states: (B, T, hidden_size) 融入 state 信息后的输出
         """
-        n = self.n_state
+        K, V = state_kv
+        # 确保 dtype 一致
+        K = K.to(dtype=hidden_states.dtype, device=hidden_states.device)
+        V = V.to(dtype=hidden_states.dtype, device=hidden_states.device)
 
-        # 分离三部分
-        # read_output = output[:, :n, :]       # 不需要，读状态已完成使命
-        content_output = output[:, n:-n, :]    # (B, T, hidden_size)
-        write_raw = output[:, -n:, :]          # (B, n_state, hidden_size)
+        d = hidden_states.shape[-1]
+        attn_weights = torch.softmax(
+            hidden_states @ K.transpose(-2, -1) / (d ** 0.5), dim=-1
+        )  # (B, T, n_state)
+        cross_attn_out = attn_weights @ V  # (B, T, hidden_size)
 
-        # 投影回 state_dim (仅维度不同时)
-        if self.proj_down is not None:
-            write_raw = self.proj_down(write_raw.to(self.proj_down.weight.dtype))
+        return hidden_states + cross_attn_out
 
-        # 输出投影 (对齐 dtype)
-        state_new = self.state_out_proj(write_raw.to(self.state_out_proj.weight.dtype))
+    def write_from_content(self, state_old: torch.Tensor, content_hidden: torch.Tensor) -> torch.Tensor:
+        """
+        写侧: state 向 content 提问，提取要记住的信息。
 
-        # --- 双层 Gate ---
-        combined = torch.cat([state_old, state_new], dim=-1)  # (B, n_state, 2*D)
-        dynamic_logit = self.gate_proj(combined)               # (B, n_state, D)
-        gate = torch.sigmoid(self.gate_bias.unsqueeze(0) + dynamic_logit)
+        参数:
+            state_old: (B, n_state, state_dim) 旧状态
+            content_hidden: (B, T, hidden_size) backbone 最终输出
 
-        # 更新: gate 高 → 保留旧状态; gate 低 → 采纳新状态
+        返回:
+            state_next: (B, n_state, state_dim) 更新后的状态
+        """
+        Q = self.write_q(state_old)      # (B, n_state, hidden_size)
+        K = content_hidden               # (B, T, hidden_size)
+        V = content_hidden
+
+        d = Q.shape[-1]
+        attn = torch.softmax(Q @ K.transpose(-2, -1) / (d ** 0.5), dim=-1)
+        extracted = attn @ V             # (B, n_state, hidden_size)
+
+        state_new = self.write_out(extracted)  # (B, n_state, state_dim)
+
+        # 纯动态 gate
+        gate = torch.sigmoid(self.gate_proj(
+            torch.cat([state_old, state_new], dim=-1)
+        ))
         state_next = gate * state_old + (1 - gate) * state_new
-
-        return content_output, state_next
+        return state_next
 
     def get_state_stats(self, state: torch.Tensor) -> dict:
         """
-        获取状态分析统计信息 (用于 /stats 命令)。
+        获取状态分析统计信息。
 
         参数:
             state: (B, n_state, D) 或 (n_state, D)
 
         返回:
-            dict: 包含 gate_bias 分布、状态范数、有效秩等
+            dict: 包含 read_scale、状态范数、有效秩等
         """
         if state.dim() == 3:
             state = state[0]
-
-        gate_values = torch.sigmoid(self.gate_bias).detach()
-
-        slow_mask = gate_values.mean(dim=-1) > 0.7
-        fast_mask = gate_values.mean(dim=-1) < 0.3
 
         U, S, V = torch.linalg.svd(state.float())
         S_norm = S / S.sum()
@@ -252,11 +193,7 @@ class StatePlugin(nn.Module):
         effective_rank = torch.exp(-torch.sum(S_norm * torch.log(S_norm))).item()
 
         return {
-            "scale": torch.sigmoid(self.state_scale).item(),
-            "gate_mean": gate_values.mean().item(),
-            "gate_std": gate_values.std().item(),
-            "slow_dims": slow_mask.sum().item(),
-            "fast_dims": fast_mask.sum().item(),
+            "read_scale": torch.sigmoid(self.read_scale).item(),
             "state_norm": state.norm().item(),
             "effective_rank": effective_rank,
         }

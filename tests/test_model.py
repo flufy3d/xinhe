@@ -9,8 +9,11 @@ import torch.nn as nn
 
 from xinhe.model.config import XinheConfig
 from xinhe.model.backbone import BackboneBase
-from xinhe.model.state_plugin import StatePlugin
+from xinhe.model.state_plugin import StateInterface
 from xinhe.model.xinhe_model import XinheModel
+
+
+N_LAYERS = 4
 
 
 class MockBackbone(nn.Module, BackboneBase):
@@ -26,7 +29,10 @@ class MockBackbone(nn.Module, BackboneBase):
     def embed(self, input_ids):
         return self.embed_layer(input_ids)
 
-    def forward_blocks(self, hidden_states, attention_mask=None, position_ids=None):
+    def forward_blocks(self, hidden_states, attention_mask=None, position_ids=None, layer_hook=None):
+        if layer_hook is not None:
+            for i in range(N_LAYERS):
+                hidden_states = layer_hook(hidden_states, i)
         return self.linear(hidden_states)
 
     def get_lm_head(self):
@@ -34,6 +40,9 @@ class MockBackbone(nn.Module, BackboneBase):
 
     def get_hidden_size(self):
         return self._hidden_size
+
+    def get_num_layers(self):
+        return N_LAYERS
 
 
 @pytest.fixture
@@ -113,9 +122,9 @@ def test_gradient_flow(model):
     loss = result_2["loss"]
     loss.backward()
 
-    # StatePlugin 参数应该有梯度
-    assert model.plugin.gate_bias.grad is not None
-    assert model.plugin.state_emb.grad is not None
+    # StateInterface 参数应该有梯度
+    assert model.state_interface.gate_proj.weight.grad is not None
+    assert model.state_interface.state_emb.grad is not None
 
 
 def test_generate(model):
@@ -170,9 +179,8 @@ def test_forward_with_decoupled_dims():
     assert result["state_next"].shape == (B, 4, 32)  # state stays in state_dim
     assert result["loss"].item() > 0
 
-    # 梯度流通过投影层 (通过 state_next → gate → proj_down)
+    # 梯度流通过 read/write 投影
     state_loss = result["state_next"].sum() + result["loss"]
     state_loss.backward()
-    assert model.plugin.proj_up is not None
-    assert model.plugin.proj_up.weight.grad is not None
-    assert model.plugin.proj_down.weight.grad is not None
+    assert model.state_interface.read_k_projs[0].weight.grad is not None
+    assert model.state_interface.write_out.weight.grad is not None

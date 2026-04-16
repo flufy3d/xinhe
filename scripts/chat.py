@@ -130,7 +130,7 @@ def main():
             if (ckpt_cfg.backbone_type != config.backbone_type) or (ckpt_cfg.hidden_size != config.hidden_size):
                 print("  警告: --config 与 checkpoint 不匹配。")
         try:
-            result = model.plugin.load_state_dict(checkpoint["plugin_state"], strict=False)
+            result = model.state_interface.load_state_dict(checkpoint["plugin_state"], strict=False)
             if result.missing_keys:
                 print(f"  注意: checkpoint 缺少 {result.missing_keys}，使用默认初始化")
         except RuntimeError as e:
@@ -340,7 +340,7 @@ def main():
                 response = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL).strip()
             print(f"\n心核: {response}")
 
-        print(f"  [轮次 {turn_count} | scale={torch.sigmoid(model.plugin.state_scale).item():.3f}]")
+        print(f"  [轮次 {turn_count} | scale={torch.sigmoid(model.state_interface.read_scale).item():.3f}]")
 
 
 

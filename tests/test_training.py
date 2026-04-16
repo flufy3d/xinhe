@@ -10,9 +10,12 @@ from torch.utils.data import DataLoader
 from xinhe.model.config import XinheConfig
 from xinhe.model.backbone import BackboneBase
 from xinhe.model.xinhe_model import XinheModel
-from xinhe.model.state_plugin import StatePlugin
+from xinhe.model.state_plugin import StateInterface
 from xinhe.data.conversation import collate_episodes
 from xinhe.utils.checkpoint import extract_plugin_core
+
+
+N_LAYERS = 4
 
 
 class TinyBackbone(nn.Module, BackboneBase):
@@ -27,7 +30,10 @@ class TinyBackbone(nn.Module, BackboneBase):
     def embed(self, input_ids):
         return self._embed(input_ids)
 
-    def forward_blocks(self, hidden_states, attention_mask=None, position_ids=None):
+    def forward_blocks(self, hidden_states, attention_mask=None, position_ids=None, layer_hook=None):
+        if layer_hook is not None:
+            for i in range(N_LAYERS):
+                hidden_states = layer_hook(hidden_states, i)
         return self._block(hidden_states)
 
     def get_lm_head(self):
@@ -35,6 +41,9 @@ class TinyBackbone(nn.Module, BackboneBase):
 
     def get_hidden_size(self):
         return 32
+
+    def get_num_layers(self):
+        return N_LAYERS
 
 
 class DummyDataset:
@@ -122,7 +131,7 @@ def test_state_detach_in_tbptt():
 # --- 冻结 + 迁移测试 ---
 
 def test_freeze_plugin_core_optimizer_groups():
-    """freeze_plugin_core 时 optimizer 只含 proj + lora 参数"""
+    """freeze_plugin_core 时 optimizer 只含 proj 参数"""
     config = XinheConfig(
         hidden_size=32, n_state=4, state_dim=16,  # 有投影层
         state_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
@@ -139,16 +148,16 @@ def test_freeze_plugin_core_optimizer_groups():
     trainer = Trainer(model, config, loader)
 
     # core 参数应被冻结
-    for p in model.plugin.core_parameters():
+    for p in model.state_interface.core_parameters():
         assert not p.requires_grad
 
     # proj 参数应可训练
-    for p in model.plugin.projection_parameters():
+    for p in model.state_interface.projection_parameters():
         assert p.requires_grad
 
     # optimizer 应只包含 proj 参数 (lora_rank=0 所以无 LoRA)
     opt_param_count = sum(len(g["params"]) for g in trainer.optimizer.param_groups)
-    proj_count = len(model.plugin.projection_parameters())
+    proj_count = len(model.state_interface.projection_parameters())
     assert opt_param_count == proj_count
 
 
@@ -178,11 +187,11 @@ def test_plugin_core_lr_multiplier():
 
 def test_extract_plugin_core_from_dict():
     """extract_plugin_core 从 checkpoint dict 提取核心参数"""
-    plugin = StatePlugin(n_state=4, state_dim=16, hidden_size=32)
+    iface = StateInterface(n_state=4, state_dim=16, hidden_size=32, n_layers=2)
     with torch.no_grad():
-        plugin.gate_bias.fill_(2.0)
+        iface.state_emb.fill_(2.0)
 
-    checkpoint = {"plugin_state": plugin.state_dict()}
+    checkpoint = {"plugin_state": iface.state_dict()}
     core = extract_plugin_core(checkpoint)
 
     # 应只含 core keys
@@ -191,42 +200,44 @@ def test_extract_plugin_core_from_dict():
         assert any(k.startswith(p) for p in CORE_PARAM_PREFIXES)
         assert not any(k.startswith(p) for p in PROJECTION_PARAM_PREFIXES)
 
-    assert torch.allclose(core["gate_bias"], torch.full((4, 16), 2.0))
+    assert torch.allclose(core["state_emb"], torch.full((4, 16), 2.0))
 
 
 def test_extract_plugin_core_from_file():
     """extract_plugin_core 从文件路径提取核心参数"""
-    plugin = StatePlugin(n_state=4, state_dim=16, hidden_size=16)
+    iface = StateInterface(n_state=4, state_dim=16, hidden_size=16, n_layers=2)
     with torch.no_grad():
-        plugin.state_scale.fill_(0.5)
+        iface.read_scale.fill_(0.5)
 
-    checkpoint = {"plugin_state": plugin.state_dict()}
+    checkpoint = {"plugin_state": iface.state_dict()}
 
     with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
         torch.save(checkpoint, f.name)
         core = extract_plugin_core(f.name)
 
-    assert "state_scale" in core
-    assert torch.allclose(core["state_scale"], torch.tensor(0.5))
+    # read_scale 是 projection，不应在 core 中
+    assert "read_scale" not in core
+    # state_emb 应在 core 中
+    assert "state_emb" in core
 
 
 def test_migration_loading():
-    """迁移: 从不同 hidden_size 加载 core 到新 plugin"""
-    # 源: state_dim=16, hidden_size=16 (无投影)
-    src = StatePlugin(n_state=4, state_dim=16, hidden_size=16)
+    """迁移: 从不同 hidden_size/n_layers 加载 core 到新 interface"""
+    # 源: state_dim=16, hidden_size=16, n_layers=2
+    src = StateInterface(n_state=4, state_dim=16, hidden_size=16, n_layers=2)
     with torch.no_grad():
-        src.gate_bias.fill_(3.14)
+        src.state_emb.fill_(3.14)
 
     checkpoint = {"plugin_state": src.state_dict()}
     core = extract_plugin_core(checkpoint)
 
-    # 目标: state_dim=16, hidden_size=64 (有投影)
-    dst = StatePlugin(n_state=4, state_dim=16, hidden_size=64)
-    proj_up_before = dst.proj_up.weight.clone()
+    # 目标: state_dim=16, hidden_size=64, n_layers=4
+    dst = StateInterface(n_state=4, state_dim=16, hidden_size=64, n_layers=4)
+    read_k_before = dst.read_k_projs[0].weight.clone()
 
     result = dst.load_state_dict(core, strict=False)
 
     # core 应已加载
-    assert torch.allclose(dst.gate_bias, torch.full((4, 16), 3.14))
-    # proj 应保持随机初始化 (未变)
-    assert torch.allclose(dst.proj_up.weight, proj_up_before)
+    assert torch.allclose(dst.state_emb, torch.full((4, 16), 3.14))
+    # projection 应保持随机初始化 (未变)
+    assert torch.allclose(dst.read_k_projs[0].weight, read_k_before)

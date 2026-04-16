@@ -21,7 +21,10 @@ class DummyBackbone(nn.Module, BackboneBase):
     def embed(self, input_ids):
         return self._embed(input_ids)
 
-    def forward_blocks(self, hidden_states, attention_mask=None, position_ids=None):
+    def forward_blocks(self, hidden_states, attention_mask=None, position_ids=None, layer_hook=None):
+        if layer_hook is not None:
+            for i in range(4):
+                hidden_states = layer_hook(hidden_states, i)
         return self._blocks(hidden_states)
 
     def get_lm_head(self):
@@ -29,6 +32,9 @@ class DummyBackbone(nn.Module, BackboneBase):
 
     def get_hidden_size(self):
         return self._hidden_size
+
+    def get_num_layers(self):
+        return 4
 
 
 def test_interface_contract():

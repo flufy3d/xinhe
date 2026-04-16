@@ -45,7 +45,7 @@ def save_checkpoint(model, optimizer, scheduler, global_step: int, path: str,
     """保存完整 checkpoint"""
     from ..model.lora import LoRALinear
 
-    plugin_state = model.plugin.state_dict()
+    plugin_state = model.state_interface.state_dict()
 
     lora_state = {}
     for name, module in model.backbone.named_modules():
@@ -73,7 +73,7 @@ def load_checkpoint(path: str, model, optimizer=None, scheduler=None, device=Non
 
     checkpoint = torch.load(path, map_location=device or "cpu", weights_only=False)
 
-    result = model.plugin.load_state_dict(checkpoint["plugin_state"], strict=False)
+    result = model.state_interface.load_state_dict(checkpoint["plugin_state"], strict=False)
     if result.missing_keys:
         print(f"  注意: checkpoint 缺少 {result.missing_keys}，使用默认初始化")
 

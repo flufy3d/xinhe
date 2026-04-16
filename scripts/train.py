@@ -186,7 +186,7 @@ def train_curriculum(base_config, stages, args):
     if args.migrate_from:
         from xinhe.utils.checkpoint import extract_plugin_core
         core_state = extract_plugin_core(args.migrate_from, device=base_config.device)
-        result = model.plugin.load_state_dict(core_state, strict=False)
+        result = model.state_interface.load_state_dict(core_state, strict=False)
         print(f"[迁移] 从 {args.migrate_from} 加载 plugin core")
         if result.missing_keys:
             print(f"  新参数 (随机初始化): {result.missing_keys}")
@@ -204,7 +204,7 @@ def train_curriculum(base_config, stages, args):
 
     if init_ckpt:
         ckpt = torch.load(init_ckpt, map_location=base_config.device, weights_only=False)
-        result = model.plugin.load_state_dict(ckpt["plugin_state"], strict=False)
+        result = model.state_interface.load_state_dict(ckpt["plugin_state"], strict=False)
         if result.missing_keys:
             print(f"  注意: checkpoint 缺少 {result.missing_keys}，使用默认初始化")
         from xinhe.model.lora import LoRALinear
