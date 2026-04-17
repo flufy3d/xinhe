@@ -98,7 +98,7 @@ class XinheModel(nn.Module):
         hook_layer_set = self._hook_layer_set
         hook_idx_map = {layer_idx: kv_idx for kv_idx, layer_idx in enumerate(self._hook_layer_indices)}
 
-        @torch.compiler.disable
+
         def state_read_hook(hidden_states, layer_idx):
             if layer_idx not in hook_layer_set:
                 return hidden_states
