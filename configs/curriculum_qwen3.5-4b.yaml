@@ -10,16 +10,20 @@ curriculum_file: curriculum.yaml
 stage_overrides:
   default:
     batch_size: 1          # ep=16, tbptt=16
+    max_steps: 10000       # 4B default batch=1, 补偿样本量
   0_state_init:
     batch_size: 3          # ep=2, tbptt=2
   1_base_memory:
     batch_size: 3          # ep=4, tbptt=4
   2_entity_name:
     batch_size: 3          # ep=4, tbptt=4
+    max_steps: 8000        # 0.8B batch=8 收敛 ~3k 步, 4B batch=3 需 ~8k
   3_recall_simple:
     batch_size: 3          # ep=4, tbptt=4
+    max_steps: 8000
   4_random_tell:
     batch_size: 2          # ep=5, tbptt=5
+    max_steps: 8000
   5_fact3:
     batch_size: 2          # ep=7, tbptt=7
   6_entity_multi:
