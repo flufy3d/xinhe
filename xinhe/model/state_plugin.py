@@ -14,8 +14,50 @@ import torch.nn as nn
 
 
 # 参数分类: Core 是灵魂 (backbone-agnostic), Projection 是身体适配 (backbone-specific)
-CORE_PARAM_PREFIXES = ("state_emb", "gate_proj")
+CORE_PARAM_PREFIXES = ("state_emb", "gate_proj", "slot_attn_read", "slot_attn_write")
 PROJECTION_PARAM_PREFIXES = ("read_k_projs", "read_v_projs", "read_scale", "write_q", "write_out")
+SLOT_ATTN_PARAM_PREFIXES = ("slot_attn_read", "slot_attn_write")
+
+
+class SlotAttn(nn.Module):
+    """Slot 间自注意力 + FFN (state_dim 空间的标准 transformer block)。
+
+    作用: 让 state 的 n_state 个 slot 互相感知, 产生角色分化。解决 entity
+    路由问题 — v1 时代已诊断的真正瓶颈。
+
+    严格恒等初始化: self_attn.out_proj 和 mlp 输出层的 weight/bias 置零, 配合
+    residual 保证初始 SlotAttn(x) = x, 续训时不会冲击已有 checkpoint 行为。
+    """
+
+    def __init__(self, state_dim: int, n_heads: int = 4):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(state_dim)
+        self.self_attn = nn.MultiheadAttention(
+            state_dim, n_heads, batch_first=True
+        )
+        self.norm2 = nn.LayerNorm(state_dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(state_dim, state_dim * 2),
+            nn.SiLU(),
+            nn.Linear(state_dim * 2, state_dim),
+        )
+
+        # 严格恒等初始化: 两个 residual 子层的输出通道清零
+        with torch.no_grad():
+            nn.init.zeros_(self.self_attn.out_proj.weight)
+            if self.self_attn.out_proj.bias is not None:
+                nn.init.zeros_(self.self_attn.out_proj.bias)
+            nn.init.zeros_(self.mlp[-1].weight)
+            if self.mlp[-1].bias is not None:
+                nn.init.zeros_(self.mlp[-1].bias)
+
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
+        """state: (B, n_state, state_dim) → (B, n_state, state_dim)"""
+        x = self.norm1(state)
+        attn_out, _ = self.self_attn(x, x, x, need_weights=False)
+        state = state + attn_out
+        state = state + self.mlp(self.norm2(state))
+        return state
 
 
 class StateInterface(nn.Module):
@@ -69,6 +111,11 @@ class StateInterface(nn.Module):
         # ── Gate: 纯动态决策 ──
         self.gate_proj = nn.Linear(2 * state_dim, state_dim, bias=False)
 
+        # ── Slot 间通信: read 前 + write 后各一实例 ──
+        # 严格恒等初始化, 续训时不冲击已有 checkpoint
+        self.slot_attn_read = SlotAttn(state_dim, n_heads=4)
+        self.slot_attn_write = SlotAttn(state_dim, n_heads=4)
+
     # ---- 参数分类 API (用于迁移 / 冻结) ----
 
     def core_parameters(self) -> list[nn.Parameter]:
@@ -80,6 +127,11 @@ class StateInterface(nn.Module):
         """返回 backbone 相关的投影参数 (身体适配)"""
         return [p for n, p in self.named_parameters()
                 if any(n.startswith(prefix) for prefix in PROJECTION_PARAM_PREFIXES)]
+
+    def slot_attn_parameters(self) -> list[nn.Parameter]:
+        """返回 slot 间通信模块的参数 (可用独立 LR 加速从恒等激活)"""
+        return [p for n, p in self.named_parameters()
+                if any(n.startswith(prefix) for prefix in SLOT_ATTN_PARAM_PREFIXES)]
 
     def freeze_core(self):
         """冻结核心参数 (迁移时只训投影层 + LoRA)"""
@@ -114,6 +166,8 @@ class StateInterface(nn.Module):
         返回:
             list[(K, V)] 长度 = n_layers，每个 K/V 形状 (B, n_state, hidden_size)
         """
+        # 读之前先做 slot 间通信, 让 slot 角色分化后再投影成 K/V
+        state = self.slot_attn_read(state)
         scale = torch.sigmoid(self.read_scale)
         kv_pairs = []
         for k_proj, v_proj in zip(self.read_k_projs, self.read_v_projs):
@@ -166,6 +220,9 @@ class StateInterface(nn.Module):
         extracted = attn @ V             # (B, n_state, hidden_size)
 
         state_new = self.write_out(extracted)  # (B, n_state, state_dim)
+
+        # 写完做 slot 间通信: 让 slot 看到彼此, 形成角色分化
+        state_new = self.slot_attn_write(state_new)
 
         # 纯动态 gate
         gate = torch.sigmoid(self.gate_proj(

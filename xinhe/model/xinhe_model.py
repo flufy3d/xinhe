@@ -68,6 +68,7 @@ class XinheModel(nn.Module):
         state: torch.Tensor,
         labels: Optional[torch.Tensor] = None,
         pad_token_id: Optional[int] = None,
+        weights: Optional[torch.Tensor] = None,
     ) -> dict:
         """
         带状态的前向传播。
@@ -77,6 +78,8 @@ class XinheModel(nn.Module):
             state: (B, n_state, D) 当前持久状态
             labels: (B, T) 可选，用于计算 loss
             pad_token_id: 可选，padding token id，提供时自动遮蔽 padding
+            weights: (B, T) 可选，每 token 的 loss 权重 (VALUE token=5.0, 其他=1.0, pad=0.0);
+                     为 None 时等价于全量均匀 loss (向后兼容)
 
         返回:
             dict:
@@ -150,15 +153,26 @@ class XinheModel(nn.Module):
             # 当所有 labels 都是 -100 时 (如非 recall segment)，loss 设为 0 避免 NaN
             valid_count = (shift_labels != -100).sum()
             if valid_count > 0:
-                loss = F.cross_entropy(
-                    shift_logits.view(-1, shift_logits.size(-1)),
-                    shift_labels.view(-1),
-                    ignore_index=-100,
-                )
+                flat_logits = shift_logits.view(-1, shift_logits.size(-1))
+                flat_labels = shift_labels.view(-1)
+                if weights is not None:
+                    # Per-token weighted loss: VALUE token 得到 5x 梯度
+                    shift_weights = weights[:, 1:].contiguous().view(-1).to(flat_logits.dtype)
+                    # safe labels: -100 位置换成 0, 用 weights=0 屏蔽 (避免 CE 报错)
+                    safe_labels = flat_labels.clamp(min=0)
+                    per_token = F.cross_entropy(flat_logits, safe_labels, reduction="none")
+                    # -100 位置的 weights 已经是 0, 直接加权平均
+                    w_sum = shift_weights.sum().clamp(min=1e-8)
+                    loss = (per_token * shift_weights).sum() / w_sum
+                else:
+                    # 向后兼容: 均匀 loss
+                    loss = F.cross_entropy(
+                        flat_logits, flat_labels, ignore_index=-100,
+                    )
                 # value token 准确率 (argmax 匹配, 零额外开销)
-                valid_mask = shift_labels.view(-1) != -100
-                preds = shift_logits.view(-1, shift_logits.size(-1))[valid_mask].argmax(dim=-1)
-                targets = shift_labels.view(-1)[valid_mask]
+                valid_mask = flat_labels != -100
+                preds = flat_logits[valid_mask].argmax(dim=-1)
+                targets = flat_labels[valid_mask]
                 result["correct"] = (preds == targets).sum()
                 result["total"] = valid_count
             else:

@@ -3,7 +3,10 @@
 """
 import torch
 import pytest
-from xinhe.model.state_plugin import StateInterface, CORE_PARAM_PREFIXES, PROJECTION_PARAM_PREFIXES
+from xinhe.model.state_plugin import (
+    StateInterface, SlotAttn,
+    CORE_PARAM_PREFIXES, PROJECTION_PARAM_PREFIXES, SLOT_ATTN_PARAM_PREFIXES,
+)
 
 
 @pytest.fixture
@@ -214,3 +217,118 @@ def test_core_state_dict_roundtrip():
 
     # core 参数应该已加载
     assert torch.allclose(dst.state_emb, torch.full_like(dst.state_emb, 1.23))
+
+
+# --- SlotAttn 测试 ---
+
+def test_slot_attn_shape():
+    """SlotAttn 保持输入形状"""
+    module = SlotAttn(state_dim=64, n_heads=4)
+    state = torch.randn(2, 8, 64)
+    out = module(state)
+    assert out.shape == state.shape
+
+
+def test_slot_attn_identity_init():
+    """SlotAttn 严格恒等初始化: 输出等于输入 (续训不冲击 checkpoint)"""
+    torch.manual_seed(0)
+    module = SlotAttn(state_dim=64, n_heads=4)
+    module.eval()  # 关 dropout (虽然这里没用)
+
+    state = torch.randn(2, 8, 64)
+    out = module(state)
+
+    # out_proj 和 mlp[-1] 初始全零 → 残差子层输出为 0 → SlotAttn(x) = x
+    assert torch.allclose(out, state, atol=1e-6), \
+        f"初始 SlotAttn 应为严格恒等, 最大差异={((out - state).abs().max().item())}"
+
+
+def test_slot_attn_in_interface_identity():
+    """StateInterface 内嵌的 slot_attn_read/write 初始恒等 → 与无 slot_attn 版本等价"""
+    torch.manual_seed(0)
+    iface = StateInterface(n_state=8, state_dim=32, hidden_size=32, n_layers=2, state_scale_init=0.0)
+
+    # 手动调用 slot_attn_read 应为恒等
+    state = iface.blank_state(2)
+    state = state + torch.randn_like(state)  # 扰动一下
+    out_read = iface.slot_attn_read(state)
+    assert torch.allclose(out_read, state, atol=1e-6)
+
+    # slot_attn_write 同理
+    out_write = iface.slot_attn_write(state)
+    assert torch.allclose(out_write, state, atol=1e-6)
+
+
+def test_slot_attn_has_gradient():
+    """SlotAttn 参数接收梯度, 可以离开恒等初始化"""
+    module = SlotAttn(state_dim=32, n_heads=4)
+    state = torch.randn(1, 4, 32, requires_grad=True)
+    out = module(state)
+    loss = out.sum()
+    loss.backward()
+
+    # out_proj.weight / mlp[-1].weight 初始为 0, 但 grad 应为非零
+    assert module.self_attn.out_proj.weight.grad is not None
+    assert module.self_attn.out_proj.weight.grad.abs().sum().item() > 0
+    assert module.mlp[-1].weight.grad is not None
+    assert module.mlp[-1].weight.grad.abs().sum().item() > 0
+
+
+def test_slot_attn_in_core_params():
+    """slot_attn 参数归入 core (backbone 无关, 可迁移)"""
+    iface = StateInterface(n_state=4, state_dim=16, hidden_size=32, n_layers=2)
+
+    core_names = [n for n, _ in iface.named_parameters()
+                  if any(n.startswith(p) for p in CORE_PARAM_PREFIXES)]
+    slot_attn_names = [n for n, _ in iface.named_parameters()
+                       if any(n.startswith(p) for p in SLOT_ATTN_PARAM_PREFIXES)]
+
+    # slot_attn 应是 core 的子集
+    assert set(slot_attn_names).issubset(set(core_names))
+    # slot_attn 非空
+    assert len(slot_attn_names) > 0
+
+
+def test_slot_attn_parameters_api():
+    """slot_attn_parameters() 返回两个 SlotAttn 实例的所有参数"""
+    iface = StateInterface(n_state=4, state_dim=16, hidden_size=32, n_layers=2)
+    slot_attn_params = iface.slot_attn_parameters()
+    slot_attn_ids = {id(p) for p in slot_attn_params}
+
+    # 应包含 slot_attn_read 和 slot_attn_write 的全部参数
+    expected_ids = set()
+    for p in iface.slot_attn_read.parameters():
+        expected_ids.add(id(p))
+    for p in iface.slot_attn_write.parameters():
+        expected_ids.add(id(p))
+    assert slot_attn_ids == expected_ids
+
+
+def test_interface_identity_at_init():
+    """恒等初始化下, 含 slot_attn 的 write_from_content 与无 slot_attn 等价
+
+    验证: slot_attn_write 恒等 → state_new 与不做 slot_attn 完全一致
+    """
+    torch.manual_seed(42)
+    iface = StateInterface(n_state=4, state_dim=16, hidden_size=32, n_layers=2)
+
+    state_old = torch.randn(1, 4, 16)
+    content = torch.randn(1, 8, 32)
+
+    # 有 slot_attn (当前实现)
+    state_with = iface.write_from_content(state_old, content)
+
+    # 手工复现无 slot_attn 版本 (绕过 slot_attn_write)
+    Q = iface.write_q(state_old)
+    K = content
+    V = content
+    d = Q.shape[-1]
+    attn = torch.softmax(Q @ K.transpose(-2, -1) / (d ** 0.5), dim=-1)
+    extracted = attn @ V
+    state_new = iface.write_out(extracted)
+    # 跳过 slot_attn_write
+    gate = torch.sigmoid(iface.gate_proj(torch.cat([state_old, state_new], dim=-1)))
+    state_without = gate * state_old + (1 - gate) * state_new
+
+    assert torch.allclose(state_with, state_without, atol=1e-5), \
+        f"恒等初始化下 slot_attn 应透传, 最大差异={((state_with - state_without).abs().max().item())}"

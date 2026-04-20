@@ -47,7 +47,7 @@ class TinyBackbone(nn.Module, BackboneBase):
 
 
 class DummyDataset:
-    """极小数据集: 每个 episode 有 4 个 segment，每个 segment 是 (input_ids, labels) tuple"""
+    """极小数据集: 每个 episode 有 4 个 segment，每个 segment 是 (input_ids, labels, weights) 三元组"""
 
     def __init__(self, num_episodes=10, seg_len=16, num_segments=4):
         self.episodes = []
@@ -56,7 +56,8 @@ class DummyDataset:
             for _ in range(num_segments):
                 ids = torch.randint(0, 50, (seg_len,))
                 labels = ids.clone()
-                episode.append((ids, labels))
+                weights = torch.ones(seg_len, dtype=torch.float)
+                episode.append((ids, labels, weights))
             self.episodes.append(episode)
 
     def __len__(self):
@@ -168,6 +169,7 @@ def test_plugin_core_lr_multiplier():
         state_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
         learning_rate=1e-3, plugin_lr_multiplier=2.0,
         plugin_core_lr_multiplier=0.1,
+        slot_attn_lr_multiplier=1.0,  # 关闭 slot_attn 额外倍数, 简化断言
         tbptt_steps=2, device="cpu", dtype="float32",
     )
     backbone = TinyBackbone()
@@ -181,8 +183,126 @@ def test_plugin_core_lr_multiplier():
 
     # 检查 initial_lr (scheduler 应用 warmup 前的基础 LR)
     initial_lrs = [g["initial_lr"] for g in trainer.optimizer.param_groups]
-    assert pytest.approx(1e-3 * 2.0 * 0.1, rel=1e-5) in initial_lrs  # core
+    assert pytest.approx(1e-3 * 2.0 * 0.1, rel=1e-5) in initial_lrs  # core + slot_attn (mult=1)
     assert pytest.approx(1e-3 * 2.0, rel=1e-5) in initial_lrs          # proj
+
+
+def test_slot_attn_lr_multiplier():
+    """slot_attn 单独一组学习率 (续训从恒等激活要更高 LR)"""
+    config = XinheConfig(
+        hidden_size=32, n_state=4, state_dim=16,
+        state_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
+        learning_rate=1e-3, plugin_lr_multiplier=1.0,
+        plugin_core_lr_multiplier=0.5,
+        slot_attn_lr_multiplier=3.0,
+        tbptt_steps=2, device="cpu", dtype="float32",
+    )
+    backbone = TinyBackbone()
+    model = XinheModel(config, backbone=backbone)
+
+    dataset = DummyDataset(num_episodes=4, seg_len=8, num_segments=2)
+    loader = DataLoader(dataset, batch_size=2, collate_fn=collate_episodes)
+
+    from xinhe.training.trainer import Trainer
+    trainer = Trainer(model, config, loader)
+
+    initial_lrs = [g["initial_lr"] for g in trainer.optimizer.param_groups]
+    # slot_attn: lr × plugin_mult × core_mult × slot_attn_mult = 1e-3 × 1 × 0.5 × 3 = 1.5e-3
+    assert pytest.approx(1e-3 * 0.5 * 3.0, rel=1e-5) in initial_lrs
+    # core (不含 slot_attn): lr × plugin_mult × core_mult = 1e-3 × 1 × 0.5 = 5e-4
+    assert pytest.approx(1e-3 * 0.5, rel=1e-5) in initial_lrs
+    # proj: lr × plugin_mult = 1e-3
+    assert pytest.approx(1e-3, rel=1e-5) in initial_lrs
+
+
+def test_weighted_loss_equals_unweighted_when_uniform():
+    """uniform weights=1 的加权 loss 等于不加权 loss"""
+    config = XinheConfig(
+        hidden_size=32, n_state=4, state_dim=32,
+        state_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
+        tbptt_steps=2, device="cpu", dtype="float32",
+    )
+    backbone = TinyBackbone()
+    model = XinheModel(config, backbone=backbone)
+    model.eval()
+
+    B, T = 2, 8
+    torch.manual_seed(0)
+    input_ids = torch.randint(0, 50, (B, T))
+    labels = input_ids.clone()
+    state = model.init_state(B)
+
+    # 不加权
+    res_a = model(input_ids, state, labels=labels)
+
+    # 加权 (全 1)
+    weights = torch.ones(B, T)
+    state2 = model.init_state(B)
+    res_b = model(input_ids, state2, labels=labels, weights=weights)
+
+    assert torch.allclose(res_a["loss"], res_b["loss"], atol=1e-5), \
+        f"uniform weights 应等价于不加权, {res_a['loss'].item()} vs {res_b['loss'].item()}"
+
+
+def test_weighted_loss_value_token_5x():
+    """value token 权重 5x 时, loss 应向 value 位置倾斜"""
+    config = XinheConfig(
+        hidden_size=32, n_state=4, state_dim=32,
+        state_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
+        tbptt_steps=2, device="cpu", dtype="float32",
+    )
+    backbone = TinyBackbone()
+    model = XinheModel(config, backbone=backbone)
+    model.eval()
+
+    B, T = 1, 8
+    torch.manual_seed(0)
+    input_ids = torch.randint(0, 50, (B, T))
+    labels = input_ids.clone()
+    state = model.init_state(B)
+
+    # weights: 前半 1x, 后半 5x (模拟 frame + value)
+    weights = torch.ones(B, T)
+    weights[:, T // 2:] = 5.0
+
+    state1 = model.init_state(B)
+    res_uniform = model(input_ids, state1, labels=labels, weights=torch.ones(B, T))
+
+    state2 = model.init_state(B)
+    res_weighted = model(input_ids, state2, labels=labels, weights=weights)
+
+    # 加权 loss 与不加权不同 (除非 per-token loss 恰好相等, 概率极低)
+    assert not torch.allclose(res_uniform["loss"], res_weighted["loss"], atol=1e-6)
+
+
+def test_weighted_loss_ignores_minus_100():
+    """weights=0 的位置 (对应 -100 label) 不贡献 loss"""
+    config = XinheConfig(
+        hidden_size=32, n_state=4, state_dim=32,
+        state_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
+        tbptt_steps=2, device="cpu", dtype="float32",
+    )
+    backbone = TinyBackbone()
+    model = XinheModel(config, backbone=backbone)
+    model.eval()
+
+    B, T = 1, 8
+    torch.manual_seed(0)
+    input_ids = torch.randint(0, 50, (B, T))
+    labels = input_ids.clone()
+    # 屏蔽前 4 个 token
+    labels[:, :4] = -100
+
+    weights = torch.tensor([[0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]])
+    state = model.init_state(B)
+    res = model(input_ids, state, labels=labels, weights=weights)
+
+    # loss 应是有限的非 NaN
+    assert torch.isfinite(res["loss"])
+    # 等价于 cross_entropy 忽略 -100
+    state2 = model.init_state(B)
+    res_ref = model(input_ids, state2, labels=labels)  # 不加权, 自动 ignore_index=-100
+    assert torch.allclose(res["loss"], res_ref["loss"], atol=1e-5)
 
 
 def test_extract_plugin_core_from_dict():

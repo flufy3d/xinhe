@@ -92,22 +92,45 @@ class Trainer:
         for p in self.model.state_interface.projection_parameters():
             p.requires_grad = not freeze_proj
 
+        # D2 诊断模式: 只训 slot_attn, 冻结其他所有
+        if getattr(config, "train_only_slot_attn", False):
+            # 冻结 LoRA
+            for p in get_lora_params(self.model.backbone):
+                p.requires_grad = False
+            # 冻结 plugin 所有 (包含 slot_attn, 先整体冻结)
+            for p in self.model.state_interface.parameters():
+                p.requires_grad = False
+            # 单独解冻 slot_attn
+            for p in self.model.state_interface.slot_attn_parameters():
+                p.requires_grad = True
+
     def _build_optimizer(self, config: XinheConfig) -> torch.optim.AdamW:
-        """构建 optimizer，Plugin Core / Plugin Proj / LoRA 三组独立学习率。"""
+        """构建 optimizer，Plugin Core (不含 slot_attn) / SlotAttn / Plugin Proj / LoRA 四组独立学习率。
+
+        SlotAttn 从严格恒等初始化开始 (out_proj/mlp[-1] 全零), 需要更高 LR 才能快速学到分化信号,
+        因此单独一组: lr × plugin_mult × core_mult × slot_attn_mult。
+        """
         lr = config.learning_rate
         plugin_mult = getattr(config, "plugin_lr_multiplier", 1.0)
         core_mult = getattr(config, "plugin_core_lr_multiplier", 1.0)
+        slot_attn_mult = getattr(config, "slot_attn_lr_multiplier", 3.0)
 
-        core_params = [p for p in self.model.state_interface.core_parameters() if p.requires_grad]
+        # 从 core 里把 slot_attn 参数单独挑出来
+        slot_attn_set = set(id(p) for p in self.model.state_interface.slot_attn_parameters())
+        core_params = [p for p in self.model.state_interface.core_parameters()
+                       if p.requires_grad and id(p) not in slot_attn_set]
+        slot_attn_params = [p for p in self.model.state_interface.slot_attn_parameters() if p.requires_grad]
         proj_params = [p for p in self.model.state_interface.projection_parameters() if p.requires_grad]
 
         param_groups = []
         if core_params:
             param_groups.append({"params": core_params, "lr": lr * plugin_mult * core_mult})
+        if slot_attn_params:
+            param_groups.append({"params": slot_attn_params, "lr": lr * plugin_mult * core_mult * slot_attn_mult})
         if proj_params:
             param_groups.append({"params": proj_params, "lr": lr * plugin_mult})
         if not getattr(config, "freeze_lora", False):
-            lora_params = get_lora_params(self.model.backbone)
+            lora_params = [p for p in get_lora_params(self.model.backbone) if p.requires_grad]
             if lora_params:
                 param_groups.append({"params": lora_params, "lr": lr})
         return torch.optim.AdamW(param_groups, weight_decay=config.weight_decay)
@@ -187,7 +210,7 @@ class Trainer:
         """
         训练一个 episode (多轮对话)。
 
-        episode_segments: segment 列表，每个是 (input_ids, labels) tuple，shape (B, T)
+        episode_segments: segment 列表，每个是 (input_ids, labels, weights) tuple，shape (B, T)
         """
         B = episode_segments[0][0].shape[0]
         state = self.model.init_state(B).to(self.device)
@@ -197,9 +220,11 @@ class Trainer:
         episode_total = 0
         loss_segments = 0  # 只计数有真实 loss 的 segment
 
-        for seg_idx, (segment, labels) in enumerate(episode_segments):
+        for seg_idx, batch in enumerate(episode_segments):
+            segment, labels, weights = batch
             segment = segment.to(self.device)
             labels = labels.to(self.device)
+            weights = weights.to(self.device)
 
             # 截断 BPTT: 每 tbptt_steps 切断梯度
             if seg_idx > 0 and seg_idx % self.config.tbptt_steps == 0:
@@ -219,7 +244,7 @@ class Trainer:
 
             # Forward
             with torch.amp.autocast("cuda", dtype=self.dtype):
-                result = self.model(segment, state, labels=labels, pad_token_id=self.pad_token_id)
+                result = self.model(segment, state, labels=labels, pad_token_id=self.pad_token_id, weights=weights)
 
             state = result["state_next"]
             seg_loss = result["loss"]
@@ -254,12 +279,14 @@ class Trainer:
             B = episode_segments[0][0].shape[0]
             state = self.model.init_state(B).to(self.device)
 
-            for seg_idx, (segment, labels) in enumerate(episode_segments):
+            for seg_idx, batch in enumerate(episode_segments):
+                segment, labels, weights = batch
                 segment = segment.to(self.device)
                 labels = labels.to(self.device)
+                weights = weights.to(self.device)
 
                 with torch.amp.autocast("cuda", dtype=self.dtype):
-                    result = self.model(segment, state, labels=labels, pad_token_id=self.pad_token_id)
+                    result = self.model(segment, state, labels=labels, pad_token_id=self.pad_token_id, weights=weights)
 
                 state = result["state_next"]
                 total_loss += result["loss"].item()
