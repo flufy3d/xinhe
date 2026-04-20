@@ -6,6 +6,7 @@ XinheModel — 顶层模型
 - 带状态的文本生成
 - Burn-in 初始化
 """
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -57,6 +58,8 @@ class XinheModel(nn.Module):
             hidden_size=config.hidden_size,
             n_layers=n_hook_layers,
             state_scale_init=config.state_scale_init,
+            temperature_init=getattr(config, "temperature_init", 1.0),
+            eks_alpha_init=getattr(config, "eks_alpha_init", -5.0),
         )
 
         # LM head (复用 backbone 的)
@@ -179,6 +182,21 @@ class XinheModel(nn.Module):
                 loss = torch.tensor(0.0, device=logits.device, requires_grad=True)
                 result["correct"] = 0
                 result["total"] = 0
+
+            # EKS entropy 辅助 loss: 鼓励 routing 平均利用各 slot, 防 collapse
+            # mean_routing: (n_state,) — 全 batch / 所有 token 上 slot 的平均使用率
+            # entropy 越大, slot 利用越均衡; 目标是最大化 entropy → loss = -λ·H
+            routing = getattr(self.state_interface, "last_write_routing", None)
+            aux_weight = float(getattr(self.config, "entropy_aux_weight", 0.0) or 0.0)
+            if routing is not None and aux_weight > 0.0:
+                mean_routing = routing.mean(dim=(0, 1)).to(dtype=torch.float32)
+                # 数值稳定的 entropy
+                entropy = -(mean_routing * torch.log(mean_routing + 1e-10)).sum()
+                max_entropy = math.log(self.state_interface.n_state)
+                aux_loss = (-aux_weight * entropy).to(dtype=loss.dtype)
+                loss = loss + aux_loss
+                result["aux_loss"] = aux_loss.detach()
+                result["entropy_ratio"] = (entropy / max_entropy).detach()
             result["loss"] = loss
 
         return result

@@ -1,22 +1,38 @@
 """
-StateInterface — 对称 Cross-Attention 状态机制 (v2)
+StateInterface — 对称 Cross-Attention + Entity-Keyed State (v4)
 
-核心设计:
-- 读侧: 每层 backbone 之前，content 通过 cross-attention 读取 state K/V（专用全参投影）
+v4 核心变化 (相对 v3):
+- 新增 slot_keys (learnable 身份向量), key_proj (content→key space), temperature
+- write 侧 attention matrix 混合: (1-α)*原 Q@K 路径 + α*key@slot_keys 路由
+- read 侧 state 混合: (1-α)*state + α*slot_keys → k_proj (V 仍来自动态 state)
+- eks_alpha 初始 sigmoid(-5)≈0, 续训开局严格等价 v3
+- 删除 slot_attn_read (EKS routing 足够), 保留 slot_attn_write
+
+原 v2 设计:
+- 读侧: 每层 backbone 之前，content 通过 cross-attention 读取 state K/V
 - 写侧: backbone 输出后，state 通过 cross-attention 从 content 提取信息
-- 对称性: 读是 Content(Q) × State(K,V)，写是 State(Q) × Content(K,V)
-- Gate: 纯动态决策，控制 state 更新
-- State 不在序列中，backbone 只处理纯 content
-- 通过 layer_hook 回调注入，对 DeltaNet/full attention 统一生效
+- Gate: 纯动态决策, 控制 state 更新
+- State 不在序列中, backbone 只处理纯 content
+- 通过 layer_hook 回调注入, 对 DeltaNet/full attention 统一生效
 """
 import torch
 import torch.nn as nn
 
 
 # 参数分类: Core 是灵魂 (backbone-agnostic), Projection 是身体适配 (backbone-specific)
-CORE_PARAM_PREFIXES = ("state_emb", "gate_proj", "slot_attn_read", "slot_attn_write")
-PROJECTION_PARAM_PREFIXES = ("read_k_projs", "read_v_projs", "read_scale", "write_q", "write_out")
-SLOT_ATTN_PARAM_PREFIXES = ("slot_attn_read", "slot_attn_write")
+# key_proj 依赖 hidden_size → 归 Projection (迁移时需重新训)
+# slot_keys / temperature / eks_alpha 在 state_dim 空间或标量 → 归 Core (可迁移)
+CORE_PARAM_PREFIXES = (
+    "state_emb", "gate_proj", "slot_attn_write",
+    "slot_keys", "temperature", "eks_alpha",
+)
+PROJECTION_PARAM_PREFIXES = (
+    "read_k_projs", "read_v_projs", "read_scale",
+    "write_q", "write_out", "key_proj",
+)
+SLOT_ATTN_PARAM_PREFIXES = ("slot_attn_write",)
+EKS_CORE_PARAM_PREFIXES = ("slot_keys", "temperature", "eks_alpha")
+EKS_PARAM_PREFIXES = ("slot_keys", "key_proj", "temperature", "eks_alpha")  # 全部 EKS (含 projection)
 
 
 class SlotAttn(nn.Module):
@@ -79,6 +95,8 @@ class StateInterface(nn.Module):
         hidden_size: int = None,
         n_layers: int = 24,
         state_scale_init: float = -5.0,
+        temperature_init: float = 1.0,
+        eks_alpha_init: float = -5.0,
     ):
         super().__init__()
         self.n_state = n_state
@@ -99,7 +117,7 @@ class StateInterface(nn.Module):
         ])
         self.read_scale = nn.Parameter(torch.tensor(state_scale_init))
 
-        # ── 写侧: state(Q) × content(K,V) → state_new ──
+        # ── 写侧: state(Q) × content(K,V) → state_new (原 v2 路径) ──
         self.write_q = nn.Linear(state_dim, self.hidden_size, bias=False)
         self.write_out = nn.Linear(self.hidden_size, state_dim, bias=False)
         # identity-like init: 写侧初始接近恒等映射
@@ -111,10 +129,20 @@ class StateInterface(nn.Module):
         # ── Gate: 纯动态决策 ──
         self.gate_proj = nn.Linear(2 * state_dim, state_dim, bias=False)
 
-        # ── Slot 间通信: read 前 + write 后各一实例 ──
-        # 严格恒等初始化, 续训时不冲击已有 checkpoint
-        self.slot_attn_read = SlotAttn(state_dim, n_heads=4)
+        # ── Slot 间通信: 只保留写侧 (读侧由 EKS routing 承担) ──
         self.slot_attn_write = SlotAttn(state_dim, n_heads=4)
+
+        # ── EKS (Entity-Keyed State): slot 身份 + key 路由 ──
+        # slot_keys: 每个 slot 的 learnable 身份向量 (static, 不随 state 变)
+        # key_proj: 把 content hidden 投影到 key/state 空间, 和 slot_keys 点积做 routing
+        # temperature: 路由温度 (learnable), clamp(min=0.3) 防止过 sharp
+        # eks_alpha: 新旧路径混合权重, sigmoid(-5)≈0 → 开局完全走原 v2 路径, 续训友好
+        self.slot_keys = nn.Parameter(torch.randn(n_state, state_dim) * 0.1)
+        self.key_proj = nn.Linear(self.hidden_size, state_dim, bias=False)
+        self.temperature = nn.Parameter(torch.tensor(float(temperature_init)))
+        self.eks_alpha = nn.Parameter(torch.tensor(float(eks_alpha_init)))
+        # 记录最近一次 write 的 routing 分布 (B, T, n_state), 供 entropy aux loss 读取
+        self.last_write_routing: torch.Tensor | None = None
 
     # ---- 参数分类 API (用于迁移 / 冻结) ----
 
@@ -160,19 +188,28 @@ class StateInterface(nn.Module):
         """
         读侧: 生成每层的 state K/V。
 
+        EKS 混合: K 由 (1-α)*state + α*slot_keys 投影而来 (α=sigmoid(eks_alpha))。
+          - α=0: 纯 v2 路径, K 完全来自动态 state
+          - α=1: 纯 EKS, K 完全来自静态 slot 身份
+        V 始终来自动态 state (内容本身), 不混合。
+
         参数:
             state: (B, n_state, state_dim) 当前持久状态
 
         返回:
-            list[(K, V)] 长度 = n_layers，每个 K/V 形状 (B, n_state, hidden_size)
+            list[(K, V)] 长度 = n_layers, 每个 K/V 形状 (B, n_state, hidden_size)
         """
-        # 读之前先做 slot 间通信, 让 slot 角色分化后再投影成 K/V
-        state = self.slot_attn_read(state)
+        B = state.shape[0]
+        alpha = torch.sigmoid(self.eks_alpha)
+        # slot_keys: (n_state, state_dim) → 广播到 (B, n_state, state_dim)
+        slot_keys_broadcast = self.slot_keys.to(dtype=state.dtype).unsqueeze(0).expand(B, -1, -1)
+        state_for_key = (1.0 - alpha) * state + alpha * slot_keys_broadcast
+
         scale = torch.sigmoid(self.read_scale)
         kv_pairs = []
         for k_proj, v_proj in zip(self.read_k_projs, self.read_v_projs):
-            K = k_proj(state) * scale
-            V = v_proj(state) * scale
+            K = k_proj(state_for_key) * scale  # K: 混合 (state + slot_keys identity)
+            V = v_proj(state) * scale           # V: 纯动态内容
             kv_pairs.append((K, V))
         return kv_pairs
 
@@ -204,6 +241,15 @@ class StateInterface(nn.Module):
         """
         写侧: state 向 content 提问，提取要记住的信息。
 
+        EKS 混合 (attention matrix 层面):
+          - 原路径 attn_old: softmax(write_q(state_old) @ content.T / sqrt(d)) → (B, n, T)
+            含义: 每个 slot 主动向 content 提问, 靠 state_old 内容决定路由
+          - EKS 路径 attn_new: softmax(key_proj(content) @ slot_keys.T / τ).T → (B, n, T)
+            含义: 每个 content token 按 key 投影匹配 slot 身份, 决定写入哪个 slot
+          - 混合: attn = (1-α) * attn_old + α * attn_new, α = sigmoid(eks_alpha)
+
+        记录 routing (B, T, n_state) 到 self.last_write_routing, 供外层计算 entropy 正则。
+
         参数:
             state_old: (B, n_state, state_dim) 旧状态
             content_hidden: (B, T, hidden_size) backbone 最终输出
@@ -211,15 +257,32 @@ class StateInterface(nn.Module):
         返回:
             state_next: (B, n_state, state_dim) 更新后的状态
         """
-        Q = self.write_q(state_old)      # (B, n_state, hidden_size)
-        K = content_hidden.to(dtype=Q.dtype)  # (B, T, hidden_size)
-        V = K
+        # 原 v2 路径: slot(Q) × content(K,V)
+        Q = self.write_q(state_old)                          # (B, n_state, hidden_size)
+        K_v2 = content_hidden.to(dtype=Q.dtype)              # (B, T, hidden_size)
+        V = K_v2                                              # V 始终 = content (两路径共享)
+        d_h = Q.shape[-1]
+        attn_old = torch.softmax(Q @ K_v2.transpose(-2, -1) / (d_h ** 0.5), dim=-1)  # (B, n, T)
 
-        d = Q.shape[-1]
-        attn = torch.softmax(Q @ K.transpose(-2, -1) / (d ** 0.5), dim=-1)
-        extracted = attn @ V             # (B, n_state, hidden_size)
+        # EKS 路径: content token 按 key 投影 → softmax 路由到 slot
+        key = self.key_proj(content_hidden.to(dtype=self.key_proj.weight.dtype))  # (B, T, state_dim)
+        slot_keys = self.slot_keys.to(dtype=key.dtype)        # (n_state, state_dim)
+        tau = self.temperature.clamp(min=0.3)
+        d_k = key.shape[-1]
+        routing = torch.softmax(
+            key @ slot_keys.transpose(0, 1) / (tau * (d_k ** 0.5)),
+            dim=-1,
+        )                                                     # (B, T, n_state) — 每个 token 的 slot 分布
+        # 暴露给外层算 entropy aux loss; detach 前保留计算图
+        self.last_write_routing = routing
+        attn_new = routing.transpose(-2, -1).to(dtype=attn_old.dtype)  # (B, n_state, T)
 
-        state_new = self.write_out(extracted)  # (B, n_state, state_dim)
+        # 混合 attention matrix: 两条路径都是 (B, n, T) 概率分布, 凸组合仍是概率分布
+        alpha = torch.sigmoid(self.eks_alpha).to(dtype=attn_old.dtype)
+        attn = (1.0 - alpha) * attn_old + alpha * attn_new    # (B, n_state, T)
+
+        extracted = attn @ V                                   # (B, n_state, hidden_size)
+        state_new = self.write_out(extracted)                  # (B, n_state, state_dim)
 
         # 写完做 slot 间通信: 让 slot 看到彼此, 形成角色分化
         state_new = self.slot_attn_write(state_new)

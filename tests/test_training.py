@@ -361,3 +361,66 @@ def test_migration_loading():
     assert torch.allclose(dst.state_emb, torch.full((4, 16), 3.14))
     # projection 应保持随机初始化 (未变)
     assert torch.allclose(dst.read_k_projs[0].weight, read_k_before)
+
+
+def _build_tiny_model(entropy_aux_weight: float = 0.0, eks_alpha_init: float = -5.0):
+    """测试工具: 构建 TinyBackbone + XinheModel (eks_alpha/entropy_aux_weight 可调)"""
+    config = XinheConfig(
+        hidden_size=32, n_state=4, state_dim=32,
+        state_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
+        entropy_aux_weight=entropy_aux_weight,
+        eks_alpha_init=eks_alpha_init,
+        tbptt_steps=2, batch_size=2, learning_rate=1e-3,
+        warmup_steps=2, max_steps=4, device="cpu", dtype="float32",
+    )
+    backbone = TinyBackbone()
+    return XinheModel(config, backbone=backbone), config
+
+
+def test_entropy_aux_loss_present_when_weight_positive():
+    """entropy_aux_weight > 0 时 forward 返回 aux_loss 和 entropy_ratio, loss 含正则"""
+    torch.manual_seed(0)
+    model, _ = _build_tiny_model(entropy_aux_weight=0.01)
+
+    input_ids = torch.randint(0, 50, (2, 8))
+    labels = input_ids.clone()
+    state = model.init_state(2)
+    result = model(input_ids, state, labels=labels)
+
+    assert "aux_loss" in result, "entropy_aux_weight>0 应产生 aux_loss"
+    assert "entropy_ratio" in result, "entropy_aux_weight>0 应产生 entropy_ratio"
+    er = result["entropy_ratio"].item()
+    assert 0.0 <= er <= 1.0 + 1e-4, f"entropy_ratio 应在 [0,1], 实际 {er}"
+
+
+def test_entropy_aux_loss_absent_when_weight_zero():
+    """entropy_aux_weight = 0 时 forward 不添加 aux_loss (节省计算)"""
+    torch.manual_seed(0)
+    model, _ = _build_tiny_model(entropy_aux_weight=0.0)
+
+    input_ids = torch.randint(0, 50, (2, 8))
+    labels = input_ids.clone()
+    state = model.init_state(2)
+    result = model(input_ids, state, labels=labels)
+
+    assert "aux_loss" not in result, "entropy_aux_weight=0 不应产生 aux_loss"
+
+
+def test_entropy_aux_increases_loss():
+    """entropy_aux_weight > 0 会改变 loss 值 (通过和 0 对比)"""
+    torch.manual_seed(0)
+    m_off, _ = _build_tiny_model(entropy_aux_weight=0.0)
+    torch.manual_seed(0)
+    m_on, _ = _build_tiny_model(entropy_aux_weight=0.5)  # 较大权重放大差异
+
+    input_ids = torch.randint(0, 50, (2, 8))
+    labels = input_ids.clone()
+    state_off = m_off.init_state(2)
+    state_on = m_on.init_state(2)
+
+    r_off = m_off(input_ids, state_off, labels=labels)
+    r_on = m_on(input_ids, state_on, labels=labels)
+
+    # aux = -λ * entropy < 0 (因 entropy > 0), 因此加入后 loss 应 < 原 loss
+    assert r_on["loss"].item() < r_off["loss"].item(), \
+        f"aux_loss 应降低总 loss, off={r_off['loss']:.4f} on={r_on['loss']:.4f}"

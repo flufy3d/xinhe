@@ -1,11 +1,12 @@
 """
-测试 StateInterface (v2 对称 cross-attention 架构)
+测试 StateInterface (v4: 对称 cross-attention + EKS 架构)
 """
 import torch
 import pytest
 from xinhe.model.state_plugin import (
     StateInterface, SlotAttn,
     CORE_PARAM_PREFIXES, PROJECTION_PARAM_PREFIXES, SLOT_ATTN_PARAM_PREFIXES,
+    EKS_PARAM_PREFIXES, EKS_CORE_PARAM_PREFIXES,
 )
 
 
@@ -244,17 +245,13 @@ def test_slot_attn_identity_init():
 
 
 def test_slot_attn_in_interface_identity():
-    """StateInterface 内嵌的 slot_attn_read/write 初始恒等 → 与无 slot_attn 版本等价"""
+    """StateInterface 内嵌的 slot_attn_write 初始恒等 (v4 删了 slot_attn_read)"""
     torch.manual_seed(0)
     iface = StateInterface(n_state=8, state_dim=32, hidden_size=32, n_layers=2, state_scale_init=0.0)
 
-    # 手动调用 slot_attn_read 应为恒等
     state = iface.blank_state(2)
     state = state + torch.randn_like(state)  # 扰动一下
-    out_read = iface.slot_attn_read(state)
-    assert torch.allclose(out_read, state, atol=1e-6)
-
-    # slot_attn_write 同理
+    # slot_attn_write 恒等
     out_write = iface.slot_attn_write(state)
     assert torch.allclose(out_write, state, atol=1e-6)
 
@@ -290,35 +287,37 @@ def test_slot_attn_in_core_params():
 
 
 def test_slot_attn_parameters_api():
-    """slot_attn_parameters() 返回两个 SlotAttn 实例的所有参数"""
+    """slot_attn_parameters() 返回 slot_attn_write 的所有参数 (v4 读侧不再有 slot_attn)"""
     iface = StateInterface(n_state=4, state_dim=16, hidden_size=32, n_layers=2)
     slot_attn_params = iface.slot_attn_parameters()
     slot_attn_ids = {id(p) for p in slot_attn_params}
 
-    # 应包含 slot_attn_read 和 slot_attn_write 的全部参数
-    expected_ids = set()
-    for p in iface.slot_attn_read.parameters():
-        expected_ids.add(id(p))
-    for p in iface.slot_attn_write.parameters():
-        expected_ids.add(id(p))
+    expected_ids = {id(p) for p in iface.slot_attn_write.parameters()}
     assert slot_attn_ids == expected_ids
+    # slot_attn_read 不再存在
+    assert not hasattr(iface, "slot_attn_read")
 
 
 def test_interface_identity_at_init():
-    """恒等初始化下, 含 slot_attn 的 write_from_content 与无 slot_attn 等价
+    """α→0 + slot_attn_write 恒等 → write_from_content 严格等价原 v2 纯 cross-attn 路径
 
-    验证: slot_attn_write 恒等 → state_new 与不做 slot_attn 完全一致
+    v4: eks_alpha_init=-30 让 sigmoid(α)≈0, EKS 新路径贡献消失; slot_attn_write 恒等透传;
+    → 整个 write 等价 "原 write_q 路径 + write_out + gate"
     """
     torch.manual_seed(42)
-    iface = StateInterface(n_state=4, state_dim=16, hidden_size=32, n_layers=2)
+    # 让 α 严格近似 0
+    iface = StateInterface(
+        n_state=4, state_dim=16, hidden_size=32, n_layers=2,
+        eks_alpha_init=-30.0,
+    )
 
     state_old = torch.randn(1, 4, 16)
     content = torch.randn(1, 8, 32)
 
-    # 有 slot_attn (当前实现)
+    # 实际实现
     state_with = iface.write_from_content(state_old, content)
 
-    # 手工复现无 slot_attn 版本 (绕过 slot_attn_write)
+    # 手工复现 v2 纯路径 (绕过 EKS 和 slot_attn_write)
     Q = iface.write_q(state_old)
     K = content
     V = content
@@ -326,9 +325,115 @@ def test_interface_identity_at_init():
     attn = torch.softmax(Q @ K.transpose(-2, -1) / (d ** 0.5), dim=-1)
     extracted = attn @ V
     state_new = iface.write_out(extracted)
-    # 跳过 slot_attn_write
     gate = torch.sigmoid(iface.gate_proj(torch.cat([state_old, state_new], dim=-1)))
     state_without = gate * state_old + (1 - gate) * state_new
 
     assert torch.allclose(state_with, state_without, atol=1e-5), \
-        f"恒等初始化下 slot_attn 应透传, 最大差异={((state_with - state_without).abs().max().item())}"
+        f"α→0 + slot_attn 恒等下应严格等价 v2, 最大差异={((state_with - state_without).abs().max().item())}"
+
+
+# ============================================================
+# EKS (Entity-Keyed State) 相关测试
+# ============================================================
+
+
+def test_eks_fields_exist():
+    """EKS 新增字段齐全: slot_keys, key_proj, temperature, eks_alpha"""
+    iface = StateInterface(n_state=8, state_dim=16, hidden_size=32, n_layers=2)
+    assert hasattr(iface, "slot_keys")
+    assert iface.slot_keys.shape == (8, 16)
+    assert hasattr(iface, "key_proj")
+    assert iface.key_proj.weight.shape == (16, 32)  # state_dim × hidden_size
+    assert hasattr(iface, "temperature")
+    assert iface.temperature.numel() == 1
+    assert hasattr(iface, "eks_alpha")
+    assert iface.eks_alpha.numel() == 1
+
+
+def test_eks_routing_is_probability():
+    """write 后 last_write_routing 是每 token 的概率分布 (每 row sum=1)"""
+    torch.manual_seed(0)
+    iface = StateInterface(n_state=8, state_dim=16, hidden_size=32, n_layers=2)
+    state = iface.blank_state(2)
+    content = torch.randn(2, 5, 32)
+    _ = iface.write_from_content(state, content)
+
+    routing = iface.last_write_routing
+    assert routing is not None, "write 后 last_write_routing 应被填充"
+    assert routing.shape == (2, 5, 8), f"形状应为 (B, T, n_state), 实际 {tuple(routing.shape)}"
+    # 每 token 的 slot 分布 sum=1
+    token_sums = routing.sum(dim=-1)
+    assert torch.allclose(token_sums, torch.ones_like(token_sums), atol=1e-4)
+    # 非负
+    assert (routing >= 0).all()
+
+
+def test_eks_entropy_positive():
+    """EKS routing 的 mean entropy 在初始化下应接近 log(n_state) (均匀分布)"""
+    torch.manual_seed(0)
+    n_state = 8
+    iface = StateInterface(n_state=n_state, state_dim=16, hidden_size=32, n_layers=2)
+    state = iface.blank_state(2)
+    content = torch.randn(2, 5, 32)
+    _ = iface.write_from_content(state, content)
+
+    routing = iface.last_write_routing
+    mean_routing = routing.mean(dim=(0, 1))  # (n_state,)
+    entropy = -(mean_routing * torch.log(mean_routing + 1e-10)).sum().item()
+    import math
+    max_entropy = math.log(n_state)
+    # slot_keys 初始化为 0.1*randn + key_proj 默认初始化, routing 应相对分散 (非 collapse)
+    assert entropy > 0.5 * max_entropy, \
+        f"初始 routing 应分散, entropy={entropy:.3f}, max_entropy={max_entropy:.3f}"
+
+
+def test_eks_core_params_in_core():
+    """EKS 可迁移部分 (slot_keys/temperature/eks_alpha) 归 core"""
+    iface = StateInterface(n_state=4, state_dim=16, hidden_size=32, n_layers=2)
+    core_names = [n for n, _ in iface.named_parameters()
+                  if any(n.startswith(p) for p in CORE_PARAM_PREFIXES)]
+    eks_core_names = [n for n, _ in iface.named_parameters()
+                      if any(n.startswith(p) for p in EKS_CORE_PARAM_PREFIXES)]
+    assert len(eks_core_names) > 0
+    assert set(eks_core_names).issubset(set(core_names))
+
+
+def test_eks_key_proj_in_projection():
+    """key_proj 依赖 hidden_size → 归 projection (迁移时重新训)"""
+    iface = StateInterface(n_state=4, state_dim=16, hidden_size=32, n_layers=2)
+    proj_names = [n for n, _ in iface.named_parameters()
+                  if any(n.startswith(p) for p in PROJECTION_PARAM_PREFIXES)]
+    key_proj_names = [n for n, _ in iface.named_parameters() if n.startswith("key_proj")]
+    assert len(key_proj_names) > 0
+    assert set(key_proj_names).issubset(set(proj_names))
+
+
+def test_eks_slot_keys_have_gradient():
+    """slot_keys 可接收梯度"""
+    iface = StateInterface(n_state=4, state_dim=16, hidden_size=32, n_layers=2)
+    state = iface.blank_state(1)
+    content = torch.randn(1, 3, 32)
+    state_next = iface.write_from_content(state, content)
+    loss = state_next.sum()
+    loss.backward()
+    assert iface.slot_keys.grad is not None
+    assert iface.slot_keys.grad.abs().sum().item() > 0
+
+
+def test_eks_read_alpha_identity():
+    """α≈0 时 generate_read_kv 等价原 v2 路径 (K=k_proj(state))"""
+    torch.manual_seed(0)
+    iface = StateInterface(
+        n_state=4, state_dim=16, hidden_size=32, n_layers=2,
+        eks_alpha_init=-30.0, state_scale_init=0.0,
+    )
+    state = torch.randn(2, 4, 16)
+    kv = iface.generate_read_kv(state)
+    # 手动复现 v2: K = k_proj(state) * scale
+    scale = torch.sigmoid(iface.read_scale)
+    for l, (K, V) in enumerate(kv):
+        K_v2 = iface.read_k_projs[l](state) * scale
+        V_v2 = iface.read_v_projs[l](state) * scale
+        assert torch.allclose(K, K_v2, atol=1e-5), \
+            f"α→0 时读侧 K 应等价 v2, layer={l}, max_diff={((K - K_v2).abs().max().item())}"
+        assert torch.allclose(V, V_v2, atol=1e-6)

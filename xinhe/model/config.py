@@ -22,6 +22,11 @@ class XinheConfig:
     state_dim: int = 1024           # 状态维度 (可独立于 hidden_size)
     state_scale_init: float = -5.0  # sigmoid(-5) ≈ 0.007，空状态几乎无影响
 
+    # --- EKS (Entity-Keyed State, v4) ---
+    temperature_init: float = 1.0   # routing softmax 温度初值 (learnable, clamp min=0.3)
+    eks_alpha_init: float = -5.0    # 新旧路径混合: sigmoid(-5)≈0 → 开局完全走 v2 路径 (续训友好)
+    entropy_aux_weight: float = 0.01  # routing entropy 正则权重 (0 关闭, >0 防 slot collapse)
+
     # --- Sleep (对话 buffer replay + 权重更新，里程碑 9 实现) ---
     sleep_every: int = 4            # 每隔几轮对话触发 sleep
 
@@ -172,6 +177,9 @@ class XinheConfig:
                 "n_state": "n_state",
                 "state_dim": "state_dim",
                 "state_scale_init": "state_scale_init",
+                "temperature_init": "temperature_init",
+                "eks_alpha_init": "eks_alpha_init",
+                "entropy_aux_weight": "entropy_aux_weight",
             },
             "sleep": {
                 "sleep_every": "sleep_every",
