@@ -23,6 +23,7 @@ class XinheConfig:
     state_scale_init: float = -5.0  # sigmoid(-5) ≈ 0.007，空状态几乎无影响
 
     # --- EKS (Entity-Keyed State, v4) ---
+    eks_enabled: bool = True        # False 时完全关闭 EKS 路径, 退回纯 v2 (SlotAttn + weighted loss)
     temperature_init: float = 1.0   # routing softmax 温度初值 (learnable, clamp min=0.3)
     eks_alpha_init: float = -5.0    # 新旧路径混合: sigmoid(-5)≈0 → 开局完全走 v2 路径 (续训友好)
     entropy_aux_weight: float = 0.01  # routing entropy 正则权重 (0 关闭, >0 防 slot collapse)
@@ -177,6 +178,7 @@ class XinheConfig:
                 "n_state": "n_state",
                 "state_dim": "state_dim",
                 "state_scale_init": "state_scale_init",
+                "eks_enabled": "eks_enabled",
                 "temperature_init": "temperature_init",
                 "eks_alpha_init": "eks_alpha_init",
                 "entropy_aux_weight": "entropy_aux_weight",

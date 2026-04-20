@@ -97,11 +97,13 @@ class StateInterface(nn.Module):
         state_scale_init: float = -5.0,
         temperature_init: float = 1.0,
         eks_alpha_init: float = -5.0,
+        eks_enabled: bool = True,
     ):
         super().__init__()
         self.n_state = n_state
         self.state_dim = state_dim
         self.hidden_size = hidden_size if hidden_size is not None else state_dim
+        self.eks_enabled = eks_enabled
 
         # ── 初始状态 ──
         self.state_emb = nn.Parameter(torch.randn(n_state, state_dim) * 0.01)
@@ -199,13 +201,22 @@ class StateInterface(nn.Module):
         返回:
             list[(K, V)] 长度 = n_layers, 每个 K/V 形状 (B, n_state, hidden_size)
         """
+        scale = torch.sigmoid(self.read_scale)
+        if not self.eks_enabled:
+            # 纯 v2 路径: K/V 都从动态 state 投影 (无 EKS 混合)
+            kv_pairs = []
+            for k_proj, v_proj in zip(self.read_k_projs, self.read_v_projs):
+                K = k_proj(state) * scale
+                V = v_proj(state) * scale
+                kv_pairs.append((K, V))
+            return kv_pairs
+
         B = state.shape[0]
         alpha = torch.sigmoid(self.eks_alpha)
         # slot_keys: (n_state, state_dim) → 广播到 (B, n_state, state_dim)
         slot_keys_broadcast = self.slot_keys.to(dtype=state.dtype).unsqueeze(0).expand(B, -1, -1)
         state_for_key = (1.0 - alpha) * state + alpha * slot_keys_broadcast
 
-        scale = torch.sigmoid(self.read_scale)
         kv_pairs = []
         for k_proj, v_proj in zip(self.read_k_projs, self.read_v_projs):
             K = k_proj(state_for_key) * scale  # K: 混合 (state + slot_keys identity)
@@ -260,9 +271,20 @@ class StateInterface(nn.Module):
         # 原 v2 路径: slot(Q) × content(K,V)
         Q = self.write_q(state_old)                          # (B, n_state, hidden_size)
         K_v2 = content_hidden.to(dtype=Q.dtype)              # (B, T, hidden_size)
-        V = K_v2                                              # V 始终 = content (两路径共享)
+        V = K_v2                                              # V 始终 = content
         d_h = Q.shape[-1]
         attn_old = torch.softmax(Q @ K_v2.transpose(-2, -1) / (d_h ** 0.5), dim=-1)  # (B, n, T)
+
+        if not self.eks_enabled:
+            # 纯 v2 写路径, 不计算 EKS / routing / aux
+            self.last_write_routing = None
+            extracted = attn_old @ V
+            state_new = self.write_out(extracted)
+            state_new = self.slot_attn_write(state_new)
+            gate = torch.sigmoid(self.gate_proj(
+                torch.cat([state_old, state_new], dim=-1)
+            ))
+            return gate * state_old + (1 - gate) * state_new
 
         # EKS 路径: content token 按 key 投影 → softmax 路由到 slot
         key = self.key_proj(content_hidden.to(dtype=self.key_proj.weight.dtype))  # (B, T, state_dim)
@@ -273,21 +295,17 @@ class StateInterface(nn.Module):
             key @ slot_keys.transpose(0, 1) / (tau * (d_k ** 0.5)),
             dim=-1,
         )                                                     # (B, T, n_state) — 每个 token 的 slot 分布
-        # 暴露给外层算 entropy aux loss; detach 前保留计算图
         self.last_write_routing = routing
         attn_new = routing.transpose(-2, -1).to(dtype=attn_old.dtype)  # (B, n_state, T)
 
-        # 混合 attention matrix: 两条路径都是 (B, n, T) 概率分布, 凸组合仍是概率分布
+        # 混合 attention matrix
         alpha = torch.sigmoid(self.eks_alpha).to(dtype=attn_old.dtype)
         attn = (1.0 - alpha) * attn_old + alpha * attn_new    # (B, n_state, T)
 
         extracted = attn @ V                                   # (B, n_state, hidden_size)
         state_new = self.write_out(extracted)                  # (B, n_state, state_dim)
-
-        # 写完做 slot 间通信: 让 slot 看到彼此, 形成角色分化
         state_new = self.slot_attn_write(state_new)
 
-        # 纯动态 gate
         gate = torch.sigmoid(self.gate_proj(
             torch.cat([state_old, state_new], dim=-1)
         ))

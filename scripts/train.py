@@ -89,9 +89,11 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
         "grad_accum_steps": "grad_accum_steps",
         "learning_rate": "learning_rate",
         "plugin_lr_multiplier": "plugin_lr_multiplier",
+        "plugin_core_lr_multiplier": "plugin_core_lr_multiplier",
+        "slot_attn_lr_multiplier": "slot_attn_lr_multiplier",
         "freeze_lora": "freeze_lora",
         "freeze_plugin_core": "freeze_plugin_core",
-        "plugin_core_lr_multiplier": "plugin_core_lr_multiplier",
+        "train_only_slot_attn": "train_only_slot_attn",
         "weight_decay": "weight_decay",
         "grad_clip": "grad_clip",
         "warmup_steps": "warmup_steps",
@@ -101,6 +103,11 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
         "log_every": "log_every",
         "save_every": "save_every",
         "eval_every": "eval_every",
+        # v4 EKS 相关
+        "temperature_init": "temperature_init",
+        "eks_alpha_init": "eks_alpha_init",
+        "entropy_aux_weight": "entropy_aux_weight",
+        "eks_enabled": "eks_enabled",
     }
     for yaml_key, field_name in field_map.items():
         if yaml_key in training:

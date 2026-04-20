@@ -52,6 +52,9 @@ class Trainer:
         self.device = torch.device(config.device)
         self.dtype = getattr(torch, config.dtype, torch.float32)
 
+        # Sync runtime flags 到 state_interface (config 改动后需显式同步)
+        self.model.state_interface.eks_enabled = getattr(config, "eks_enabled", True)
+
         # 分组优化: Plugin Core / Plugin Proj / LoRA 独立学习率
         self._apply_freezes(config)
         self.optimizer = self._build_optimizer(config)
@@ -361,6 +364,9 @@ class Trainer:
         self._early_stopped = False
         self._ema_loss = None
         self._ema_acc = None
+
+        # Sync runtime flags that live on state_interface (不会因 config 变化自动更新)
+        self.model.state_interface.eks_enabled = getattr(config, "eks_enabled", True)
 
         self._apply_freezes(config)
         self.optimizer = self._build_optimizer(config)

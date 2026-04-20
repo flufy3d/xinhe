@@ -60,6 +60,7 @@ class XinheModel(nn.Module):
             state_scale_init=config.state_scale_init,
             temperature_init=getattr(config, "temperature_init", 1.0),
             eks_alpha_init=getattr(config, "eks_alpha_init", -5.0),
+            eks_enabled=getattr(config, "eks_enabled", True),
         )
 
         # LM head (复用 backbone 的)
