@@ -15,6 +15,14 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
+# 预加载 torch 子模块 (如果在函数内 import, Python 会把 torch 误作 local 变量,
+# 导致 UnboundLocalError)
+try:
+    import torch._dynamo
+    import torch._logging
+except Exception:
+    pass
+
 from ..model.xinhe_model import XinheModel
 from ..model.config import XinheConfig
 from ..model.lora import get_lora_params
@@ -52,10 +60,7 @@ class Trainer:
         self.device = torch.device(config.device)
         self.dtype = getattr(torch, config.dtype, torch.float32)
 
-        # Sync runtime flags 到 state_interface (config 改动后需显式同步)
-        self.model.state_interface.eks_enabled = getattr(config, "eks_enabled", True)
-
-        # 分组优化: Plugin Core / Plugin Proj / LoRA 独立学习率
+        # 分组优化: Plugin / LoRA 两组独立学习率
         self._apply_freezes(config)
         self.optimizer = self._build_optimizer(config)
 
@@ -80,58 +85,25 @@ class Trainer:
         self._ema_acc = None
 
     def _apply_freezes(self, config: XinheConfig):
-        """按配置冻结/解冻 LoRA 和 plugin 参数"""
-        # LoRA 冻结
+        """按配置冻结/解冻 LoRA 和 plugin 参数 (v5a: 仅支持 freeze_lora 一个开关)"""
         freeze_lora = getattr(config, "freeze_lora", False)
         for p in get_lora_params(self.model.backbone):
             p.requires_grad = not freeze_lora
-        # Plugin core 冻结 (迁移时只训 proj + LoRA)
-        if getattr(config, "freeze_plugin_core", False):
-            self.model.state_interface.freeze_core()
-        else:
-            self.model.state_interface.unfreeze_core()
-        # Plugin projection 冻结 (plugin_lr_multiplier=0 时，think 课程用)
-        freeze_proj = getattr(config, "plugin_lr_multiplier", 1.0) == 0
-        for p in self.model.state_interface.projection_parameters():
-            p.requires_grad = not freeze_proj
-
-        # D2 诊断模式: 只训 slot_attn, 冻结其他所有
-        if getattr(config, "train_only_slot_attn", False):
-            # 冻结 LoRA
-            for p in get_lora_params(self.model.backbone):
-                p.requires_grad = False
-            # 冻结 plugin 所有 (包含 slot_attn, 先整体冻结)
-            for p in self.model.state_interface.parameters():
-                p.requires_grad = False
-            # 单独解冻 slot_attn
-            for p in self.model.state_interface.slot_attn_parameters():
-                p.requires_grad = True
+        # plugin_lr_multiplier=0 表示冻结整个 plugin
+        freeze_plugin = getattr(config, "plugin_lr_multiplier", 1.0) == 0
+        for p in self.model.state_interface.parameters():
+            p.requires_grad = not freeze_plugin
 
     def _build_optimizer(self, config: XinheConfig) -> torch.optim.AdamW:
-        """构建 optimizer，Plugin Core (不含 slot_attn) / SlotAttn / Plugin Proj / LoRA 四组独立学习率。
-
-        SlotAttn 从严格恒等初始化开始 (out_proj/mlp[-1] 全零), 需要更高 LR 才能快速学到分化信号,
-        因此单独一组: lr × plugin_mult × core_mult × slot_attn_mult。
-        """
+        """构建 optimizer: Plugin / LoRA 两组独立学习率 (Adam 默认 eps)。"""
         lr = config.learning_rate
         plugin_mult = getattr(config, "plugin_lr_multiplier", 1.0)
-        core_mult = getattr(config, "plugin_core_lr_multiplier", 1.0)
-        slot_attn_mult = getattr(config, "slot_attn_lr_multiplier", 3.0)
 
-        # 从 core 里把 slot_attn 参数单独挑出来
-        slot_attn_set = set(id(p) for p in self.model.state_interface.slot_attn_parameters())
-        core_params = [p for p in self.model.state_interface.core_parameters()
-                       if p.requires_grad and id(p) not in slot_attn_set]
-        slot_attn_params = [p for p in self.model.state_interface.slot_attn_parameters() if p.requires_grad]
-        proj_params = [p for p in self.model.state_interface.projection_parameters() if p.requires_grad]
+        plugin_params = [p for p in self.model.state_interface.parameters() if p.requires_grad]
 
         param_groups = []
-        if core_params:
-            param_groups.append({"params": core_params, "lr": lr * plugin_mult * core_mult})
-        if slot_attn_params:
-            param_groups.append({"params": slot_attn_params, "lr": lr * plugin_mult * core_mult * slot_attn_mult})
-        if proj_params:
-            param_groups.append({"params": proj_params, "lr": lr * plugin_mult})
+        if plugin_params:
+            param_groups.append({"params": plugin_params, "lr": lr * plugin_mult})
         if not getattr(config, "freeze_lora", False):
             lora_params = [p for p in get_lora_params(self.model.backbone) if p.requires_grad]
             if lora_params:
@@ -139,15 +111,21 @@ class Trainer:
         return torch.optim.AdamW(param_groups, weight_decay=config.weight_decay)
 
     def _build_scheduler(self):
-        """Cosine schedule with linear warmup"""
+        """Cosine schedule with linear warmup + min LR clamp (5% of peak)。
+
+        Min clamp 避免 LR→0 时 Adam 的 v_hat 长期低估 + 小梯度 spike 产生
+        巨大 update step (grad / sqrt(v_hat)) 导致训练末期崩盘 (observed v5e stage 2)。
+        """
         warmup = self.config.warmup_steps
         max_steps = self.config.max_steps
+        min_mult = 0.1  # LR 最低降到 peak 的 10% (配合 Adam eps=1e-6 防末期爆炸)
 
         def lr_lambda(step):
             if step < warmup:
                 return step / max(warmup, 1)
             progress = (step - warmup) / max(max_steps - warmup, 1)
-            return 0.5 * (1 + math.cos(math.pi * progress))
+            cosine = 0.5 * (1 + math.cos(math.pi * progress))
+            return max(min_mult, cosine)
 
         return torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
 
@@ -159,9 +137,18 @@ class Trainer:
         # TF32 加速 (float32 矩阵乘法用 TensorFloat32)
         torch.set_float32_matmul_precision('high')
 
-        # torch.compile: 只编译 backbone (transformer blocks)，不编译 plugin 的 state 操作
+        # torch.compile: 只编译 backbone (transformer blocks)，plugin 的 state 操作不编译
+        # 配套: reset_for_new_stage() 里显式 dynamo.reset() 清掉 cache, 避免跨阶段 OOM
         import sys
+        import warnings
         if sys.platform == "linux" and not getattr(self, "_compiled", False):
+            # 屏蔽 Dynamo 追踪 FLA 库时的良性告警
+            warnings.filterwarnings("ignore", message=".*Dynamo.*", category=UserWarning)
+            warnings.filterwarnings("ignore", module=r"torch\._dynamo.*", category=UserWarning)
+            try:
+                torch._logging.set_logs(dynamo=40)  # ERROR only
+            except Exception:
+                pass
             try:
                 self.model.backbone.forward_blocks = torch.compile(
                     self.model.backbone.forward_blocks)
@@ -177,16 +164,14 @@ class Trainer:
             print(f"梯度累积: {self.config.grad_accum_steps} 步")
 
         self.optimizer.zero_grad()
+        self._last_eval_step = -1  # 避免同步骤重复 eval
         epoch = 0
         while self.global_step < self.config.max_steps:
             if self._early_stopped:
                 break
             epoch += 1
-            epoch_loss = self._train_epoch()
-
-            if self.val_dataloader and self.global_step % self.config.eval_every == 0:
-                val_loss = self._validate()
-                print(f"[Epoch {epoch}] val_loss={val_loss:.4f}")
+            self._train_epoch()
+            # 注: val 已改到 _maybe_optimizer_step 里每 eval_every 步触发, 不再只在 epoch 末
 
         scale = torch.sigmoid(self.model.state_interface.read_scale).item()
         if self._early_stopped:
@@ -272,32 +257,32 @@ class Trainer:
         return episode_total_loss
 
     @torch.no_grad()
-    def _validate(self) -> float:
-        """验证集评估"""
+    def _validate(self) -> None:
+        """验证集评估: VALUE/FRAME/TELL 分解 (替代无信息量的 val_loss)"""
         self.model.eval()
-        total_loss = 0
-        num_episodes = 0
-
-        for episode_segments in self.val_dataloader:
-            B = episode_segments[0][0].shape[0]
-            state = self.model.init_state(B).to(self.device)
-
-            for seg_idx, batch in enumerate(episode_segments):
-                segment, labels, weights = batch
-                segment = segment.to(self.device)
-                labels = labels.to(self.device)
-                weights = weights.to(self.device)
-
-                with torch.amp.autocast("cuda", dtype=self.dtype):
-                    result = self.model(segment, state, labels=labels, pad_token_id=self.pad_token_id, weights=weights)
-
-                state = result["state_next"]
-                total_loss += result["loss"].item()
-
-            num_episodes += 1
-
+        try:
+            from scripts.eval_value_breakdown import eval_value_breakdown_fast
+            from pathlib import Path as _Path
+            if _Path(self.config.val_path).exists():
+                tokenizer = getattr(self, "_fast_eval_tokenizer", None)
+                if tokenizer is None:
+                    from transformers import AutoTokenizer
+                    tokenizer = AutoTokenizer.from_pretrained(
+                        str(_Path(self.config.backbone_model_path).resolve()),
+                        trust_remote_code=True,
+                    )
+                    if tokenizer.pad_token_id is None:
+                        tokenizer.pad_token_id = tokenizer.eos_token_id
+                    self._fast_eval_tokenizer = tokenizer
+                breakdown = eval_value_breakdown_fast(
+                    self.model, tokenizer, self.config.val_path, self.device,
+                    seg_len=self.config.segment_length, max_episodes=50,
+                )
+                print(f"  [val breakdown] VALUE={breakdown['VALUE']:.2%} "
+                      f"FRAME={breakdown['FRAME']:.2%} TELL={breakdown['TELL']:.2%}")
+        except Exception as e:
+            print(f"  [val breakdown] 跳过: {e}")
         self.model.train()
-        return total_loss / max(num_episodes, 1)
 
     def _maybe_optimizer_step(self, last_loss: float, last_acc: float = 1.0):
         """梯度累积: 累积够 grad_accum_steps 次后执行一次 optimizer step"""
@@ -332,6 +317,13 @@ class Trainer:
         if self.global_step % self.config.save_every == 0:
             self._save_checkpoint()
 
+        # 每 eval_every 步跑一次 val breakdown (不再依赖 epoch 边界)
+        if (self.val_dataloader is not None
+                and self.global_step % self.config.eval_every == 0
+                and self.global_step != self._last_eval_step):
+            self._last_eval_step = self.global_step
+            self._validate()
+
         # 早停检查 (滑动窗口: 最近 patience 步全部满足才收敛)
         early_stop_loss = getattr(self.config, 'early_stop_loss', 0)
         early_stop_patience = getattr(self.config, 'early_stop_patience', 0)
@@ -365,8 +357,21 @@ class Trainer:
         self._ema_loss = None
         self._ema_acc = None
 
-        # Sync runtime flags that live on state_interface (不会因 config 变化自动更新)
-        self.model.state_interface.eks_enabled = getattr(config, "eks_enabled", True)
+        # 动态更新 runtime 超参 (不重建模型, 只改 StateInterface 上的标量)
+        new_wi = getattr(config, "write_iterations", 1)
+        if new_wi != getattr(self.model.state_interface, "write_iterations", 1):
+            self.model.state_interface.write_iterations = new_wi
+            print(f"[write_iterations] 阶段切换 → {new_wi}")
+
+        # 清掉 Dynamo 编译缓存: 新 stage 的 episode_length/batch_size 变化会触发重编译,
+        # 若不清, 旧阶段的编译 graph 还占着显存 → 跨阶段 OOM
+        if getattr(self, "_compiled", False):
+            try:
+                torch._dynamo.reset()
+                torch.cuda.empty_cache()
+                print("[torch.compile] 清空 Dynamo cache (阶段切换)")
+            except Exception as e:
+                print(f"[torch.compile] reset 失败: {e}")
 
         self._apply_freezes(config)
         self.optimizer = self._build_optimizer(config)

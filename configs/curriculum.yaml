@@ -1,53 +1,59 @@
 # ============================================================
-# 基础记忆课程 (所有 backbone / 硬件共享)
+# 基础记忆课程 (v5f: Iterative Slot Attention + GRU)
 #
-# 纯粹训练 state 读写能力，不含 think 数据。
-# Think 课程见 curriculum_think.yaml，迁移课程见 curriculum_migrate.yaml。
+# 设计原则:
+#   Phase A (stage 0-5): 短 turn + 快 + 专注 多 entity × 多 fact × 两者混合
+#     验收点: stage 5 VALUE ≥ 95% on 3-entity same_cat=0.5 → 核心已过
+#   Phase B (stage 6-8): 中 turn, recall 能力 + 更难混合
+#   Phase C (stage 9-11): 长 turn, 全混合收官
+#
+# 关键变化 vs v5b:
+#   - recall_simple 从 Phase A stage 4 → Phase B stage 6
+#   - 所有 Phase A entity stage 都默认 cw>0 (防 stage "忘掉" 问题)
+#   - stage 5 "3entity_hard" (3 entities same_cat=0.5 短 turn) — plan Primary 目标
 #
 # 用法:
 #   python scripts/train.py --config configs/curriculum_qwen3.5-0.8b.yaml
 # ============================================================
 
-# 训练默认值 — 每个阶段的 training 自动继承，阶段内的值覆盖默认值
 training_defaults:
-  episode_length: 16
-  tbptt_steps: 16
-  learning_rate: 1.0e-4
+  episode_length: 5
+  tbptt_steps: 5
+  learning_rate: 3.0e-4
   plugin_lr_multiplier: 1.0
   grad_accum_steps: 1
-  max_steps: 5000
+  max_steps: 2000
   early_stop_loss: 0.05
   early_stop_patience: 200
+  contrastive_weight: 0.0
 
 stages:
   # ================================================================
-  # Phase 1: Bootstrap + 全模式引入 (阶段 0-3)
-  # 用最低难度在前 4 阶段覆盖 fact / entity / recall 三种存储模式
+  # Phase A: 短 turn (2-5) + 多 entity + 多 fact + 混合
   # ================================================================
 
-  # ── 阶段 0: State 启动 ──
-  # 最简任务: 只有名字, 2轮 (tell→recall), 零噪声
-  - name: "0_state_init"
+  # ── Stage 0: State bootstrap (1 fact, 2 轮) ──
+  - name: "0_bootstrap"
     data:
       num_train: 10000
+      num_facts: 1
+      categories: ["name"]
       no_pre_filler: true
       no_overwrite: true
       min_distance: 0
       max_distance: 0
       max_turns: 2
-      categories: ["name"]
     training:
       episode_length: 2
       tbptt_steps: 2
-      learning_rate: 3.0e-4
       freeze_lora: true
-      max_steps: 3000
+      max_steps: 1500
 
-  # ── 阶段 1: 基础记忆 ──
-  # 加 distance=1 filler, 证明跨轮保持
-  - name: "1_base_memory"
+  # ── Stage 1: 基础跨轮保持 (1 fact, 4 轮) ──
+  - name: "1_distance1"
     data:
       num_train: 10000
+      num_facts: 1
       no_pre_filler: true
       no_overwrite: true
       min_distance: 1
@@ -56,18 +62,16 @@ stages:
     training:
       episode_length: 4
       tbptt_steps: 4
-      learning_rate: 3.0e-4
+      max_steps: 1500
 
-  # ── 阶段 2: Entity 绑定 (name only) ──
-  # 极早引入 entity: 只记名字, same_category=1.0 迫使靠 entity 区分
-  # 难度≈stage 1, 从"记 1 个名字"变成"记 2 个不同人的名字"
-  - name: "2_entity_name"
+  # ── Stage 2: 不同类 entity (2 entity, 易 routing 热身) ──
+  # max_steps 减到 1500 防 Adam 末期 LR 低 + v_hat 小时 spike 崩盘 (v5f 实测)
+  - name: "2_entity_diff"
     data:
       num_train: 10000
       num_facts: 2
       entity_ratio: 1.0
-      same_category: 1.0
-      categories: ["name"]
+      same_category: 0.0
       no_pre_filler: true
       no_overwrite: true
       min_distance: 1
@@ -76,63 +80,108 @@ stages:
     training:
       episode_length: 4
       tbptt_steps: 4
-      learning_rate: 3.0e-4
+      max_steps: 1500
+      contrastive_weight: 0.1
 
-  # ── 阶段 3: 对话回忆 ──
-  # 极早引入 recall: 全部前置轮用动态内容, 回忆上一轮
-  # 模型学会始终存下上一轮信息 (闲聊/事实告知/问答)
-  - name: "3_recall_simple"
+  # ── Stage 3: 同类 entity (2 entity same_cat=1.0, 硬 routing 第一关) ──
+  - name: "3_entity_same"
     data:
-      num_train: 10000
-      recall_ratio: 1.0
-      no_overwrite: true
-      max_turns: 4
-    training:
-      episode_length: 4
-      tbptt_steps: 4
-      learning_rate: 3.0e-4
-
-  # ================================================================
-  # Phase 2: 空间扩展 (阶段 4-7)
-  # 增加 fact 数量, 多类别 entity, 三模式混合
-  # ================================================================
-
-  # ── 阶段 4: 随机 tell 位置 ──
-  - name: "4_random_tell"
-    data:
-      num_train: 10000
-      num_fillers: 16
-      max_pre_filler: 1
+      num_train: 15000
+      num_facts: 2
+      entity_ratio: 1.0
+      same_category: 1.0
       no_overwrite: true
       min_distance: 1
-      max_distance: 1
+      max_distance: 2
       max_turns: 5
     training:
       episode_length: 5
       tbptt_steps: 5
+      max_steps: 3000
+      contrastive_weight: 0.2
 
-  # ── 阶段 5: 3 类事实 + distance ──
-  - name: "5_fact3"
+  # ── Stage 4: 3 facts + 中度 entity (多 fact 能力 + 保留 routing) ──
+  - name: "4_3fact_mix"
     data:
-      num_train: 10000
+      num_train: 15000
       num_facts: 3
+      entity_ratio: 0.5
+      same_category: 0.3
       max_pre_filler: 1
       no_overwrite: true
       min_distance: 1
+      max_distance: 2
+      max_turns: 5
+    training:
+      episode_length: 5
+      tbptt_steps: 5
+      max_steps: 3000
+      contrastive_weight: 0.2
+
+  # ── Stage 5: ★ 3 entities 硬案例综合 (核心验收点) ──
+  # entity_ratio=1.0 全 entity, same_cat=0.5 半数同类, num_facts=3
+  # 目标: VALUE ≥ 95% → 核心多 entity 多 fact 混合已解决
+  - name: "5_3entity_hard"
+    data:
+      num_train: 20000
+      num_facts: 3
+      entity_ratio: 1.0
+      same_category: 0.5
+      max_pre_filler: 1
+      no_overwrite: true
+      min_distance: 1
+      max_distance: 2
+      max_turns: 6
+    training:
+      episode_length: 6
+      tbptt_steps: 6
+      max_steps: 5000
+      contrastive_weight: 0.3
+
+  # ================================================================
+  # Phase B: 中 turn (7), recall + 更难
+  # ================================================================
+
+  # ── Stage 6: Recall + Entity (从 Phase A 移过来) ──
+  - name: "6_recall_with_entity"
+    data:
+      num_train: 10000
+      recall_ratio: 1.0
+      entity_ratio: 0.3
+      same_category: 0.2
+      no_overwrite: true
+      max_turns: 7
+    training:
+      episode_length: 7
+      tbptt_steps: 7
+      max_steps: 2000
+      contrastive_weight: 0.1
+
+  # ── Stage 7: 3 entities same_cat=0.7 (更难同类) ──
+  - name: "7_entity_harder"
+    data:
+      num_train: 15000
+      num_facts: 3
+      entity_ratio: 1.0
+      same_category: 0.7
+      no_overwrite: true
+      min_distance: 1
       max_distance: 3
       max_turns: 7
     training:
       episode_length: 7
       tbptt_steps: 7
+      max_steps: 3000
+      contrastive_weight: 0.3
 
-  # ── 阶段 6: Entity 多类别 ──
-  # 不同实体不同类别, 学习 entity→类别 绑定
-  - name: "6_entity_multi"
+  # ── Stage 8: 三模式空间混合 ──
+  - name: "8_space_mix"
     data:
       num_train: 10000
       num_facts: 3
       entity_ratio: 0.5
-      same_category: 0.0
+      recall_ratio: 0.3
+      same_category: 0.4
       no_overwrite: true
       min_distance: 1
       max_distance: 3
@@ -140,105 +189,64 @@ stages:
     training:
       episode_length: 7
       tbptt_steps: 7
-
-  # ── 阶段 7: 三模式混合巩固 ──
-  # fact + entity + recall 首次全混合, 巩固三种存储模式
-  - name: "7_space_mix"
-    data:
-      num_train: 10000
-      num_facts: 3
-      entity_ratio: 0.3
-      recall_ratio: 0.3
-      no_overwrite: true
-      min_distance: 1
-      max_distance: 5
-      max_turns: 16
+      max_steps: 2500
+      contrastive_weight: 0.2
 
   # ================================================================
-  # Phase 3: 难度提升 (阶段 8-11)
+  # Phase C: 长 turn (16), 全混合收官
   # ================================================================
 
-  # ── 阶段 8: 5 类事实 ──
-  - name: "8_fact5"
+  # ── Stage 9: 5 facts 长距离 + entity ──
+  - name: "9_fact_scale"
     data:
       num_train: 10000
       num_facts: 5
+      entity_ratio: 0.3
+      same_category: 0.3
       max_pre_filler: 2
       no_overwrite: true
       min_distance: 1
-      max_distance: 5
+      max_distance: 8
       max_turns: 16
+    training:
+      episode_length: 16
+      tbptt_steps: 16
+      max_steps: 2500
+      contrastive_weight: 0.15
 
-  # ── 阶段 9: Entity 同类别绑定 ──
-  # 必须精确绑 entity→value, 不能靠类别区分
-  - name: "9_entity_same"
+  # ── Stage 10: 覆写 + entity ──
+  - name: "10_overwrite"
     data:
       num_train: 10000
-      num_facts: 3
-      entity_ratio: 0.5
-      same_category: 0.5
-      no_overwrite: true
-      min_distance: 1
-      max_distance: 5
-      max_turns: 16
-
-  # ── 阶段 10: 8 类事实 + 长距离 ──
-  - name: "10_fact8_distance"
-    data:
-      num_train: 10000
-      num_facts: 8
-      max_pre_filler: 2
-      no_overwrite: true
-      min_distance: 1
-      max_distance: 10
-      max_turns: 16
-
-  # ── 阶段 11: 覆写能力 ──
-  - name: "11_overwrite"
-    data:
-      num_train: 10000
-      num_facts: 8
+      num_facts: 5
+      entity_ratio: 0.3
+      same_category: 0.2
       max_pre_filler: 2
       overwrite_ratio: 0.4
       min_distance: 1
-      max_distance: 10
+      max_distance: 6
       max_turns: 16
+    training:
+      episode_length: 16
+      tbptt_steps: 16
+      max_steps: 2500
+      contrastive_weight: 0.1
 
-  # ================================================================
-  # Phase 4: Recall 精细化 + 全混合 (阶段 12-14)
-  # ================================================================
-
-  # ── 阶段 12: 回忆 AI 发言 ──
-  - name: "12_recall_ai"
-    data:
-      num_train: 10000
-      recall_ratio: 0.5
-      ai_recall_ratio: 1.0
-      entity_ratio: 0.2
-      no_overwrite: true
-      max_turns: 16
-
-  # ── 阶段 13: 混合回忆 ──
-  - name: "13_recall_mix"
-    data:
-      num_train: 10000
-      recall_ratio: 0.5
-      ai_recall_ratio: 0.5
-      entity_ratio: 0.2
-      no_overwrite: true
-      max_turns: 16
-
-  # ── 阶段 14: 全能力混合 ──
-  - name: "14_all"
+  # ── Stage 11: 全能力混合收官 (含 recall_ai) ──
+  - name: "11_all_mix"
     data:
       num_train: 10000
       num_facts: 5
-      entity_ratio: 0.2
+      entity_ratio: 0.3
       recall_ratio: 0.2
       ai_recall_ratio: 0.5
       overwrite_ratio: 0.2
       same_category: 0.3
       min_distance: 1
-      max_distance: 10
+      max_distance: 8
       max_turns: 16
-
+    training:
+      episode_length: 16
+      tbptt_steps: 16
+      max_steps: 3000
+      contrastive_weight: 0.1

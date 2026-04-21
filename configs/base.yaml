@@ -17,10 +17,6 @@ state:
   state_dim: 1024
   state_scale_init: -3.0
 
-# --- Sleep (对话 buffer replay + 权重更新，里程碑 9 实现) ---
-sleep:
-  sleep_every: 4
-
 # --- LoRA ---
 lora:
   rank: 4
@@ -38,7 +34,7 @@ training:
   weight_decay: 0.01
   grad_clip: 1.0
   grad_accum_steps: 1
-  gradient_checkpointing: true
+  gradient_checkpointing: false
   warmup_steps: 100
   max_steps: 10000
   eval_every: 500

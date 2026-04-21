@@ -1,7 +1,9 @@
 """
-XinheConfig — 心核配置
+XinheConfig — 心核配置 (v5a)
 
-包含状态机制、LoRA、训练等全部超参数。
+包含状态机制、LoRA、训练等超参数。
+v5 减法: 删除 EKS / Sleep / plugin_core / slot_attn / freeze_plugin_core /
+         train_only_slot_attn 等僵尸字段。
 """
 from dataclasses import dataclass, field
 from typing import Optional
@@ -22,14 +24,11 @@ class XinheConfig:
     state_dim: int = 1024           # 状态维度 (可独立于 hidden_size)
     state_scale_init: float = -5.0  # sigmoid(-5) ≈ 0.007，空状态几乎无影响
 
-    # --- EKS (Entity-Keyed State, v4) ---
-    eks_enabled: bool = True        # False 时完全关闭 EKS 路径, 退回纯 v2 (SlotAttn + weighted loss)
-    temperature_init: float = 1.0   # routing softmax 温度初值 (learnable, clamp min=0.3)
-    eks_alpha_init: float = -5.0    # 新旧路径混合: sigmoid(-5)≈0 → 开局完全走 v2 路径 (续训友好)
-    entropy_aux_weight: float = 0.01  # routing entropy 正则权重 (0 关闭, >0 防 slot collapse)
+    # --- v5b: Contrastive Value Head (同类 entity routing 监督) ---
+    contrastive_weight: float = 0.0
 
-    # --- Sleep (对话 buffer replay + 权重更新，里程碑 9 实现) ---
-    sleep_every: int = 4            # 每隔几轮对话触发 sleep
+    # --- write iteration count (v5b default 1) ---
+    write_iterations: int = 1
 
     # --- LoRA ---
     lora_rank: int = 16
@@ -43,19 +42,15 @@ class XinheConfig:
     tbptt_steps: int = 4
     batch_size: int = 4
     learning_rate: float = 3e-4
-    plugin_lr_multiplier: float = 1.0  # plugin 学习率 = learning_rate × multiplier
-    plugin_core_lr_multiplier: float = 1.0  # plugin core 学习率额外乘数 (迁移时设 0.1)
-    slot_attn_lr_multiplier: float = 3.0  # slot_attn 学习率 = learning_rate × plugin_mult × core_mult × slot_attn_mult (续训从恒等激活需要更高 LR)
-    freeze_lora: bool = False           # 冻结 LoRA，只训练 plugin
-    freeze_plugin_core: bool = False    # 冻结 plugin 核心参数 (迁移时只训投影层)
-    train_only_slot_attn: bool = False  # 只训 slot_attn (冻结 LoRA + 所有 plugin 其他参数); D2 诊断用
+    plugin_lr_multiplier: float = 1.0   # plugin 学习率 = learning_rate × multiplier
+    freeze_lora: bool = False           # 冻结 LoRA，只训练 plugin (bootstrap 阶段用)
     weight_decay: float = 0.01
     grad_clip: float = 1.0
-    grad_accum_steps: int = 1        # 梯度累积步数 (模拟更大 batch)
+    grad_accum_steps: int = 1           # 梯度累积步数 (模拟更大 batch)
     gradient_checkpointing: bool = False  # 用计算换显存 (重算激活值)
-    resume_from: str = ""            # checkpoint 路径 (为空则不恢复)
-    early_stop_loss: float = 0.0    # 早停 loss 阈值 (0=不启用)
-    early_stop_patience: int = 0    # 早停耐心 (连续多少步低于阈值)
+    resume_from: str = ""               # checkpoint 路径 (为空则不恢复)
+    early_stop_loss: float = 0.0        # 早停 loss 阈值 (0=不启用)
+    early_stop_patience: int = 0        # 早停耐心 (连续多少步低于阈值)
     warmup_steps: int = 100
     max_steps: int = 10000
     eval_every: int = 500
@@ -178,13 +173,8 @@ class XinheConfig:
                 "n_state": "n_state",
                 "state_dim": "state_dim",
                 "state_scale_init": "state_scale_init",
-                "eks_enabled": "eks_enabled",
-                "temperature_init": "temperature_init",
-                "eks_alpha_init": "eks_alpha_init",
-                "entropy_aux_weight": "entropy_aux_weight",
-            },
-            "sleep": {
-                "sleep_every": "sleep_every",
+                "contrastive_weight": "contrastive_weight",
+                "write_iterations": "write_iterations",
             },
             "lora": {
                 "rank": "lora_rank",
@@ -199,11 +189,7 @@ class XinheConfig:
                 "batch_size": "batch_size",
                 "learning_rate": "learning_rate",
                 "plugin_lr_multiplier": "plugin_lr_multiplier",
-                "plugin_core_lr_multiplier": "plugin_core_lr_multiplier",
-                "slot_attn_lr_multiplier": "slot_attn_lr_multiplier",
                 "freeze_lora": "freeze_lora",
-                "freeze_plugin_core": "freeze_plugin_core",
-                "train_only_slot_attn": "train_only_slot_attn",
                 "weight_decay": "weight_decay",
                 "grad_clip": "grad_clip",
                 "grad_accum_steps": "grad_accum_steps",

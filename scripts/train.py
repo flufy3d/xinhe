@@ -1,5 +1,5 @@
 """
-训练入口脚本
+训练入口脚本 (v5a: 移除 4B 迁移支持，专注 0.8B)
 
 用法:
     # 单阶段训练
@@ -8,11 +8,7 @@
 
     # 课程学习 (config 中包含 curriculum 段)
     python scripts/train.py --config configs/curriculum_qwen3.5-0.8b.yaml
-    python scripts/train.py --config configs/curriculum_qwen3.5-0.8b.yaml --from-stage 3_distance
-
-    # 基座迁移 (0.8B → 4B)
-    python scripts/train.py --config configs/migrate_0.8b_to_4b.yaml \
-        --migrate-from checkpoints/curriculum/13_all.pt
+    python scripts/train.py --config configs/curriculum_qwen3.5-0.8b.yaml --from-stage 3_entity_SAME
 """
 import argparse
 import sys
@@ -89,11 +85,7 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
         "grad_accum_steps": "grad_accum_steps",
         "learning_rate": "learning_rate",
         "plugin_lr_multiplier": "plugin_lr_multiplier",
-        "plugin_core_lr_multiplier": "plugin_core_lr_multiplier",
-        "slot_attn_lr_multiplier": "slot_attn_lr_multiplier",
         "freeze_lora": "freeze_lora",
-        "freeze_plugin_core": "freeze_plugin_core",
-        "train_only_slot_attn": "train_only_slot_attn",
         "weight_decay": "weight_decay",
         "grad_clip": "grad_clip",
         "warmup_steps": "warmup_steps",
@@ -103,11 +95,10 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
         "log_every": "log_every",
         "save_every": "save_every",
         "eval_every": "eval_every",
-        # v4 EKS 相关
-        "temperature_init": "temperature_init",
-        "eks_alpha_init": "eks_alpha_init",
-        "entropy_aux_weight": "entropy_aux_weight",
-        "eks_enabled": "eks_enabled",
+        # v5b: 每阶段可调 contrastive 权重 (通常 entity stage 开, 非 entity stage 关)
+        "contrastive_weight": "contrastive_weight",
+        # v5d: 每阶段可调写迭代次数
+        "write_iterations": "write_iterations",
     }
     for yaml_key, field_name in field_map.items():
         if yaml_key in training:
@@ -179,30 +170,9 @@ def train_curriculum(base_config, stages, args):
     model = XinheModel(base_config)
     model.setup_device(torch.device(base_config.device))
 
-    # 检查: 迁移课程必须提供 --migrate-from
-    has_freeze_core = any(
-        s.get("training", {}).get("freeze_plugin_core", False)
-        for s in stages
-    )
-    if has_freeze_core and not args.migrate_from and not args.resume and start_idx == 0:
-        print("错误: 课程含 freeze_plugin_core 阶段，需要 --migrate-from 或 --resume 提供预训练权重")
-        print("  否则冻住的随机 plugin core 无法收敛")
-        sys.exit(1)
-
-    # 迁移: 只加载 plugin core (丢弃 proj/LoRA/optimizer)
-    if args.migrate_from:
-        from xinhe.utils.checkpoint import extract_plugin_core
-        core_state = extract_plugin_core(args.migrate_from, device=base_config.device)
-        result = model.state_interface.load_state_dict(core_state, strict=False)
-        print(f"[迁移] 从 {args.migrate_from} 加载 plugin core")
-        if result.missing_keys:
-            print(f"  新参数 (随机初始化): {result.missing_keys}")
-
     # 加载初始权重: --resume 优先，否则加载前一阶段的 checkpoint
     init_ckpt = None
-    if args.migrate_from:
-        pass  # 迁移模式: 不加载 LoRA/optimizer，从 M0 开始
-    elif args.resume:
+    if args.resume:
         init_ckpt = args.resume
     elif start_idx > 0:
         prev_ckpt = Path(f"checkpoints/curriculum/{stage_names[start_idx - 1]}.pt")
@@ -274,13 +244,7 @@ def main():
     parser.add_argument("--resume", type=str, default=None, help="从 checkpoint 恢复")
     parser.add_argument("--reset-step", action="store_true", help="恢复权重但重置 step 和优化器")
     parser.add_argument("--from-stage", type=str, default=None, help="课程学习: 从指定阶段开始")
-    parser.add_argument("--migrate-from", type=str, default=None,
-                        help="迁移源 checkpoint（只加载 plugin core，丢弃 proj/LoRA/optimizer）")
     args = parser.parse_args()
-
-    if args.migrate_from and args.resume:
-        print("错误: --migrate-from 和 --resume 互斥")
-        sys.exit(1)
 
     # 加载配置
     config, curriculum = XinheConfig.from_yaml(args.config)

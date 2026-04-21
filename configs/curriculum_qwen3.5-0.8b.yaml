@@ -1,29 +1,28 @@
 # ============================================================
-# 基础记忆课程 — Qwen3.5-0.8B / 4090 24GB
+# 基础记忆课程 — Qwen3.5-0.8B / RTX 4090 24GB
 #
 # 用法:
 #   python scripts/train.py --config configs/curriculum_qwen3.5-0.8b.yaml
 #
-# 0.8B bf16 ≈ 1.6GB, 24GB 余量充足
-# batch 主要受 tbptt_steps × segment_length 限制
+# v5f 内存预算: batch × tbptt_steps ≤ 24
+# (Slot Attention 3 iter 不增加 activation, 只增 compute ~10%)
 # ============================================================
 base: qwen3.5-0.8b.yaml
 curriculum_file: curriculum.yaml
 
 stage_overrides:
   default:
-    batch_size: 2          # ep=16, tbptt=16
-  0_state_init:
-    batch_size: 8          # ep=2, tbptt=2
-  1_base_memory:
-    batch_size: 8          # ep=4, tbptt=4
-  2_entity_name:
-    batch_size: 8          # ep=4, tbptt=4
-  3_recall_simple:
-    batch_size: 8          # ep=4, tbptt=4
-  4_random_tell:
-    batch_size: 6          # ep=5, tbptt=5
-  5_fact3:
-    batch_size: 4          # ep=7, tbptt=7
-  6_entity_multi:
-    batch_size: 4          # ep=7, tbptt=7
+    batch_size: 1             # Phase C 长 turn 默认
+  # ── Phase A (短 turn 2-6) ──
+  0_bootstrap:        {batch_size: 8}    # ep=2,  B×K=16
+  1_distance1:        {batch_size: 6}    # ep=4,  B×K=24
+  2_entity_diff:      {batch_size: 6}    # ep=4,  B×K=24
+  3_entity_same:      {batch_size: 4}    # ep=5,  B×K=20
+  4_3fact_mix:        {batch_size: 4}    # ep=5,  B×K=20
+  5_3entity_hard:     {batch_size: 4}    # ep=6,  B×K=24 (核心)
+  # ── Phase B (中 turn 7) ──
+  6_recall_with_entity: {batch_size: 3}  # ep=7,  B×K=21
+  7_entity_harder:      {batch_size: 3}  # ep=7,  B×K=21
+  8_space_mix:          {batch_size: 3}  # ep=7,  B×K=21
+  # ── Phase C (长 turn 16, 继承 default batch=1) ──
+  # 9_fact_scale / 10_overwrite / 11_all_mix 继承
