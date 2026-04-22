@@ -189,38 +189,33 @@ def wipe_degradation(
 
 def timescale_distribution(state_history: list[torch.Tensor]) -> dict:
     """
-    分析状态维度的时间尺度分布。
+    分析状态维度的时间尺度分布（v5c: 按头展平 W）。
 
     参数:
-        state_history: 每个 segment 后的状态列表, 每个 (n_state, D)
+        state_history: 每个 segment 后的 W 列表, 每个 (H, d_v, d_k)
 
     返回:
-        dict: 每个状态 token 的有效时间常数 + 统计信息
+        dict: 每个头的有效时间常数 + 统计信息
     """
     if len(state_history) < 3:
         return {"error": "需要至少 3 个时间步的状态历史"}
 
-    # 转为 numpy: (T, n_state, D)
+    # 转为 numpy: (T, H, d_v, d_k) → (T, H, d_v * d_k)
     states = torch.stack(state_history).detach().cpu().numpy()
-    T, n_state, D = states.shape
+    T = states.shape[0]
+    H = states.shape[1]
+    flat = states.reshape(T, H, -1)                              # (T, H, d_v*d_k)
 
-    # 对每个 (state_token, dim) 计算自相关
-    # 简化: 对每个 state token 取平均维度的自相关
-    tau_per_token = []
-
-    for s in range(n_state):
-        # 这个 state token 在所有时间步的值: (T, D)
-        trajectory = states[:, s, :]
-        # 平均维度上的自相关
+    tau_per_head = []
+    for h in range(H):
+        trajectory = flat[:, h, :]                               # (T, d_v*d_k)
         mean_autocorr = _mean_autocorrelation(trajectory)
-        # 拟合指数衰减获取时间常数
         tau = _fit_time_constant(mean_autocorr)
-        tau_per_token.append(tau)
+        tau_per_head.append(tau)
 
-    tau_array = np.array(tau_per_token)
-
+    tau_array = np.array(tau_per_head)
     return {
-        "tau_per_token": tau_array.tolist(),
+        "tau_per_head": tau_array.tolist(),
         "tau_mean": float(tau_array.mean()),
         "tau_std": float(tau_array.std()),
         "tau_min": float(tau_array.min()),

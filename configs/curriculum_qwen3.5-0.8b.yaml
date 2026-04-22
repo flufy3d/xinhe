@@ -19,10 +19,11 @@ stage_overrides:
   2_entity_diff:      {batch_size: 6}    # ep=4,  B×K=24
   3_entity_same:      {batch_size: 4}    # ep=5,  B×K=20
   4_3fact_mix:        {batch_size: 4}    # ep=5,  B×K=20
-  5_3entity_hard:     {batch_size: 4}    # ep=6,  B×K=24 (核心)
+  5_3entity_hard:     {batch_size: 4}    # ep=6,  B×K=24 (核心；v5c parallel Delta Rule 后显存回落，恢复 batch=4)
   # ── Phase B (中 turn 7) ──
   6_recall_with_entity: {batch_size: 3}  # ep=7,  B×K=21
-  7_entity_harder:      {batch_size: 3}  # ep=7,  B×K=21
-  8_space_mix:          {batch_size: 3}  # ep=7,  B×K=21
+  7_ai_recall:          {batch_size: 3}  # ep=7,  B×K=21 (AI 自省专训)
+  8_entity_harder:      {batch_size: 3}  # ep=7,  B×K=21
+  9_space_mix:          {batch_size: 3}  # ep=7,  B×K=21
   # ── Phase C (长 turn 16, 继承 default batch=1) ──
-  # 9_fact_scale / 10_overwrite / 11_all_mix 继承
+  # 10_fact_scale / 11_overwrite / 12_all_mix 继承

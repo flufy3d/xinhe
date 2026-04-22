@@ -13,8 +13,7 @@ backbone:
   hidden_size: 2560
   freeze: true
 
-state:
-  state_dim: 1024
+# state: 继承 base.yaml (n_heads=16, head_dim=64)
 
 lora:
   rank: 8

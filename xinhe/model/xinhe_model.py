@@ -21,8 +21,8 @@ class XinheModel(nn.Module):
     """
     心核模型: Backbone + StateInterface
 
-    前向传播:
-        embed → generate_read_kv → backbone.forward_blocks(layer_hook=state_read) → write_from_content → logits + state
+    前向传播 (v5c):
+        embed → backbone.forward_blocks(layer_hook=state_read(W)) → write_from_content(Delta Rule) → logits + W
     """
 
     def __init__(self, config: XinheConfig, backbone: Optional[BackboneBase] = None):
@@ -46,18 +46,18 @@ class XinheModel(nn.Module):
                 dropout=config.lora_dropout,
             )
 
-        # StateInterface (v2: 对称 cross-attention)
+        # StateInterface (v5c: Delta Rule 联想记忆 W)
         # 只在 full attention 层前注入 state（DeltaNet 层跳过）
         self._hook_layer_indices = self.backbone.get_hook_layer_indices()
         n_hook_layers = len(self._hook_layer_indices)
         self._hook_layer_set = set(self._hook_layer_indices)
         self.state_interface = StateInterface(
-            n_state=config.n_state,
-            state_dim=config.state_dim,
             hidden_size=config.hidden_size,
+            n_heads=config.n_heads,
+            head_dim=config.head_dim,
             n_layers=n_hook_layers,
-            state_scale_init=config.state_scale_init,
-            write_iterations=getattr(config, "write_iterations", 1),
+            read_scale_init=config.read_scale_init,
+            beta_bias_init=config.beta_bias_init,
         )
 
         # LM head (复用 backbone 的)
@@ -76,7 +76,7 @@ class XinheModel(nn.Module):
 
         参数:
             input_ids: (B, T) token ids
-            state: (B, n_state, D) 当前持久状态
+            state: (B, H, d_v, d_k) 当前 Delta Rule 联想记忆 W
             labels: (B, T) 可选，用于计算 loss
             pad_token_id: 可选，padding token id，提供时自动遮蔽 padding
             weights: (B, T) 可选，每 token 的 loss 权重 (VALUE token=5.0, 其他=1.0, pad=0.0);
@@ -85,7 +85,7 @@ class XinheModel(nn.Module):
         返回:
             dict:
                 logits: (B, T, V)
-                state_next: (B, n_state, D)
+                state_next: (B, H, d_v, d_k)
                 loss: scalar (如果提供了 labels)
         """
         B, T = input_ids.shape
@@ -94,19 +94,17 @@ class XinheModel(nn.Module):
         # 1. 嵌入内容 token
         content_emb = self.backbone.embed(input_ids)  # (B, T, D)
 
-        # 2. 读侧: 生成 hook 层的 state K/V
-        state_kv = self.state_interface.generate_read_kv(state)
-
-        # 3. 构建 layer_hook: 只在 full attention 层前执行 state cross-attention
-        #    建立 backbone layer_idx → state_kv 索引的映射
+        # 2. 构建 layer_hook: 只在 full attention 层前执行线性读
+        #    backbone layer_idx → state_interface 第几个 q/o_proj 的映射
         hook_layer_set = self._hook_layer_set
         hook_idx_map = {layer_idx: kv_idx for kv_idx, layer_idx in enumerate(self._hook_layer_indices)}
-
 
         def state_read_hook(hidden_states, layer_idx):
             if layer_idx not in hook_layer_set:
                 return hidden_states
-            return self.state_interface.read_layer(hidden_states, state_kv[hook_idx_map[layer_idx]])
+            return self.state_interface.read_layer(
+                hidden_states, state, hook_idx_map[layer_idx],
+            )
 
         # 4. 标准因果 mask（只有 content，无 state token）
         causal = torch.triu(
@@ -132,11 +130,11 @@ class XinheModel(nn.Module):
             layer_hook=state_read_hook,
         )
 
-        # 7. 写侧: 从 content 提取信息更新 state（多卡时移回 state_interface 所在设备）
+        # 7. 写侧: Delta Rule 更新 W（多卡时移回 state_interface 所在设备）
         interface_device = next(self.state_interface.parameters()).device
         content_output = content_output.to(interface_device)
         state = state.to(interface_device)
-        state_next, write_attn = self.state_interface.write_from_content(state, content_output)
+        state_next = self.state_interface.write_from_content(state, content_output)
 
         # 8. 计算 logits (只对内容部分)
         logits = self.lm_head(content_output)  # (B, T, V)
@@ -181,83 +179,9 @@ class XinheModel(nn.Module):
                 result["correct"] = 0
                 result["total"] = 0
 
-            # v5b Contrastive Value Head:
-            # 把 "write attention 获胜 slot" 的表征拉向 value token embedding
-            # - objective 不是 path, 没有 gate-never-opens 陷阱
-            # - target 来自 LM 自己的 embedding (符号接地), 第一步就有有效梯度
-            contrastive_weight = float(getattr(self.config, "contrastive_weight", 0.0) or 0.0)
-            if contrastive_weight > 0.0 and weights is not None:
-                aux = self._contrastive_value_loss(
-                    state_next=state_next,
-                    write_attn=write_attn,
-                    input_ids=input_ids,
-                    weights=weights,
-                )
-                if aux is not None:
-                    loss = loss + contrastive_weight * aux.to(dtype=loss.dtype)
-                    result["contrastive_loss"] = aux.detach()
-
             result["loss"] = loss
 
         return result
-
-    def _contrastive_value_loss(
-        self,
-        state_next: torch.Tensor,
-        write_attn: torch.Tensor,
-        input_ids: torch.Tensor,
-        weights: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
-        """
-        InfoNCE: winner slot 的 value_head 输出 ≈ value token mean embedding。
-
-        参数:
-            state_next: (B, n_state, state_dim) 写后的状态
-            write_attn: (B, n_state, T) 写注意力
-            input_ids:  (B, T) 输入 token ids
-            weights:    (B, T) VALUE 位置标记为 VALUE_WEIGHT (=5.0), 其他 assistant=1.0
-
-        返回:
-            scalar contrastive loss, 若 batch 中没有 VALUE token 则返回 None
-        """
-        from ..data.conversation import VALUE_WEIGHT
-
-        value_mask = (weights > 1.5).to(dtype=write_attn.dtype)  # (B, T) 1 on VALUE tokens
-        value_count_per_sample = value_mask.sum(dim=-1)          # (B,)
-        has_value = value_count_per_sample > 0
-        if not has_value.any():
-            return None
-
-        # 1. winner slot per sample: 在 VALUE positions 上累积的 attention 最大的 slot
-        attn_on_values = write_attn * value_mask.unsqueeze(1)    # (B, n_state, T)
-        winner_scores = attn_on_values.sum(dim=-1)               # (B, n_state)
-        winner_idx = winner_scores.argmax(dim=-1)                # (B,)
-
-        # 2. value_emb: VALUE token 的 LM embedding, 按 value_mask 平均
-        # 用 backbone 的 embed layer 保证和 LM 语义空间对齐
-        with torch.no_grad():
-            tok_emb = self.backbone.embed(input_ids)             # (B, T, hidden_size)
-        value_emb_sum = (tok_emb * value_mask.unsqueeze(-1)).sum(dim=-2)  # (B, hidden)
-        denom = value_count_per_sample.clamp(min=1).unsqueeze(-1).to(dtype=tok_emb.dtype)
-        value_emb = value_emb_sum / denom                        # (B, hidden)
-
-        # 3. slot 表征: value_head(state_next), 投到 hidden space
-        slot_repr = self.state_interface.value_head(state_next)  # (B, n_state, hidden)
-
-        # 4. InfoNCE: winner 对齐 value_emb, 其他 slot 推远
-        # 用余弦相似度 (更稳定), temperature=0.1
-        slot_norm = F.normalize(slot_repr, dim=-1)               # (B, n_state, hidden)
-        value_norm = F.normalize(value_emb, dim=-1)              # (B, hidden)
-        sim = torch.einsum("bnh,bh->bn", slot_norm, value_norm)  # (B, n_state)
-        sim = sim / 0.1                                          # temperature
-
-        # cross-entropy: winner_idx 是 "正确" 类别
-        # 只对 has_value=True 的样本计算
-        if has_value.all():
-            loss = F.cross_entropy(sim, winner_idx, reduction="mean")
-        else:
-            loss = F.cross_entropy(sim[has_value], winner_idx[has_value], reduction="mean")
-        return loss
 
     def setup_device(self, device: torch.device):
         """
@@ -284,7 +208,7 @@ class XinheModel(nn.Module):
             batch_size: batch 大小
 
         返回:
-            state: (B, n_state, D) 消化后的状态
+            state: (B, H, d_v, d_k) 消化后的 W
         """
         state = self.init_state(batch_size)
 
@@ -313,7 +237,7 @@ class XinheModel(nn.Module):
 
         参数:
             input_ids: (B, T) prompt token ids
-            state: (B, n_state, D) 当前状态
+            state: (B, H, d_v, d_k) 当前 W
             max_new_tokens: 最大生成 token 数
             temperature: 采样温度
             top_p: nucleus sampling
@@ -322,7 +246,7 @@ class XinheModel(nn.Module):
 
         返回:
             generated_ids: (B, T + new_tokens) 生成的完整序列
-            state_next: (B, n_state, D) 生成后的状态
+            state_next: (B, H, d_v, d_k) 生成后的 W
         """
         self.eval()
         B = input_ids.shape[0]

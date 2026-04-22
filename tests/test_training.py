@@ -1,5 +1,5 @@
 """
-测试训练循环在小数据上能跑通 (v5a)
+测试训练循环在小数据上能跑通 (v5c)
 """
 import torch
 import pytest
@@ -68,9 +68,9 @@ def test_training_loop_runs():
     """训练循环能跑通几步"""
     config = XinheConfig(
         hidden_size=32,
-        n_state=4,
-        state_dim=32,
-        state_scale_init=-5.0,
+        n_heads=4,
+        head_dim=8,
+        read_scale_init=-5.0,
         lora_rank=0,
         freeze_backbone=False,
         tbptt_steps=2,
@@ -99,8 +99,8 @@ def test_training_loop_runs():
 def test_state_detach_in_tbptt():
     """验证截断 BPTT 正确 detach 状态"""
     config = XinheConfig(
-        hidden_size=32, n_state=4, state_dim=32,
-        state_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
+        hidden_size=32, n_heads=4, head_dim=8,
+        read_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
         tbptt_steps=2, device="cpu", dtype="float32",
     )
     backbone = TinyBackbone()
@@ -126,8 +126,8 @@ def test_state_detach_in_tbptt():
 def test_v5a_two_param_groups():
     """v5a: optimizer 只分 plugin / lora 两组 (lora_rank=0 时仅 plugin 一组)"""
     config = XinheConfig(
-        hidden_size=32, n_state=4, state_dim=16,
-        state_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
+        hidden_size=32, n_heads=4, head_dim=8,
+        read_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
         tbptt_steps=2, device="cpu", dtype="float32",
     )
     backbone = TinyBackbone()
@@ -146,8 +146,8 @@ def test_v5a_two_param_groups():
 def test_v5a_plugin_lr_multiplier():
     """plugin_lr_multiplier 控制 plugin 组的 LR"""
     config = XinheConfig(
-        hidden_size=32, n_state=4, state_dim=16,
-        state_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
+        hidden_size=32, n_heads=4, head_dim=8,
+        read_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
         learning_rate=1e-3, plugin_lr_multiplier=2.0,
         tbptt_steps=2, device="cpu", dtype="float32",
     )
@@ -167,8 +167,8 @@ def test_v5a_plugin_lr_multiplier():
 def test_weighted_loss_equals_unweighted_when_uniform():
     """uniform weights=1 的加权 loss 等于不加权 loss"""
     config = XinheConfig(
-        hidden_size=32, n_state=4, state_dim=32,
-        state_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
+        hidden_size=32, n_heads=4, head_dim=8,
+        read_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
         tbptt_steps=2, device="cpu", dtype="float32",
     )
     backbone = TinyBackbone()
@@ -193,8 +193,8 @@ def test_weighted_loss_equals_unweighted_when_uniform():
 def test_weighted_loss_value_token_5x():
     """value token 权重 5x 时, loss 应向 value 位置倾斜"""
     config = XinheConfig(
-        hidden_size=32, n_state=4, state_dim=32,
-        state_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
+        hidden_size=32, n_heads=4, head_dim=8,
+        read_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
         tbptt_steps=2, device="cpu", dtype="float32",
     )
     backbone = TinyBackbone()
@@ -221,8 +221,8 @@ def test_weighted_loss_value_token_5x():
 def test_weighted_loss_ignores_minus_100():
     """weights=0 的位置 (对应 -100 label) 不贡献 loss"""
     config = XinheConfig(
-        hidden_size=32, n_state=4, state_dim=32,
-        state_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
+        hidden_size=32, n_heads=4, head_dim=8,
+        read_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
         tbptt_steps=2, device="cpu", dtype="float32",
     )
     backbone = TinyBackbone()

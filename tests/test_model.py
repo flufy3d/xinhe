@@ -47,12 +47,12 @@ class MockBackbone(nn.Module, BackboneBase):
 
 @pytest.fixture
 def model():
-    """创建带 mock backbone 的测试模型"""
+    """创建带 mock backbone 的测试模型 (v5c)"""
     config = XinheConfig(
         hidden_size=64,
-        n_state=4,
-        state_dim=64,
-        state_scale_init=-5.0,
+        n_heads=4,
+        head_dim=16,
+        read_scale_init=-5.0,
         lora_rank=0,  # 不用 LoRA
         freeze_backbone=False,
     )
@@ -62,7 +62,7 @@ def model():
 
 
 def test_forward_shape(model):
-    """forward 输出形状正确"""
+    """forward 输出形状正确 (v5c: W=(B,H,d_v,d_k))"""
     B, T = 2, 16
     input_ids = torch.randint(0, 100, (B, T))
     state = model.init_state(B)
@@ -70,7 +70,7 @@ def test_forward_shape(model):
     result = model(input_ids, state)
 
     assert result["logits"].shape == (B, T, 100)
-    assert result["state_next"].shape == (B, 4, 64)
+    assert result["state_next"].shape == (B, 4, 16, 16)
 
 
 def test_forward_with_labels(model):
@@ -122,9 +122,9 @@ def test_gradient_flow(model):
     loss = result_2["loss"]
     loss.backward()
 
-    # StateInterface 参数应该有梯度
-    assert model.state_interface.gate_proj.weight.grad is not None
-    assert model.state_interface.state_emb.grad is not None
+    # StateInterface 参数应该有梯度 (v5c: q/k/v/beta/o projections)
+    assert model.state_interface.k_proj.weight.grad is not None
+    assert model.state_interface.beta_proj.weight.grad is not None
 
 
 def test_generate(model):
@@ -155,12 +155,12 @@ def test_trainable_params(model):
 
 
 def test_forward_with_decoupled_dims():
-    """state_dim != hidden_size 全流程正确"""
+    """n_heads*head_dim != hidden_size 时全流程正确 (v5c)"""
     config = XinheConfig(
         hidden_size=64,
-        n_state=4,
-        state_dim=32,
-        state_scale_init=0.0,  # scale=0.5，确保 state tokens 有梯度信号
+        n_heads=4,
+        head_dim=8,            # 4*8=32 != hidden_size=64
+        read_scale_init=0.0,   # scale=0.5，确保 state 有梯度信号
         lora_rank=0,
         freeze_backbone=False,
     )
@@ -169,18 +169,18 @@ def test_forward_with_decoupled_dims():
 
     B, T = 2, 16
     state = model.init_state(B)
-    assert state.shape == (B, 4, 32)  # state_dim=32
+    assert state.shape == (B, 4, 8, 8)  # (B, H, d_v, d_k)
 
     input_ids = torch.randint(0, 100, (B, T))
     labels = torch.randint(0, 100, (B, T))
     result = model(input_ids, state, labels=labels)
 
     assert result["logits"].shape == (B, T, 100)
-    assert result["state_next"].shape == (B, 4, 32)  # state stays in state_dim
+    assert result["state_next"].shape == (B, 4, 8, 8)
     assert result["loss"].item() > 0
 
     # 梯度流通过 read/write 投影
     state_loss = result["state_next"].sum() + result["loss"]
     state_loss.backward()
-    assert model.state_interface.read_k_projs[0].weight.grad is not None
-    assert model.state_interface.write_out.weight.grad is not None
+    assert model.state_interface.q_projs[0].weight.grad is not None
+    assert model.state_interface.v_proj.weight.grad is not None

@@ -9,4 +9,5 @@ curriculum_file: curriculum_think.yaml
 
 stage_overrides:
   default:
-    batch_size: 2
+    batch_size: 2                # seg_len=512 × ep=8 下训练 batch 顶 2，批次更大 cross_entropy OOM
+    data_gen_batch_size: 128     # 数据生成只靠 backbone inference，batch 128 安全

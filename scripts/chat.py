@@ -48,23 +48,19 @@ def load_tokenizer(config: XinheConfig):
 
 
 def print_stats(model: XinheModel, state: torch.Tensor):
-    """打印状态分析"""
+    """打印状态分析 (v5c: Delta Rule W 联想记忆)"""
     stats = model.state_stats(state)
     print(f"\n{'='*50}")
-    print(f"  状态分析")
+    print(f"  状态分析 (W: {tuple(state.shape)})")
     print(f"{'='*50}")
-    print(f"  scale (影响力):  {stats['scale']:.4f}")
-    print(f"  gate 均值:       {stats['gate_mean']:.4f}")
-    print(f"  gate 标准差:     {stats['gate_std']:.4f}")
-    print(f"  慢区维度 (>0.7): {stats['slow_dims']:.0f} / {model.config.n_state}")
-    print(f"  快区维度 (<0.3): {stats['fast_dims']:.0f} / {model.config.n_state}")
-    print(f"  状态范数:        {stats['state_norm']:.2f}")
-    print(f"  有效秩:          {stats['effective_rank']:.1f}")
+    print(f"  read_scale (影响力):  {stats['read_scale']:.4f}")
+    print(f"  W_norm:               {stats['W_norm']:.4f}")
+    print(f"  W_effective_rank:     {stats['W_effective_rank']:.2f}")
     print(f"{'='*50}\n")
 
 
 def save_state(state: torch.Tensor, name: str):
-    """保存状态到文件"""
+    """保存状态到文件 (v5c shape: (1,H,d_v,d_k))"""
     STATES_DIR.mkdir(parents=True, exist_ok=True)
     path = STATES_DIR / f"{name}.pt"
     torch.save(state.cpu(), path)
@@ -72,11 +68,12 @@ def save_state(state: torch.Tensor, name: str):
 
 
 def load_state(name: str, device: torch.device) -> torch.Tensor:
-    """从文件加载状态"""
+    """从文件加载状态。
+    注意：v5c 状态形状为 (1,H,d_v,d_k)，与 v5b (1,n_state,state_dim) 不兼容；
+    旧 `.pt` 加载后在 read_layer 内会因形状不匹配报错，需重新 bootstrap。"""
     path = STATES_DIR / f"{name}.pt"
     if not path.exists():
         print(f"  错误: 找不到状态文件 {path}")
-        # 列出可用的状态
         if STATES_DIR.exists():
             files = list(STATES_DIR.glob("*.pt"))
             if files:

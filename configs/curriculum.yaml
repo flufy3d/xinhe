@@ -1,16 +1,16 @@
 # ============================================================
-# 基础记忆课程 (v5f: Iterative Slot Attention + GRU)
+# 基础记忆课程 (v5c: Delta Rule 联想记忆 W)
 #
 # 设计原则:
 #   Phase A (stage 0-5): 短 turn + 快 + 专注 多 entity × 多 fact × 两者混合
 #     验收点: stage 5 VALUE ≥ 95% on 3-entity same_cat=0.5 → 核心已过
-#   Phase B (stage 6-8): 中 turn, recall 能力 + 更难混合
-#   Phase C (stage 9-11): 长 turn, 全混合收官
+#   Phase B (stage 6-9): 中 turn, recall + ai_recall + 更难混合
+#   Phase C (stage 10-12): 长 turn, 全混合收官
 #
 # 关键变化 vs v5b:
-#   - recall_simple 从 Phase A stage 4 → Phase B stage 6
-#   - 所有 Phase A entity stage 都默认 cw>0 (防 stage "忘掉" 问题)
-#   - stage 5 "3entity_hard" (3 entities same_cat=0.5 短 turn) — plan Primary 目标
+#   - 架构换为 Delta Rule: error=(v-Wk) 原生处理同类消歧 + 覆写
+#   - contrastive_weight 全部删除（slot 概念已消失，靠 Delta Rule 自带数学）
+#   - 课程难度/顺序/max_steps 保持不变，让架构在同课程下对比
 #
 # 用法:
 #   python scripts/train.py --config configs/curriculum_qwen3.5-0.8b.yaml
@@ -23,9 +23,8 @@ training_defaults:
   plugin_lr_multiplier: 1.0
   grad_accum_steps: 1
   max_steps: 2000
-  early_stop_loss: 0.05
-  early_stop_patience: 200
-  contrastive_weight: 0.0
+  # v5c Phase A 目标：VALUE ≥ 99% 切 stage（Phase A 要求 99%+）
+  early_stop_value: 0.99
 
 stages:
   # ================================================================
@@ -33,6 +32,8 @@ stages:
   # ================================================================
 
   # ── Stage 0: State bootstrap (1 fact, 2 轮) ──
+  # v5c: VALUE/FRAME 在 step 500 已达 95%/97%，之后 loss 被 TELL frozen-LoRA
+  # baseline 锚定无法下降，1500 步浪费。1000 步余量够。
   - name: "0_bootstrap"
     data:
       num_train: 10000
@@ -47,7 +48,7 @@ stages:
       episode_length: 2
       tbptt_steps: 2
       freeze_lora: true
-      max_steps: 1500
+      max_steps: 1000
 
   # ── Stage 1: 基础跨轮保持 (1 fact, 4 轮) ──
   - name: "1_distance1"
@@ -81,8 +82,6 @@ stages:
       episode_length: 4
       tbptt_steps: 4
       max_steps: 1500
-      contrastive_weight: 0.1
-
   # ── Stage 3: 同类 entity (2 entity same_cat=1.0, 硬 routing 第一关) ──
   - name: "3_entity_same"
     data:
@@ -98,8 +97,6 @@ stages:
       episode_length: 5
       tbptt_steps: 5
       max_steps: 3000
-      contrastive_weight: 0.2
-
   # ── Stage 4: 3 facts + 中度 entity (多 fact 能力 + 保留 routing) ──
   - name: "4_3fact_mix"
     data:
@@ -116,11 +113,9 @@ stages:
       episode_length: 5
       tbptt_steps: 5
       max_steps: 3000
-      contrastive_weight: 0.2
-
   # ── Stage 5: ★ 3 entities 硬案例综合 (核心验收点) ──
   # entity_ratio=1.0 全 entity, same_cat=0.5 半数同类, num_facts=3
-  # 目标: VALUE ≥ 95% → 核心多 entity 多 fact 混合已解决
+  # v5c: 数字已缩到 1-6 位，数据规模回落 20000 够用（原 50000 是 8 位数字时的补救）
   - name: "5_3entity_hard"
     data:
       num_train: 20000
@@ -135,14 +130,12 @@ stages:
     training:
       episode_length: 6
       tbptt_steps: 6
-      max_steps: 5000
-      contrastive_weight: 0.3
-
+      max_steps: 10000
   # ================================================================
   # Phase B: 中 turn (7), recall + 更难
   # ================================================================
 
-  # ── Stage 6: Recall + Entity (从 Phase A 移过来) ──
+  # ── Stage 6: User Recall + Entity (用户主动问"你刚才说了啥") ──
   - name: "6_recall_with_entity"
     data:
       num_train: 10000
@@ -155,10 +148,23 @@ stages:
       episode_length: 7
       tbptt_steps: 7
       max_steps: 2000
-      contrastive_weight: 0.1
-
-  # ── Stage 7: 3 entities same_cat=0.7 (更难同类) ──
-  - name: "7_entity_harder"
+  # ── Stage 7: ★ AI Recall 专训 (模型自省: 从 state 还原自己说过的回复) ──
+  # v5c: 前一版 all_mix 里 ai_recall_ratio=0.5 混合时训不透，错误集中在这。
+  # 单独一 stage 纯训 ai_recall_ratio=1.0，先把这个 meta 能力独立打稳。
+  - name: "7_ai_recall"
+    data:
+      num_train: 10000
+      ai_recall_ratio: 1.0
+      entity_ratio: 0.3
+      same_category: 0.2
+      no_overwrite: true
+      max_turns: 7
+    training:
+      episode_length: 7
+      tbptt_steps: 7
+      max_steps: 2500
+  # ── Stage 8: 3 entities same_cat=0.7 (更难同类) ──
+  - name: "8_entity_harder"
     data:
       num_train: 15000
       num_facts: 3
@@ -172,10 +178,8 @@ stages:
       episode_length: 7
       tbptt_steps: 7
       max_steps: 3000
-      contrastive_weight: 0.3
-
-  # ── Stage 8: 三模式空间混合 ──
-  - name: "8_space_mix"
+  # ── Stage 9: 三模式空间混合 ──
+  - name: "9_space_mix"
     data:
       num_train: 10000
       num_facts: 3
@@ -190,14 +194,12 @@ stages:
       episode_length: 7
       tbptt_steps: 7
       max_steps: 2500
-      contrastive_weight: 0.2
-
   # ================================================================
   # Phase C: 长 turn (16), 全混合收官
   # ================================================================
 
-  # ── Stage 9: 5 facts 长距离 + entity ──
-  - name: "9_fact_scale"
+  # ── Stage 10: 5 facts 长距离 + entity ──
+  - name: "10_fact_scale"
     data:
       num_train: 10000
       num_facts: 5
@@ -212,10 +214,8 @@ stages:
       episode_length: 16
       tbptt_steps: 16
       max_steps: 2500
-      contrastive_weight: 0.15
-
-  # ── Stage 10: 覆写 + entity ──
-  - name: "10_overwrite"
+  # ── Stage 11: 覆写 + entity ──
+  - name: "11_overwrite"
     data:
       num_train: 10000
       num_facts: 5
@@ -230,10 +230,8 @@ stages:
       episode_length: 16
       tbptt_steps: 16
       max_steps: 2500
-      contrastive_weight: 0.1
-
-  # ── Stage 11: 全能力混合收官 (含 recall_ai) ──
-  - name: "11_all_mix"
+  # ── Stage 12: 全能力混合收官 (含 ai_recall) ──
+  - name: "12_all_mix"
     data:
       num_train: 10000
       num_facts: 5
@@ -249,4 +247,3 @@ stages:
       episode_length: 16
       tbptt_steps: 16
       max_steps: 3000
-      contrastive_weight: 0.1

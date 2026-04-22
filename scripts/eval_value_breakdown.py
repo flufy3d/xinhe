@@ -1,15 +1,16 @@
 """
-VALUE / FRAME / TELL 分类准确率评估 + Blank-state 消融 + v5a 诊断
+VALUE / FRAME / TELL 分类准确率评估 + Blank-state 消融
 
 按 token 作用分三类:
 - VALUE: recall 轮 assistant 里 `value` 字段对齐的 token (真正的 state 考试)
 - FRAME: recall 轮里 value 以外的 assistant token (标点等, 从模板可预测)
 - TELL:  tell 轮的所有 assistant token (重复用户输入即可)
 
-v5a 新增诊断:
-- Per-slot 利用率: 统计各 slot L2 norm, 找出 "死 slot"
-- 同类混淆: VALUE 错误中, 预测 token 是否来自本 episode 其他 value → routing 失败
-- Sweep 模式: --sweep-same-cat 0,0.3,0.5,0.7,1.0 画 VALUE 曲线, 定位同类 plateau
+⚠️ v5c TODO: 本脚本里 Per-slot 利用率 / 同类混淆 诊断还是 v5b slot 口径
+    （state shape=(1,32,1024) 的 per-slot L2）。v5c 的 state 是 Delta Rule
+    W: (1,H,d_v,d_k)，应改为 per-head W_norm 和 W_effective_rank。
+    slot_norms 相关逻辑遇到新 shape 时会自动 early-skip（见 track_slot_norms）。
+    VALUE/FRAME/TELL 主准确率部分与 state shape 无关，仍可用。
 
 用法:
     # 单点评估
@@ -172,7 +173,9 @@ def eval_episode(model, tokenizer, episode, device, segment_length=256,
                 state = model.init_state(1).to(device)
             result = model(ids, state, labels=labels, pad_token_id=tokenizer.pad_token_id)
             state = result["state_next"]
-            if track_slot_norms:
+            if track_slot_norms and state.dim() == 3:
+                # v5b slot 口径：(1, n_state, D) → per-slot L2
+                # v5c state 是 4D (1,H,d_v,d_k)，跳过避免产生垃圾数据（TODO v5c 诊断）
                 extras["slot_norms"].extend(state[0].norm(dim=-1).tolist())
             continue
 

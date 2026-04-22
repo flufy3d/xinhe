@@ -92,13 +92,15 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
         "max_steps": "max_steps",
         "early_stop_loss": "early_stop_loss",
         "early_stop_patience": "early_stop_patience",
+        "early_stop_value": "early_stop_value",
         "log_every": "log_every",
         "save_every": "save_every",
         "eval_every": "eval_every",
-        # v5b: 每阶段可调 contrastive 权重 (通常 entity stage 开, 非 entity stage 关)
-        "contrastive_weight": "contrastive_weight",
-        # v5d: 每阶段可调写迭代次数
-        "write_iterations": "write_iterations",
+        # v5c: 每阶段可调 Delta Rule 配置
+        "n_heads": "n_heads",
+        "head_dim": "head_dim",
+        "read_scale_init": "read_scale_init",
+        "beta_bias_init": "beta_bias_init",
     }
     for yaml_key, field_name in field_map.items():
         if yaml_key in training:
@@ -222,6 +224,16 @@ def train_curriculum(base_config, stages, args):
         # 训练
         if trainer is None:
             trainer = Trainer(model, stage_config, train_loader, val_loader, pad_token_id=tokenizer.pad_token_id)
+            # 首阶段: 如果 --resume 指向的是 mid-stage xinhe_step_* checkpoint,
+            # 完整恢复 optimizer + scheduler + global_step, 避免 LR 重新 warmup 震崩。
+            # 通过 checkpoint 是否有 optimizer_state 判断。
+            if args.resume and "xinhe_step_" in args.resume:
+                ckpt_has_opt = torch.load(
+                    args.resume, map_location="cpu", weights_only=False,
+                ).get("optimizer_state") is not None
+                if ckpt_has_opt:
+                    trainer.load_checkpoint(args.resume)
+                    print(f"[resume] 已恢复 optimizer+scheduler 状态, global_step={trainer.global_step}")
         else:
             trainer.reset_for_new_stage(stage_config, train_loader, val_loader)
         trainer.current_stage_name = stage_name
@@ -250,8 +262,9 @@ def main():
     config, curriculum = XinheConfig.from_yaml(args.config)
     print(f"=== 心核 (Xinhe) 训练 ===")
     print(f"Backbone: {config.backbone_type} ({config.backbone_model_path}) | 设备: {config.device} | 精度: {config.dtype}")
-    proj = f" → proj ↔ {config.hidden_size}" if config.state_dim != config.hidden_size else ""
-    print(f"状态 token: {config.n_state} | 维度: {config.state_dim}{proj}")
+    mem_size = config.n_heads * config.head_dim * config.head_dim
+    print(f"状态 W: H={config.n_heads} d_k=d_v={config.head_dim} "
+          f"(每样本 {mem_size} floats) | hidden↔proj: {config.hidden_size}")
     print(f"LoRA rank: {config.lora_rank} | 目标模块: {config.lora_target_modules}")
 
     if curriculum:

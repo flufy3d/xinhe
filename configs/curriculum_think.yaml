@@ -14,14 +14,13 @@ training_defaults:
   episode_length: 16
   tbptt_steps: 16
   learning_rate: 1.0e-4
-  # 冻结整个 StateInterface: think 模板大变样，防止破坏 state 读写能力
-  freeze_plugin_core: true       # 冻结核心 (state_emb/gate_proj)
-  plugin_lr_multiplier: 0.0     # 冻结投影层 (read/write projections)
-  # 只训 LoRA: 学会从 state 推理 + 生成 think 格式
+  # v5c: 冻结整个 Delta Rule plugin，只训 LoRA 学 think 格式
+  # plugin_lr_multiplier=0 → trainer 里 freeze_plugin 生效，所有 q/o/k/v/beta/read_scale 都不动
+  plugin_lr_multiplier: 0.0
+  gradient_checkpointing: true   # seg_len=512 × ep=8 显存紧，用计算换显存
   grad_accum_steps: 2
   max_steps: 5000
-  early_stop_loss: 0.08
-  early_stop_patience: 200
+  early_stop_value: 0.99         # v5c: VALUE ≥ 99% 早停
 
 stages:
   # ── Think 课程 ──
@@ -43,4 +42,4 @@ stages:
     training:
       segment_length: 512
       episode_length: 8
-      tbptt_steps: 8
+      tbptt_steps: 4                # BPTT 窗口缩一半，显存降 ~50%（ep=8 full forward 不受影响）

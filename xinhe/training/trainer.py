@@ -115,10 +115,12 @@ class Trainer:
 
         Min clamp 避免 LR→0 时 Adam 的 v_hat 长期低估 + 小梯度 spike 产生
         巨大 update step (grad / sqrt(v_hat)) 导致训练末期崩盘 (observed v5e stage 2)。
+        真正阻断崩盘的主要是 grad_clip，clamp 只是给末期留一点优化能力，
+        所以 5% 即可；v5e 阶段性提到 10% 是临时保守，v5c 回归 5%。
         """
         warmup = self.config.warmup_steps
         max_steps = self.config.max_steps
-        min_mult = 0.1  # LR 最低降到 peak 的 10% (配合 Adam eps=1e-6 防末期爆炸)
+        min_mult = 0.01  # LR 最低降到 peak 的 1% (末期收敛更紧；grad_clip=1.0 主防崩盘)
 
         def lr_lambda(step):
             if step < warmup:
@@ -258,7 +260,8 @@ class Trainer:
 
     @torch.no_grad()
     def _validate(self) -> None:
-        """验证集评估: VALUE/FRAME/TELL 分解 (替代无信息量的 val_loss)"""
+        """验证集评估: VALUE/FRAME/TELL 分解 (替代无信息量的 val_loss)。
+        VALUE ≥ early_stop_value 时触发早停进入下一 stage。"""
         self.model.eval()
         try:
             from scripts.eval_value_breakdown import eval_value_breakdown_fast
@@ -280,6 +283,12 @@ class Trainer:
                 )
                 print(f"  [val breakdown] VALUE={breakdown['VALUE']:.2%} "
                       f"FRAME={breakdown['FRAME']:.2%} TELL={breakdown['TELL']:.2%}")
+
+                # VALUE 早停：val 阶段核心任务已近满分即可切 stage
+                early_stop_value = getattr(self.config, "early_stop_value", 0.0)
+                if early_stop_value > 0 and breakdown["VALUE"] >= early_stop_value:
+                    self._early_stopped = True
+                    print(f"  [已收敛] VALUE={breakdown['VALUE']:.2%} ≥ {early_stop_value:.2%}，提前进下一阶段")
         except Exception as e:
             print(f"  [val breakdown] 跳过: {e}")
         self.model.train()
@@ -324,24 +333,8 @@ class Trainer:
             self._last_eval_step = self.global_step
             self._validate()
 
-        # 早停检查 (滑动窗口: 最近 patience 步全部满足才收敛)
-        early_stop_loss = getattr(self.config, 'early_stop_loss', 0)
-        early_stop_patience = getattr(self.config, 'early_stop_patience', 0)
-        if early_stop_loss > 0 and early_stop_patience > 0:
-            self._recent_losses.append(last_loss)
-            self._recent_accs.append(last_acc)
-            # 只保留最近 patience 步
-            if len(self._recent_losses) > early_stop_patience:
-                self._recent_losses.pop(0)
-                self._recent_accs.pop(0)
-            # 条件: 窗口填满 + 所有 loss < 阈值 + 所有 acc > 95%
-            if (len(self._recent_losses) >= early_stop_patience
-                    and max(self._recent_losses) < early_stop_loss
-                    and min(self._recent_accs) > 0.95):
-                self._early_stopped = True
-                avg_loss = sum(self._recent_losses) / len(self._recent_losses)
-                avg_acc = sum(self._recent_accs) / len(self._recent_accs)
-                print(f"  [已收敛] 连续{early_stop_patience}步: loss<{early_stop_loss} acc={avg_acc:.2%}")
+        # v5c: 早停改为基于 val breakdown 的 VALUE 指标（在 _validate 里触发），
+        # 不再看训练 loss —— loss 被 TELL/FRAME 主导，不能反映核心 VALUE 能力。
 
     def reset_for_new_stage(self, config: XinheConfig, train_dataloader: DataLoader,
                             val_dataloader: Optional[DataLoader] = None):
@@ -356,12 +349,6 @@ class Trainer:
         self._early_stopped = False
         self._ema_loss = None
         self._ema_acc = None
-
-        # 动态更新 runtime 超参 (不重建模型, 只改 StateInterface 上的标量)
-        new_wi = getattr(config, "write_iterations", 1)
-        if new_wi != getattr(self.model.state_interface, "write_iterations", 1):
-            self.model.state_interface.write_iterations = new_wi
-            print(f"[write_iterations] 阶段切换 → {new_wi}")
 
         # 清掉 Dynamo 编译缓存: 新 stage 的 episode_length/batch_size 变化会触发重编译,
         # 若不清, 旧阶段的编译 graph 还占着显存 → 跨阶段 OOM

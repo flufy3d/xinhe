@@ -1,9 +1,10 @@
 """
-XinheConfig — 心核配置 (v5a)
+XinheConfig — 心核配置 (v5c)
 
 包含状态机制、LoRA、训练等超参数。
-v5 减法: 删除 EKS / Sleep / plugin_core / slot_attn / freeze_plugin_core /
-         train_only_slot_attn 等僵尸字段。
+v5c: Delta Rule 联想记忆 W: (B,H,d_v,d_k)，删除 n_state/state_dim/
+     contrastive_weight/write_iterations；新增 n_heads/head_dim/
+     beta_bias_init；state_scale_init → read_scale_init。
 """
 from dataclasses import dataclass, field
 from typing import Optional
@@ -19,16 +20,11 @@ class XinheConfig:
     hidden_size: int = 1024
     freeze_backbone: bool = True
 
-    # --- 持久状态 ---
-    n_state: int = 32               # 状态 token 数
-    state_dim: int = 1024           # 状态维度 (可独立于 hidden_size)
-    state_scale_init: float = -5.0  # sigmoid(-5) ≈ 0.007，空状态几乎无影响
-
-    # --- v5b: Contrastive Value Head (同类 entity routing 监督) ---
-    contrastive_weight: float = 0.0
-
-    # --- write iteration count (v5b default 1) ---
-    write_iterations: int = 1
+    # --- 持久状态 (v5c: Delta Rule W: (B,H,d_v,d_k)) ---
+    n_heads: int = 16               # 头数
+    head_dim: int = 64              # d_k = d_v = head_dim
+    read_scale_init: float = -5.0   # sigmoid(-5) ≈ 0.007，空态几乎无影响
+    beta_bias_init: float = 0.0     # sigmoid(0)=0.5，初始 Delta Rule 学习率
 
     # --- LoRA ---
     lora_rank: int = 16
@@ -49,8 +45,10 @@ class XinheConfig:
     grad_accum_steps: int = 1           # 梯度累积步数 (模拟更大 batch)
     gradient_checkpointing: bool = False  # 用计算换显存 (重算激活值)
     resume_from: str = ""               # checkpoint 路径 (为空则不恢复)
-    early_stop_loss: float = 0.0        # 早停 loss 阈值 (0=不启用)
-    early_stop_patience: int = 0        # 早停耐心 (连续多少步低于阈值)
+    # v5c: 早停基于 val VALUE，不再看 loss；下面两项保留字段避免破坏 YAML 兼容但实际无效
+    early_stop_loss: float = 0.0        # (deprecated) 早停 loss 阈值 (0=不启用)
+    early_stop_patience: int = 0        # (deprecated) 早停耐心
+    early_stop_value: float = 0.995     # 早停 VALUE 阈值 (val breakdown 跨过即切下一 stage)
     warmup_steps: int = 100
     max_steps: int = 10000
     eval_every: int = 500
@@ -170,11 +168,10 @@ class XinheConfig:
                 "freeze": "freeze_backbone",
             },
             "state": {
-                "n_state": "n_state",
-                "state_dim": "state_dim",
-                "state_scale_init": "state_scale_init",
-                "contrastive_weight": "contrastive_weight",
-                "write_iterations": "write_iterations",
+                "n_heads": "n_heads",
+                "head_dim": "head_dim",
+                "read_scale_init": "read_scale_init",
+                "beta_bias_init": "beta_bias_init",
             },
             "lora": {
                 "rank": "lora_rank",
@@ -197,6 +194,7 @@ class XinheConfig:
                 "resume_from": "resume_from",
                 "early_stop_loss": "early_stop_loss",
                 "early_stop_patience": "early_stop_patience",
+                "early_stop_value": "early_stop_value",
                 "warmup_steps": "warmup_steps",
                 "max_steps": "max_steps",
                 "eval_every": "eval_every",

@@ -11,11 +11,15 @@ backbone:
   hidden_size: 1024
   freeze: true
 
-# --- StateInterface ---
+# --- StateInterface (v5c: Delta Rule 联想记忆 W: (B,H,d_v,d_k)) ---
+# read_scale_init=-3 (初始 scale≈0.047): 平衡读强度
+# beta_bias_init=-2 (初始 β=0.12): 写入温和，让 W 稳定建立，避免激进累积
+# head_dim=128 (第二轮): 同类 key 正交化瓶颈 → 扩 key/value 维度，单样本 W 从 64K→256K floats
 state:
-  n_state: 32
-  state_dim: 1024
-  state_scale_init: -3.0
+  n_heads: 16
+  head_dim: 128
+  read_scale_init: -3.0
+  beta_bias_init: -2.0
 
 # --- LoRA ---
 lora:
@@ -37,7 +41,7 @@ training:
   gradient_checkpointing: false
   warmup_steps: 100
   max_steps: 10000
-  eval_every: 500
+  eval_every: 1000       # v5c: val 每 1000 步（附带触发 VALUE 早停检查）
   save_every: 1000
   log_every: 50
   device: "cuda"

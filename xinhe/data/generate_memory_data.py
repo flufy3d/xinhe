@@ -153,8 +153,8 @@ def random_name(rng: random.Random) -> str:
 
 
 def random_number(rng: random.Random) -> str:
-    """随机 1~8 位数字，长度多样化"""
-    length = rng.randint(1, 8)
+    """随机 1~6 位数字。v5c: 8 位对语言模型记忆是 digit-position 灾难，1~6 位平衡。"""
+    length = rng.randint(1, 6)
     return "".join(str(rng.randint(0, 9)) for _ in range(length))
 
 
