@@ -46,6 +46,9 @@ def generate_stage_data(
     elif data_type == "think":
         return _generate_think(data_cfg, out_dir, force, model_path)
 
+    elif data_type == "persona":
+        return _generate_persona(data_cfg, out_dir, force)
+
     else:
         raise ValueError(f"未知的数据类型: {data_type}")
 
@@ -129,6 +132,36 @@ def _generate_think(
         ratio_heartbeat=data_cfg.get("ratio_heartbeat", 0.15),
         ratio_logic=data_cfg.get("ratio_logic", 0.10),
         gen_batch_size=data_cfg.get("gen_batch_size", 16),
+    )
+
+
+def _generate_persona(data_cfg: dict, out_dir: str, force: bool) -> tuple[str, str]:
+    """生成 persona 统一训练数据（缓存感知：已存在则跳过）"""
+    train_path = str(Path(out_dir) / "train.jsonl")
+    val_path = str(Path(out_dir) / "val.jsonl")
+
+    # 缓存检查
+    if not force and Path(train_path).exists() and Path(val_path).exists():
+        expected = data_cfg.get("num_train", 40000)
+        with open(train_path, "r", encoding="utf-8") as f:
+            actual = sum(1 for ln in f if ln.strip())
+        if actual >= expected * 0.95:
+            print(f"  [缓存] 使用已有数据: {out_dir} ({actual} 条)")
+            return train_path, val_path
+
+    from xinhe.data.generate_persona_data import generate_data as _gen_persona
+
+    return _gen_persona(
+        out_dir=out_dir,
+        num_train=data_cfg.get("num_train", 40000),
+        num_val=data_cfg.get("num_val", 500),
+        cache_dir=data_cfg.get("cache_dir", "data/cache"),
+        turn_mix=data_cfg.get("turn_mix", None),
+        min_turns=data_cfg.get("min_turns", 12),
+        max_turns=data_cfg.get("max_turns", 20),
+        seed=data_cfg.get("seed", 42),
+        stress_retention_ratio=data_cfg.get("stress_retention_ratio", 0.0),
+        multi_slot_retention_ratio=data_cfg.get("multi_slot_retention_ratio", 0.0),
     )
 
 

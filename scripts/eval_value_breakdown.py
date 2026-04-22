@@ -75,20 +75,30 @@ def tokenize_turn_with_class(tokenizer, user_content, assistant_content, segment
     else:
         labels = [-100] * len(full_ids)
 
-    is_recall = (value_str is not None)
+    # 统一 value_str 为 list[str]（向后兼容 str / None / 空列表）
+    if value_str is None:
+        values = []
+    elif isinstance(value_str, str):
+        values = [value_str]
+    else:
+        values = [v for v in value_str if v]
+
+    is_recall = bool(values)
     default_asst_class = CLS_FRAME if is_recall else CLS_TELL
     token_class = [CLS_IGNORE if lab == -100 else default_asst_class for lab in labels]
 
-    # recall 轮: 用 offset_mapping 把 value 区间内的 token 标为 VALUE
+    # recall 轮: 用 offset_mapping 把每个 value 子串区间内的 token 标为 VALUE
     if is_recall:
-        v_start = full_text.find(value_str, len(prefix_text))
-        if v_start < 0:
-            v_start = full_text.find(value_str)
-        if v_start >= 0:
-            v_end = v_start + len(value_str)
-            encoded = tokenizer(full_text, add_special_tokens=False,
-                                return_offsets_mapping=True)
-            offsets = encoded["offset_mapping"]
+        encoded = tokenizer(full_text, add_special_tokens=False,
+                            return_offsets_mapping=True)
+        offsets = encoded["offset_mapping"]
+        for v in values:
+            v_start = full_text.find(v, len(prefix_text))
+            if v_start < 0:
+                v_start = full_text.find(v)
+            if v_start < 0:
+                continue
+            v_end = v_start + len(v)
             for i, (cs, ce) in enumerate(offsets):
                 if i >= len(token_class):
                     break
@@ -114,13 +124,18 @@ def tokenize_turn_with_class(tokenizer, user_content, assistant_content, segment
 
 
 def _collect_episode_value_tokens(tokenizer, episode) -> set:
-    """采集 episode 里所有 recall 轮的 value token ids (去重, 用于同类混淆检测)"""
+    """采集 episode 里所有 recall 轮的 value token ids (去重, 用于同类混淆检测)。
+    兼容 value 为 str / list[str]。"""
     all_value_tokens = set()
     for msg in episode.get("conversations", []):
         v = msg.get("value")
-        if v:
-            toks = tokenizer.encode(v, add_special_tokens=False)
-            all_value_tokens.update(toks)
+        if not v:
+            continue
+        items = [v] if isinstance(v, str) else list(v)
+        for it in items:
+            if it:
+                toks = tokenizer.encode(it, add_special_tokens=False)
+                all_value_tokens.update(toks)
     return all_value_tokens
 
 
@@ -207,7 +222,11 @@ def eval_episode(model, tokenizer, episode, device, segment_length=256,
 
         # 同类混淆: 对 VALUE 错误, 判断预测 token 是否来自本 episode 其他 value
         if track_confusion and value_str is not None:
-            curr_value_tokens = set(tokenizer.encode(value_str, add_special_tokens=False))
+            # 兼容 value_str 为 str / list[str]
+            _items = [value_str] if isinstance(value_str, str) else [v for v in value_str if v]
+            curr_value_tokens = set()
+            for _it in _items:
+                curr_value_tokens.update(tokenizer.encode(_it, add_special_tokens=False))
             other_value_tokens = episode_value_tokens - curr_value_tokens
             value_mask = (shift_class == CLS_VALUE) & (shift_labels != -100)
             wrong_mask = value_mask & ~correct_mask

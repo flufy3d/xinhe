@@ -1,0 +1,70 @@
+# ============================================================
+# Persona Unified — 唯一的最终配置（单 stage 一次训完）
+#
+# 同时解决: LoRA 漂移 / 不知道说不知道 / 多 fact 崩 / 世界知识遗忘 /
+#          跨 chat retention / 多槽同时 retention
+#
+# 数据: persona 驱动多轮对话 + DeepSeek V3 cache 的 chat/world_qa rehearsal
+#       20% episode 走结构化 retention pattern (10% 单槽 + 10% 多槽)
+#
+# 前置:
+#   0. export DEEPSEEK_API_KEY=...  (或加到 .env)
+#   1. python scripts/build_chat_cache.py   → data/cache/*.jsonl
+#   2. python scripts/build_val_sets.py     → data/val/*.jsonl
+#
+# 用法（0.8b，从 memory-complete plugin ckpt 继续）:
+#   python scripts/train.py --config configs/persona_unified.yaml \
+#       --resume checkpoints/curriculum/11_all_mix.pt
+#
+# 用法（完全从 scratch，plugin 也从零学）:
+#   python scripts/train.py --config configs/persona_unified.yaml
+#
+# 收敛: step 3000-5000 之间 4 指标全达标 → 早停
+# ============================================================
+base: qwen3.5-0.8b.yaml
+
+data:
+  val_worldqa_path: "data/val/val_worldqa.jsonl"
+  val_refusal_path: "data/val/val_refusal.jsonl"
+  val_compositional_path: "data/val/val_compositional.jsonl"
+
+curriculum:
+  - name: "persona_unified"
+    data:
+      type: "persona"
+      num_train: 40000
+      num_val: 500
+      cache_dir: "data/cache"
+      min_turns: 12
+      max_turns: 20
+      # 结构化 retention patterns（用户实测失败的 pattern 由此修复）
+      stress_retention_ratio: 0.10       # 10% 单槽 reveal→chat→recall
+      multi_slot_retention_ratio: 0.10   # 10% 多槽 reveal×N→chat→recall×N
+      out_dir: "data/curriculum/persona_unified"
+      seed: 42
+
+    training:
+      lora_reset: true              # 从 ckpt 继续时重新初始化 LoRA；从零开始时无影响
+      plugin_lr_multiplier: 0.1     # plugin 小 LR 保护已训好的 memory（从零时建议改 1.0）
+      freeze_lora: false
+
+      episode_length: 16
+      tbptt_steps: 8
+      segment_length: 256
+      batch_size: 2
+      grad_accum_steps: 2
+      learning_rate: 3.0e-4
+      warmup_steps: 200
+      max_steps: 5000
+      log_every: 50
+      eval_every: 1000              # val breakdown + joint 4 指标较耗时，粗一点够用
+      save_every: 1000
+      grad_clip: 1.0
+      gradient_checkpointing: true
+
+      # ↓ 严阈值：70% WorldQA 容错 30% 太宽松，提高逼模型训到细节
+      use_joint_early_stop: true
+      early_stop_value: 0.98
+      early_stop_world_qa: 0.85
+      early_stop_refusal: 0.95
+      early_stop_compositional: 0.95

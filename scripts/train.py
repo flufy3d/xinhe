@@ -86,6 +86,7 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
         "learning_rate": "learning_rate",
         "plugin_lr_multiplier": "plugin_lr_multiplier",
         "freeze_lora": "freeze_lora",
+        "lora_reset": "lora_reset",
         "weight_decay": "weight_decay",
         "grad_clip": "grad_clip",
         "warmup_steps": "warmup_steps",
@@ -93,6 +94,10 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
         "early_stop_loss": "early_stop_loss",
         "early_stop_patience": "early_stop_patience",
         "early_stop_value": "early_stop_value",
+        "use_joint_early_stop": "use_joint_early_stop",
+        "early_stop_world_qa": "early_stop_world_qa",
+        "early_stop_refusal": "early_stop_refusal",
+        "early_stop_compositional": "early_stop_compositional",
         "log_every": "log_every",
         "save_every": "save_every",
         "eval_every": "eval_every",
@@ -186,14 +191,23 @@ def train_curriculum(base_config, stages, args):
         result = model.state_interface.load_state_dict(ckpt["plugin_state"], strict=False)
         if result.missing_keys:
             print(f"  注意: checkpoint 缺少 {result.missing_keys}，使用默认初始化")
-        from xinhe.model.lora import LoRALinear
-        lora_state = ckpt.get("lora_state", {})
-        for name, module in model.backbone.named_modules():
-            if isinstance(module, LoRALinear):
-                if f"{name}.lora_A" in lora_state:
-                    module.lora_A.data = lora_state[f"{name}.lora_A"]
-                if f"{name}.lora_B" in lora_state:
-                    module.lora_B.data = lora_state[f"{name}.lora_B"]
+
+        # persona 统一训练: 可以加载 plugin 但 reset LoRA（新 LoRA 从随机 kaiming_A + zero_B 开始）
+        first_stage = stages[start_idx]
+        first_stage_training = first_stage.get("training", {})
+        lora_reset = first_stage_training.get("lora_reset", False)
+
+        if lora_reset:
+            print(f"[课程学习] lora_reset=True，跳过 LoRA 加载（保持新随机初始化）")
+        else:
+            from xinhe.model.lora import LoRALinear
+            lora_state = ckpt.get("lora_state", {})
+            for name, module in model.backbone.named_modules():
+                if isinstance(module, LoRALinear):
+                    if f"{name}.lora_A" in lora_state:
+                        module.lora_A.data = lora_state[f"{name}.lora_A"]
+                    if f"{name}.lora_B" in lora_state:
+                        module.lora_B.data = lora_state[f"{name}.lora_B"]
         print(f"[课程学习] 从 {init_ckpt} 加载权重")
 
     trainer = None

@@ -260,35 +260,77 @@ class Trainer:
 
     @torch.no_grad()
     def _validate(self) -> None:
-        """验证集评估: VALUE/FRAME/TELL 分解 (替代无信息量的 val_loss)。
-        VALUE ≥ early_stop_value 时触发早停进入下一 stage。"""
+        """验证集评估。
+        默认模式: VALUE/FRAME/TELL 分解，VALUE ≥ early_stop_value 触发早停。
+        use_joint_early_stop=True 时: 额外跑 WorldQA/Refusal/Compositional 3 指标，4 个全过才早停。
+        """
         self.model.eval()
         try:
             from scripts.eval_value_breakdown import eval_value_breakdown_fast
             from pathlib import Path as _Path
-            if _Path(self.config.val_path).exists():
-                tokenizer = getattr(self, "_fast_eval_tokenizer", None)
-                if tokenizer is None:
-                    from transformers import AutoTokenizer
-                    tokenizer = AutoTokenizer.from_pretrained(
-                        str(_Path(self.config.backbone_model_path).resolve()),
-                        trust_remote_code=True,
-                    )
-                    if tokenizer.pad_token_id is None:
-                        tokenizer.pad_token_id = tokenizer.eos_token_id
-                    self._fast_eval_tokenizer = tokenizer
-                breakdown = eval_value_breakdown_fast(
-                    self.model, tokenizer, self.config.val_path, self.device,
-                    seg_len=self.config.segment_length, max_episodes=50,
-                )
-                print(f"  [val breakdown] VALUE={breakdown['VALUE']:.2%} "
-                      f"FRAME={breakdown['FRAME']:.2%} TELL={breakdown['TELL']:.2%}")
+            if not _Path(self.config.val_path).exists():
+                self.model.train()
+                return
 
-                # VALUE 早停：val 阶段核心任务已近满分即可切 stage
+            tokenizer = getattr(self, "_fast_eval_tokenizer", None)
+            if tokenizer is None:
+                from transformers import AutoTokenizer
+                tokenizer = AutoTokenizer.from_pretrained(
+                    str(_Path(self.config.backbone_model_path).resolve()),
+                    trust_remote_code=True,
+                )
+                if tokenizer.pad_token_id is None:
+                    tokenizer.pad_token_id = tokenizer.eos_token_id
+                self._fast_eval_tokenizer = tokenizer
+
+            breakdown = eval_value_breakdown_fast(
+                self.model, tokenizer, self.config.val_path, self.device,
+                seg_len=self.config.segment_length, max_episodes=50,
+            )
+            value_acc = breakdown["VALUE"]
+            print(f"  [val breakdown] VALUE={value_acc:.2%} "
+                  f"FRAME={breakdown['FRAME']:.2%} TELL={breakdown['TELL']:.2%}")
+
+            use_joint = getattr(self.config, "use_joint_early_stop", False)
+
+            if not use_joint:
+                # 单指标 VALUE 早停（原行为）
                 early_stop_value = getattr(self.config, "early_stop_value", 0.0)
-                if early_stop_value > 0 and breakdown["VALUE"] >= early_stop_value:
+                if early_stop_value > 0 and value_acc >= early_stop_value:
                     self._early_stopped = True
-                    print(f"  [已收敛] VALUE={breakdown['VALUE']:.2%} ≥ {early_stop_value:.2%}，提前进下一阶段")
+                    print(f"  [已收敛] VALUE={value_acc:.2%} ≥ {early_stop_value:.2%}，提前进下一阶段")
+                self.model.train()
+                return
+
+            # 4 指标联合早停
+            from xinhe.evaluation.persona_joint import eval_persona_joint
+            joint = eval_persona_joint(
+                self.model, tokenizer, self.config, self.device,
+                max_episodes=50,
+            )
+            wq = joint.get("world_qa", 0.0)
+            rf = joint.get("refusal", 0.0)
+            cp = joint.get("compositional", 0.0)
+            print(f"  [joint] WorldQA={wq:.2%} Refusal={rf:.2%} Compositional={cp:.2%}")
+
+            thr_v = getattr(self.config, "early_stop_value", 0.95)
+            thr_w = getattr(self.config, "early_stop_world_qa", 0.70)
+            thr_r = getattr(self.config, "early_stop_refusal", 0.85)
+            thr_c = getattr(self.config, "early_stop_compositional", 0.85)
+            all_pass = (value_acc >= thr_v and wq >= thr_w
+                        and rf >= thr_r and cp >= thr_c)
+            if all_pass:
+                self._early_stopped = True
+                print(f"  [已收敛] 4 指标全部达标：VALUE≥{thr_v:.0%} WorldQA≥{thr_w:.0%} "
+                      f"Refusal≥{thr_r:.0%} Compositional≥{thr_c:.0%}")
+            else:
+                missed = []
+                if value_acc < thr_v: missed.append(f"VALUE({value_acc:.2%}<{thr_v:.0%})")
+                if wq < thr_w: missed.append(f"WorldQA({wq:.2%}<{thr_w:.0%})")
+                if rf < thr_r: missed.append(f"Refusal({rf:.2%}<{thr_r:.0%})")
+                if cp < thr_c: missed.append(f"Compositional({cp:.2%}<{thr_c:.0%})")
+                print(f"  [未达标] {', '.join(missed)}")
+
         except Exception as e:
             print(f"  [val breakdown] 跳过: {e}")
         self.model.train()

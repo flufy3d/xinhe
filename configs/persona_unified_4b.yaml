@@ -1,0 +1,64 @@
+# ============================================================
+# Persona Unified — Qwen3.5-4B 版本（单 stage 从 scratch 一次训完）
+#
+# 和 persona_unified.yaml（0.8b）的区别：
+#   - backbone 换成 4b（hidden_size=2560，更大）
+#   - batch_size 从 2 → 1，grad_accum 从 2 → 4（保持 effective batch=4）
+#   - plugin_lr_multiplier 从 0.1 → 1.0（从 scratch 时 plugin 需要充分训练）
+#   - max_steps 从 5000 → 10000（从零训比 0.8b-from-11_all_mix 需要更多步数）
+#
+# 前置（同 0.8b）:
+#   1. python scripts/build_chat_cache.py   → data/cache/*.jsonl
+#   2. python scripts/build_val_sets.py     → data/val/*.jsonl
+#
+# 用法（不 --resume，完全从 backbone init 开始）:
+#   python scripts/train.py --config configs/persona_unified_4b.yaml
+#
+# ⚠️ 4b 没有 11_all_mix.pt 这种预训好的 plugin，plugin 和 LoRA 同时从零学
+#    Delta Rule 读写 + 对话能力。预计 step 5000-8000 之间收敛。
+# ============================================================
+base: qwen3.5-4b.yaml
+
+data:
+  val_worldqa_path: "data/val/val_worldqa.jsonl"
+  val_refusal_path: "data/val/val_refusal.jsonl"
+  val_compositional_path: "data/val/val_compositional.jsonl"
+
+curriculum:
+  - name: "persona_unified"
+    data:
+      type: "persona"
+      num_train: 40000
+      num_val: 500
+      cache_dir: "data/cache"
+      min_turns: 12
+      max_turns: 20
+      stress_retention_ratio: 0.10
+      multi_slot_retention_ratio: 0.10
+      out_dir: "data/curriculum/persona_unified_4b"
+      seed: 42
+
+    training:
+      lora_reset: false             # 从 scratch，没 prior LoRA 可 reset
+      plugin_lr_multiplier: 1.0     # 从零训，plugin 和 LoRA 同速
+      freeze_lora: false
+
+      episode_length: 16
+      tbptt_steps: 8
+      segment_length: 256
+      batch_size: 1                 # 4b 显存紧张
+      grad_accum_steps: 4           # effective batch = 4
+      learning_rate: 3.0e-4
+      warmup_steps: 300             # 从零训 warmup 久一点
+      max_steps: 10000              # 留足收敛空间
+      log_every: 50
+      eval_every: 1000
+      save_every: 1000
+      grad_clip: 1.0
+      gradient_checkpointing: true
+
+      use_joint_early_stop: true
+      early_stop_value: 0.98
+      early_stop_world_qa: 0.85
+      early_stop_refusal: 0.95
+      early_stop_compositional: 0.95

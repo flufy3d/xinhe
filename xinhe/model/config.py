@@ -40,6 +40,7 @@ class XinheConfig:
     learning_rate: float = 3e-4
     plugin_lr_multiplier: float = 1.0   # plugin 学习率 = learning_rate × multiplier
     freeze_lora: bool = False           # 冻结 LoRA，只训练 plugin (bootstrap 阶段用)
+    lora_reset: bool = False            # persona 重训: 加载 plugin 但重新零初始化 LoRA
     weight_decay: float = 0.01
     grad_clip: float = 1.0
     grad_accum_steps: int = 1           # 梯度累积步数 (模拟更大 batch)
@@ -49,6 +50,14 @@ class XinheConfig:
     early_stop_loss: float = 0.0        # (deprecated) 早停 loss 阈值 (0=不启用)
     early_stop_patience: int = 0        # (deprecated) 早停耐心
     early_stop_value: float = 0.995     # 早停 VALUE 阈值 (val breakdown 跨过即切下一 stage)
+    # persona 统一训练: 4 指标联合早停
+    use_joint_early_stop: bool = False  # True 时 _validate 额外跑 WorldQA/Refusal/Compositional，4 指标全过才停
+    early_stop_world_qa: float = 0.70
+    early_stop_refusal: float = 0.85
+    early_stop_compositional: float = 0.85
+    val_worldqa_path: str = ""          # 世界 QA val jsonl（单轮 Q/A）
+    val_refusal_path: str = ""          # Refusal val jsonl（多轮，每 ep 最后问未披露）
+    val_compositional_path: str = ""    # Compositional val jsonl（多 fact 单 utterance）
     warmup_steps: int = 100
     max_steps: int = 10000
     eval_every: int = 500
@@ -187,6 +196,7 @@ class XinheConfig:
                 "learning_rate": "learning_rate",
                 "plugin_lr_multiplier": "plugin_lr_multiplier",
                 "freeze_lora": "freeze_lora",
+                "lora_reset": "lora_reset",
                 "weight_decay": "weight_decay",
                 "grad_clip": "grad_clip",
                 "grad_accum_steps": "grad_accum_steps",
@@ -195,6 +205,10 @@ class XinheConfig:
                 "early_stop_loss": "early_stop_loss",
                 "early_stop_patience": "early_stop_patience",
                 "early_stop_value": "early_stop_value",
+                "use_joint_early_stop": "use_joint_early_stop",
+                "early_stop_world_qa": "early_stop_world_qa",
+                "early_stop_refusal": "early_stop_refusal",
+                "early_stop_compositional": "early_stop_compositional",
                 "warmup_steps": "warmup_steps",
                 "max_steps": "max_steps",
                 "eval_every": "eval_every",
@@ -206,6 +220,9 @@ class XinheConfig:
             "data": {
                 "train_path": "train_path",
                 "val_path": "val_path",
+                "val_worldqa_path": "val_worldqa_path",
+                "val_refusal_path": "val_refusal_path",
+                "val_compositional_path": "val_compositional_path",
             },
             "logging": {
                 "use_wandb": "use_wandb",

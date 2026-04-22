@@ -44,7 +44,7 @@ def tokenize_turn(
     assistant_content: str,
     segment_length: int,
     compute_loss: bool = True,
-    value_str: Optional[str] = None,
+    value_str=None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     将一轮 user+assistant 对话 tokenize 为 (input_ids, labels, weights)。
@@ -52,7 +52,10 @@ def tokenize_turn(
     - labels: user/template 部分 = -100, assistant 部分 = 实际 token id, padding = -100
     - compute_loss=False 时，整个 segment 的 labels 全为 -100
     - weights: VALUE token=VALUE_WEIGHT, 其他 assistant token=1.0, -100 位置=0.0
-    - value_str: recall 轮的目标字符串 (如 "他是高级木匠"); 为 None 时所有 assistant token 权重=1.0
+    - value_str:
+        - None: 所有 assistant token 权重=1.0
+        - str: 单一 value 子串 (如 "他是高级木匠")
+        - list[str]: 多 value 场景（多 fact 一句话）, 每个子串独立打 VALUE_WEIGHT
     """
     prefix_text = tokenizer.apply_chat_template(
         [{"role": "user", "content": user_content}],
@@ -81,22 +84,31 @@ def tokenize_turn(
     # 构建 weights: 默认 assistant token 权重 1.0, -100 位置 0.0
     weights = [1.0 if lab != -100 else 0.0 for lab in labels]
 
-    # VALUE token 加权: 用 offset_mapping 定位 value 子串
+    # VALUE token 加权: 用 offset_mapping 定位每个 value 子串
     if compute_loss and value_str:
-        value_start = full_text.find(value_str, len(prefix_text))
-        if value_start < 0:
-            value_start = full_text.find(value_str)  # fallback: 全文搜索
-        if value_start >= 0:
-            value_end = value_start + len(value_str)
+        # 统一成 list 处理（向后兼容 str）
+        if isinstance(value_str, str):
+            values = [value_str]
+        else:
+            values = [v for v in value_str if v]
+
+        if values:
             encoded = tokenizer(full_text, add_special_tokens=False,
                                 return_offsets_mapping=True)
             offsets = encoded["offset_mapping"]
-            for i, (c_start, c_end) in enumerate(offsets):
-                if i >= len(weights):
-                    break
-                # token 与 value 区间有重叠 → VALUE token
-                if weights[i] > 0 and c_start < value_end and c_end > value_start:
-                    weights[i] = VALUE_WEIGHT
+            for v in values:
+                v_start = full_text.find(v, len(prefix_text))
+                if v_start < 0:
+                    v_start = full_text.find(v)  # fallback: 全文搜索
+                if v_start < 0:
+                    continue
+                v_end = v_start + len(v)
+                for i, (c_start, c_end) in enumerate(offsets):
+                    if i >= len(weights):
+                        break
+                    # token 与 value 区间有重叠 → VALUE token
+                    if weights[i] > 0 and c_start < v_end and c_end > v_start:
+                        weights[i] = VALUE_WEIGHT
 
     # 截断
     if len(full_ids) > segment_length:
