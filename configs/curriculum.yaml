@@ -9,7 +9,6 @@
 #
 # 关键变化 vs v5b:
 #   - 架构换为 Delta Rule: error=(v-Wk) 原生处理同类消歧 + 覆写
-#   - contrastive_weight 全部删除（slot 概念已消失，靠 Delta Rule 自带数学）
 #   - 课程难度/顺序/max_steps 保持不变，让架构在同课程下对比
 #
 # 用法:
@@ -23,8 +22,8 @@ training_defaults:
   plugin_lr_multiplier: 1.0
   grad_accum_steps: 1
   max_steps: 2000
-  # v5c Phase A 目标：VALUE ≥ 99% 切 stage（Phase A 要求 99%+）
-  early_stop_value: 0.99
+  # v5c Phase A 目标：VALUE ≥ 99.5% 切 stage
+  early_stop_value: 0.995
 
 stages:
   # ================================================================
