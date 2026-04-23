@@ -25,7 +25,7 @@ data:
   val_compositional_path: "data/val/val_compositional.jsonl"
 
 curriculum:
-  - name: "persona_unified"
+  - name: "persona_unified_4b"
     data:
       type: "persona"
       num_train: 40000
