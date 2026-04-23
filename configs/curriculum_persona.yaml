@@ -1,0 +1,80 @@
+# ============================================================
+# Persona 统一训练 — 共享课程定义（被 persona_unified*.yaml 引用）
+#
+# 两阶段结构：
+#   0_bootstrap         — 2 轮 1-fact（only name），freeze LoRA，只训 plugin
+#                         目标：plugin 学会 Delta Rule 基本读写
+#                         预期：~1000-1500 步收敛，batch 可开大
+#   1_persona_unified   — 完整 persona 驱动对话 + chat/world_qa rehearsal
+#                         + 结构化 retention patterns（10% 单槽 + 10% 多槽）
+#                         严阈值联合早停（VALUE 98 / WorldQA 85 / Refusal 95 / Compositional 95）
+#
+# 设计理由：
+#   4b 单 stage 从零训曾在 step 5k-7k 遇到 plateau —— plugin 和 LoRA 抢梯度。
+#   先 bootstrap 单独训 plugin，再主 stage 才能不卡在读写原语学习上。
+#
+# 此文件只定义 stages，实际 backbone + stage_overrides 在 persona_unified*.yaml
+# ============================================================
+
+training_defaults:
+  learning_rate: 3.0e-4
+  grad_clip: 1.0
+  gradient_checkpointing: true
+  log_every: 50
+  eval_every: 1000
+  save_every: 1000
+  segment_length: 256
+
+stages:
+  # ── Stage 0: Bootstrap Delta Rule 读写 ─────────────────────
+  # 2 轮最短 cycle: tell → recall。只 name 一类防过早泛化。
+  # 复用原 generate_memory_data.py（type: memory）
+  - name: "0_bootstrap"
+    data:
+      type: "memory"
+      num_train: 10000
+      num_val: 200
+      num_facts: 1
+      categories: ["name"]
+      no_pre_filler: true
+      no_overwrite: true
+      min_distance: 0          # 告知立刻召回，0 距离
+      max_distance: 0
+      max_turns: 2             # tell + recall
+      seed: 42
+    training:
+      episode_length: 2
+      tbptt_steps: 2
+      freeze_lora: true        # 只训 plugin
+      plugin_lr_multiplier: 1.0
+      max_steps: 1500
+      warmup_steps: 100
+      # 简单任务不用 joint，VALUE 达 98 就进下 stage
+      use_joint_early_stop: false
+      early_stop_value: 0.98
+
+  # ── Stage 1: 主统一分布训练 ─────────────────────────────────
+  - name: "1_persona_unified"
+    data:
+      type: "persona"
+      num_train: 40000
+      num_val: 500
+      cache_dir: "data/cache"
+      min_turns: 12
+      max_turns: 20
+      stress_retention_ratio: 0.10      # 10% 单槽 reveal→chat→recall
+      multi_slot_retention_ratio: 0.10  # 10% 多槽 reveal×N→chat→recall×N
+      seed: 42
+    training:
+      freeze_lora: false
+      plugin_lr_multiplier: 0.3         # plugin 已 bootstrap，refine 小 LR
+      episode_length: 16
+      tbptt_steps: 8
+      max_steps: 5000
+      warmup_steps: 200
+      # 严阈值联合早停（70% 太松，逼模型训到细节）
+      use_joint_early_stop: true
+      early_stop_value: 0.98
+      early_stop_world_qa: 0.85
+      early_stop_refusal: 0.95
+      early_stop_compositional: 0.95
