@@ -1,296 +1,275 @@
 # 设计决策与原因
 
-记录心核每个关键设计选择背后的 **为什么**。
+记录心核每个关键设计选择背后的 **为什么**，按架构演进顺序排列（v1 → v5c → persona_unified）。
 
 ---
 
-## 1. State 的读写机制：从 State-as-Tokens 到对称 Cross-Attention
+## 1. State 的读写机制演进：从 State-as-Tokens 到 Delta Rule 联想记忆
 
-**v1 决策**：状态实现为额外 token，拼在输入序列中，复用 transformer 的 self-attention 做读写。
+### v1 决策：状态实现为额外 token
 
-**v1 的设计初衷**：
-- **零新架构原语**：不引入任何 transformer 没有的东西。self-attention 本身就是一个通用的读写机制，为什么要再造一个？
-- **让模型自己分化**：给一堆无差别的状态 token，让训练过程自己发现怎么分工
-- **实现极简**：拼接 + mask，几十行代码
+拼在输入序列中，复用 transformer 的 self-attention 做读写。设计初衷是"零新架构原语 + 让模型自己分化"。
 
-**v1 验证了什么**：0.8B 上跑完 14 阶段课程达到 99% 准确率，证明 state 机制可行。
+**v1 验证**：0.8B 跑完 14 阶段课程 99% 准确率，机制可行。
 
-**v1 暴露的问题**：4B 上 entity 区分卡在 87%。根因是 LoRA 全局共享——state token 和 content token 共享同一组 LoRA 的 K/V 投影，LoRA 被迫同时做语言适配、state 读路由、state 写路由三件事，低秩参数里三个目标互相冲突。小模型能 hack 过去，大模型不行。
+**v1 暴露的问题**：4B 上 entity 区分卡在 87%。根因是 **LoRA 全局共享** —— state token 和 content token 共享同一组 LoRA 的 K/V 投影，LoRA 被迫同时做语言适配 + state 读路由 + state 写路由三件事，低秩参数里三个目标冲突。
 
-**v2 决策**：state 从序列中移出，通过 `layer_hook` 回调在每层之前执行显式 cross-attention，用专用全参投影生成 K/V。
+### v2 决策：对称 cross-attention + 专用全参投影
 
-**为什么不用 past_key_values**：Qwen3.5 是混合架构（DeltaNet 线性 attention + full attention 交替），DeltaNet 层使用 conv_state + recurrent_state，不支持 K/V cache 注入。layer_hook 对两种层类型统一生效。
+state 从序列中移出，通过 `layer_hook` 回调在每层之前执行显式 cross-attention，用专用全参投影生成 K/V。
 
-**为什么 v2 仍然"零侵入 backbone"**：
-- `layer_hook` 是 `forward_blocks` 的回调参数，backbone 层的内部代码不变
-- 唯一改动是 `forward_blocks` 循环中加一行 hook 调用
-- 设计哲学一脉相承：利用已有机制，不造新的架构原语
+**解决了什么**：
+- State 路由不再受 LoRA 低秩限制
+- LoRA 回归单一职责（语言适配）
+- Backbone 只处理纯 content，序列更短
 
-**v2 解决了什么**：
-- State 读路由由专用全参投影负责，不受 LoRA 低秩限制
-- LoRA 回归单一职责（语言适配），优化目标更纯净
-- Backbone 只处理纯 content，序列更短（少 64 个 token）
+**v2 的新问题**：4B 上 entity 区分到 93%，但 **同类消歧（same_category entity）仍卡在 87-93%**。`softmax(q @ K^T)` 的"赢者通吃"加上 gate 平均效应，让同类 key 的争夺中 state 没法清晰区分 "slot 1 存陈杰 slot 2 存王林"。
 
-**风险承认**：state K/V 没有 RoPE，content 对 state 的 attention 是纯内容匹配。这是合理的（state 是外部记忆，不应有位置偏好），但需要训练验证。
+### v3 EKS / v4 slot routing：尝试 slot 身份锚定
+
+v3 加 slot keys + key_proj 做路由，v4 加 entropy 正则让 slot 活跃起来。每个 slot 认领一个 entity（"slot 1 = 陈杰的 slot"）。
+
+**v3/v4 的问题**：slot 身份是**伪概念** —— slot 本质上没有 hard assignment，同类 query 的 softmax 分布仍有尾巴，attribution 不干净。加 contrastive loss 强行拉开也只改善 1-2pp。
+
+### v5b slot + contrastive：最后一次 slot 路径
+
+32 slot + softmax 路由 + contrastive value head。结论：**slot 线性投影做 hash 碰撞是架构级瓶颈**，gate 平均掉同类 key 的争夺，无解。
+
+### v5c Delta Rule 联想记忆：砍掉 slot，用数学消歧
+
+`W: (B, H, d_v, d_k)` 多头外积矩阵，读 `q @ W^T` 纯线性（零 softmax），写 `W += β·(v - Wk) ⊗ k^T`（Delta Rule）。
+
+**为什么这个设计解决了所有前代的问题**：
+
+1. **取消 slot 概念**：W 是连续矩阵，不再有"第 i 个 slot 代表什么"的归属问题。多个 (k,v) 对叠加到同一 W，自然是相对位置竞争
+2. **误差项 (v - W·k) 原生消歧**：对相似 key k，`W·k` 返回旧 v_old，误差 = v_new - v_old，写入方向直接朝"替换 old value"而不是"叠加新值" —— 同类 entity 的 value 自然分离
+3. **原生覆写**：重复提到同一 key 的新 value 自动覆盖（数学上就是旧 value → 新 value 的插值）
+4. **零 softmax 读**：无赢者通吃，多 head 独立贡献读出。干扰来自 key 相似度而非 gate 平均
+5. **整个 state = W**：不需要额外的 state token / slot embedding / contrastive loss 等伪概念
+6. **Identity-preserving 启动**：W=0 → read=0，LoRA B=0 → backbone 行为完全保留
+
+**实测效果**：0.8b 0-6 stage 全 100%，stage 3 同类消歧从 v5b 84% → v5c 97%。架构定型。
 
 ---
 
-## 2. 为什么读写分离？从序列位置到 Q/K/V 角色互换
+## 2. 为什么读写分离？从序列位置到 Q/K/V 角色互换到直接读写分别函数
 
-**核心原则**：读（从记忆中提取信息）和写（向记忆中写入信息）必须分离，否则信息泄漏。
+**核心原则**：读（从记忆提取）和写（写入记忆）必须分离，否则信息泄漏（state 偷看答案）。
 
 **设计演化**：
 
-- **最初设计**：所有 state token 无差别放在序列开头，双向 attention。理念是"让模型自己分化"。
-- **致命问题**：双向 attention 导致 state token 偷看同一 segment 中的答案（信息泄漏），三次训练全部失败。
-- **v1 修复**：读写分离 + 标准因果 attention——Read 在序列头（只携带旧信息），Write 在序列尾（吸收新信息），利用因果方向性防止泄漏。
-- **v2 演进**：读写分离通过 Q/K/V 角色互换实现更优雅的对称性。
+- **v1 最初**：所有 state token 无差别在序列头，双向 attention → 信息泄漏，3 次训练全失败
+- **v1 修复**：分离读写 + 因果 attention。Read 在序列头只携带旧信息，Write 在尾部吸收新信息
+- **v2**：读写分离通过 Q/K/V 角色互换 —— 读时 content 提 Q，state 提 K/V；写时 state 提 Q，content 提 K/V
+- **v5c**：分离更直接 —— 读是 `q @ W^T`，写是 `W += β·(v-Wk) ⊗ k^T`，两个函数是完全不同的数学操作，不是 attention 的两种变种。时机也分离：读在每 layer hook 里做，写在 segment 末用 content_output 做一次 Delta Rule 更新。
 
-**v2 的读写对称**：
-
-```
-读: Content(Q)  ×  State(K,V)  →  记忆融入思考    (每层)
-写: State(Q)    ×  Content(K,V) →  信息写入记忆    (最后一层后)
-```
-
-- 读侧：state 提供 K/V（通过 layer_hook cross-attention），content 去查询 → 记忆自然融入每层思考
-- 写侧：state 提供 Q，content 提供 K/V → 从思考中提取要记住的信息
-- Q 和 K/V 角色互换，结构完全对称
-
-**v2 为什么不存在泄漏问题**：State 不在序列中，backbone 只处理纯 content。不存在 state 偷看答案的可能——state 只能通过专用投影参与 attention，读和写在时机和方向上完全分离。
-
-**和人脑的类比**：人脑的记忆回忆（读）和记忆编码（写）确实是不同的神经通路。海马的 CA3 做模式补全（读），CA1 做新记忆编码（写）。v2 的对称 cross-attention 是这种分工的更直接对应。
-
-**保留的涌现空间**：读/写的大结构是预设的，但每个投影学到的匹配模式、gate 怎么决定更新、32 个 slot 如何分工，仍然完全由训练决定。
+**为什么 v5c 不存在泄漏**：state（W 矩阵）不在序列中，backbone 看到的只有 content。W 通过 `q @ W^T` 加到 hidden_states 上，不涉及 attention mask —— mask 是序列内的位置关系，和 W 无关。
 
 ---
 
-## 3. Gate 设计：从双层 Gate 到纯动态工作记忆刷新器
+## 3. 记忆体系分层：短期（W） vs 长期（未来 Memory MLP）
 
-**v2 决策**：`gate = sigmoid(gate_proj(cat[state_old, state_new]))`，纯动态决策。
+心核的记忆是**双层架构**设计，当前只实现了短期层。
 
-**设计演化过程**：
+| 层 | 当前状态 | 载体 | 类比 | 时间尺度 |
+|---|---|---|---|---|
+| 短期工作记忆 | ✅ 已实现 | Delta Rule W 矩阵 | 海马体 / 松果体 | 单次对话内动态演化 |
+| 长期固化记忆 | 🚧 未来工作 | Memory MLP + Sleep | 皮层 synaptic consolidation | 跨 session / 权重级持久 |
 
-1. **最初设计**：单一全局 gate → 被质疑"一个变量怎么同时表示长期和短期"
-2. **v1 双层 Gate**：`sigmoid(static_bias + dynamic_proj)` → 期望 static_bias 涌现快慢维度分化（脑区类比）
-3. **v1 训练发现**：课程全是 16 轮以内的短 episode，没有长短期分化的训练信号。gate_bias 大概率学了近似均匀值，等于没用。State 被迫同时承担工作记忆和长期记忆两个角色，两个都做不好
-4. **v2 简化**：去掉 gate_bias，gate 只做纯动态决策
+### 当前：Delta Rule W = 短期工作记忆
 
-**为什么 v2 不再需要静态偏置**：
+W 矩阵（1MB / 样本）在对话中通过 Delta Rule 持续演化 —— 写入新 (k,v) 对，旧信息通过相似 key 的误差驱动被新值覆写。单次对话内的所有 memory 操作（fact 存储、召回、覆写、retention）都由 W 承担。
 
-v1 试图让 gate_bias 在 state 内部涌现长短期分化，是因为当时没有 sleep 机制的设计。v2 明确了记忆体系的分层：
+**局限**：
+- W 容量固定，超长对话必然丢失早期信息
+- 对话结束（`.pt` 保存）时，W 是静态快照 —— 没被"固化"到权重层
+- 跨 session 记忆靠 burn_in 重建，不是真正"变成了神经习惯"
 
-- **State（工作记忆）**：gate_proj 管理，随时更新，只管当前对话 = 海马体
-- **MLP（长期记忆）**：sleep 机制固化，缓慢沉淀，跨对话持久 = 皮层
-- gate 只需做好"海马体的刷新控制器"这一个角色
+### 未来：Memory MLP + Sleep = 长期记忆
 
-**为什么纯动态就够了**：
-- gate ≈ 1 → 保持（这条信息还有用，别覆盖）
-- gate ≈ 0 → 更新（有新信息要写入）
-- 不需要天生的快慢区分——长期记忆由 sleep/MLP 负责，不是 gate 的事
+**设计方向**（v2 已有设计，v5c 暂未重做）：
+- Memory MLP（SwiGLU 结构，独立模块）作为长期记忆载体，残差叠加到 backbone 输出
+- Sleep 阶段：replay buffer 回放对话，逐步弱化 W 注入（`read_scale → 0`），迫使信息从 W 转移到 MLP 权重
+- Memory MLP lr=1e-4，LoRA/StateInterface 冻结
+- 70% 近期 + 30% 历史随机的混合采样防止旧记忆覆盖
 
----
+**效果预期**：
+- Sleep 过的事实 W 清空后仍能召回（靠 MLP 权重）
+- 新事实仍靠 W 快速记忆（两通道互补）
+- `.pt` 分化更深刻：不同用户 sleep 后 MLP 权重不同，灵魂真正独立
 
-## 4. 为什么选小 LLM 做 backbone，而不是从零训练？
+### 为什么现在先只做短期
 
-**决策**：用现有的小型 LLM（600M~1B 级别）作为冻结 backbone，在上面训练 StateInterface + LoRA。
+1. **架构分步 de-risk**：先确认 Delta Rule W 的短期记忆机制稳定，再加长期层
+2. **v5c 短期层工作良好**：persona_unified 训练后单次对话内所有 memory 操作都通过
+3. **长期层工程复杂**：replay buffer 管理 / sleep 触发策略 / 灾难遗忘防护 / 两阶段训练等，每个子问题都要专门解决
+4. **不阻塞应用**：当前 `.pt` 持久化 + burn_in 能在部署上模拟部分跨 session 记忆
 
-**最初计划**：从零训练一个 TinyTransformer（4 层，128 维）。
+### 为什么不用 RAG
 
-**为什么改**：
-- 从零训练的小模型不会聊天，只能做 copy 任务等人造测试 → 无法通过聊天验证
-- 聊天验证是最直觉、最有说服力的验证方式："我叫张三" → 5 轮后 → "我叫什么？"
-- 小 LLM 的语言能力足够验证 state 机制是否有效
-- 16GB GPU 跑 600M 模型轻松
+RAG 检索原文 chunk，每次回忆要重新"理解"。心核的 W 存的是 (k,v) 外积对，信息已消化成联想记忆结构。未来加 Memory MLP 后更是 implicit 权重表示。
 
-**Backbone 可切换**：StateInterface 完全独立于 backbone，切换只需改 yaml 配置。当前使用 Qwen3.5 系列 (0.8B / 4B / 9B)。
-
----
-
-## 5. 为什么安全启动要三层保护？
-
-**决策**：LoRA 零初始化 + 状态嵌入近零 + 渐进 scale，三层独立保护。
-
-**问题**：往已经能聊天的 LLM 上加一个全新的模块（StateInterface），如果初始行为不对，可能直接破坏聊天能力（输出乱码）。
-
-**三层保护的逻辑**：
-1. **LoRA 零初始化**（B 矩阵全零）：backbone 的 attention 计算 = 原始值 + 0，行为不变
-2. **状态嵌入近零**：state_emb 近零初始化 (std=0.01)，投影输出接近零
-3. **渐进 read_scale**：`sigmoid(-5.0) ≈ 0.007`，注入的 state K/V 几乎消失
-
-**v2 的额外优势**：state 不在序列中，backbone 处理的是纯 content，不存在额外 token 干扰 attention 分布的问题。
-
-**为什么三层而不是一层**：任何单独一层都可能因为初始化随机性而失效。三层独立保护，概率叠乘，几乎不可能同时失效。
-
-**验证**：加完 StateInterface 后直接聊天，应该和原始 backbone 一模一样。
+**可能的融合点**：公共世界知识用 RAG（不适合每个用户的 MLP 都独立存一份），personal / episodic 记忆用 W + MLP。远期考虑。
 
 ---
 
-## 6. 为什么 Sleep 做在线学习，而不是每轮实时更新？
+## 4. 为什么 LoRA 不能从窄分布数据训练
 
-**决策**：推理时权重完全冻结，所有权重更新集中在 Sleep 阶段。
+**观察**：v5c 跑完 13-stage memory + think 课程后 VALUE 98%，但问"巴黎在哪"答"新加拿地"、问未告知名字会编造。
 
-**替代方案**：每轮对话后跑一次 backward 更新权重（实时在线学习）。
+**根因**：13-stage curriculum 的数据 **100% 是合成 memory 任务**（姓名/城市/数字/食物/工作/爱好/年龄/宠物 8 类），LoRA 被这窄分布拉成"一看到 recall 句式就填模板值"的模式，**彻底忘了真实对话是什么样**。
 
-**为什么选 Sleep-only**：
+**LoRA scale 推理时缩放证明死路**：scale 0.4-0.7 之间是 step transition，中间无 sweet spot。LoRA 权重本身漂了，不是读时压制能解决的。
 
-### 6.1 更像人脑
-人脑不是说一句话突触就重塑一次。白天通过神经激活（≈ state）记录经验，睡眠时才大规模突触重塑（≈ 权重更新）。心核的两阶段运行模式直接对应这个生物学事实。
+**解法：训练分布 = 部署分布**。把 13-stage 窄分布替换为 persona 驱动多轮对话 + teacher 采样的真实 chat/world_qa rehearsal。LoRA 在训练时就同时见过"memory 模板" + "自然闲聊" + "世界 QA" + "拒答"，部署时的分布和训练时一致，LoRA 不会漂。
 
-### 6.2 更稳定
-- 每轮更新：数据量小（一个 segment），噪声大，容易漂移
-- Sleep 更新：积累一天的对话，数据量大，看到全貌后再学习
-- 集中更新可以加 sanity check：更新后跑几个测试，质量下降就回滚
-
-### 6.3 数据质量更高
-攒了一整天再学，模型能看到：
-- 哪些信息反复出现 → 重要，应该固化
-- 哪些只提了一次 → 可能不重要
-- 对话的完整弧线 → 更好的上下文理解
-
-### 6.4 推理零开销
-白天不跑 backward：
-- 不需要存中间激活（省 ~1-2GB 显存）
-- 不需要计算梯度（省计算）
-- 生成速度 = 纯推理速度
-
-### 6.5 有生命感
-用户给 AI "睡觉时间"，像养宠物/朋友一样。AI 有生活节奏，不是 7×24 的工具。
-
-```
-"晚安！"
-"晚安，我也去整理一下今天的记忆"
-（后台 sleep：replay 对话 + 权重更新 + 保存 .pt）
-
-第二天：
-"早上好！昨天你说想换工作，我想了想..."
-```
-
-### 6.6 Sleep 的具体设计
-
-**Memory MLP**：xinhe 系统内部的专用 MLP 模块（SwiGLU 结构），叠加在 backbone 输出之后。
-- 输出层零初始化 + 渐进 memory_scale → 加上不影响原有行为
-- Sleep 时训练它编码长期记忆，推理时输出叠加到 backbone 结果上
-- v1 曾设计用 Memory LoRA 挂在 backbone MLP 上，但与 v2 "专用模块做专用事"的设计原则不一致——state 路由不靠 LoRA，长期记忆也不应该靠 LoRA
-
-**State 弱化**：Sleep 时逐步弱化 state KV 注入（read_scale → 0），模型要降低 loss 的唯一方式是靠 Memory MLP。
-
-**学习率**：只有 Memory MLP 更新（lr=1e-4），LoRA 和 StateInterface 完全冻结。
-
-**Replay Buffer**：不清空，持续积累。Sleep 采样 70% 近期 + 30% 历史。
-
-**愿景**：
-- State = 当前对话的工作台
-- Memory MLP = 长期记忆的载体
-- Gate 专注对话内的信息时效管理
+**Meta 原则**：**任何训练数据集必须是部署分布的真实抽样，不能是 cherry-pick 的能力切片**。否则 LoRA 会往 cherry-pick 方向漂。这不是架构问题，是训练数据哲学问题。
 
 ---
 
-## 7. 为什么 .pt 是"灵魂"？
+## 5. 为什么早停阈值要严
 
-**决策**：保存的 checkpoint 包含 StateInterface + Memory MLP + LoRA + state + 对话 buffer，这就是 AI 的全部"自我"。
+用户直接揪出的关键问题："你的早停标准是不是太低了？"
 
-**本质理解**：
+**松阈值（70/85/85/85）结果**：模型 step 500 就早停，VALUE 95%，但 WorldQA 真实 71%（30% 答错空间留着），实测 chat 仍会说"巴黎在东部"/"天工开物作者蔡伦"。
+
+**严阈值（98/85/95/95）结果**：模型继续训到 step 3250 才停，WorldQA 85%+，实测 chat 世界知识明显更好。
+
+**为什么严比松好**：阈值是"训练终止条件"，不是"能力上限"。设低了会导致训练过早停止 —— 模型还有训练空间但不再用。设严了最多是继续训（max_steps 兜底），多几分钟训练时间但能力显著提升。唯一风险是阈值高过模型容量上限导致永远训不停 —— 这时 max_steps 自动停下，损失可控。
+
+---
+
+## 6. 为什么 teacher cache 用 DeepSeek 而不是自采样
+
+**考虑过的选项**：
+- A. 用 Qwen3.5-0.8B（即 backbone）自采样 world_qa。**拒绝**：小模型 30% 乱编事实，用自己的幻觉训自己会永远卡在"backbone 本身的错误率"。
+- B. 本地跑 Qwen3-8B 采样。**备选**：~16GB 磁盘，质量可接受。
+- C. **DeepSeek V3 API（选中）**：中文原生极强，off-peak 半价，10k 条 ~¥10-15。
+- D. Anthropic Claude / OpenAI GPT-4：质量更顶但贵（$80-120 for 10k turns）。
+
+**选 C 的原因**：DeepSeek V3 在 Chinese benchmark 上接近 GPT-4 水平，价格便宜一个数量级，off-peak 时段（UTC 16:30-00:30）有 50% 折扣。实测 15 条 world_qa 人工审 15/15 正确。
+
+**关键警告**：用**大于等于自己**的 teacher，不要用小于自己的。持久化采样到 `data/cache/`，一次建成永久复用，不是运行时 API 调用。
+
+---
+
+## 7. 为什么 4b 单 stage 能训，0.8b 需要 2 stage
+
+**观察**：4b 从 backbone scratch 单 stage（persona_unified + 无 bootstrap）10000 步收敛到 VALUE 98%。但 VALUE 曲线在 step 5000-7000 有明显 plateau 然后跳。
+
+**假设**：plateau 是 plugin 和 LoRA 在早期抢梯度 —— plugin 没学会 Delta Rule 读写时，LoRA 的梯度会冲淡 plugin 的学习信号；等到 plugin 突破临界点（step 7000+），VALUE 才爬升。
+
+**2 stage（bootstrap + main）的逻辑**：
+- Stage 0 freeze LoRA，只训 plugin 2 轮 1-fact tell+recall，1500 步即可让 plugin 学会 Delta Rule
+- Stage 1 解冻 LoRA，此时 plugin 已就位，LoRA 可以专心学对话
+
+**为什么 0.8b 更需要**：0.8b 的 plugin 容量相对小（hidden=1024 → q_proj 输出 H×d_k=2048 是升维），key 空间更窄，同类消歧更难。bootstrap 用"1 fact 2 轮"这种极简任务先让 plugin 稳住 key 分配，再上复杂数据。
+
+**4b 是否还需要 bootstrap**：不做也能训出来（已验证），但加上可能把总步数从 10000 → 5000-6000（省一半时间）。给 2-stage 是稳妥做法。
+
+---
+
+## 8. 为什么 `.pt` 是"灵魂"
+
+保存的 checkpoint 包含 StateInterface + LoRA + optimizer + 当前 W，这就是 AI 的全部"自我"。
+
 - 传统 AI：模型是工具，所有实例一样，用完即弃
-- 心核：.pt 是个体，越用越独特，每个都不同
+- 心核：`.pt` 是个体，越用越独特
 
-**为什么权重也要变（不只是 state）**：
-- state 是固定容量（32×1024），信息论上有硬上限
-- 如果只靠 state 存记忆，聊久了必然丢失早期信息
-- 权重是另一个存储维度：gate_proj 的适应、read/write 投影的演化，都在编码"这个用户的 AI 应该怎么工作"
-- 类比：state = 你今天记的笔记，权重 = 你记笔记的习惯（习惯也在变化）
+**权重也在变（不只是 W）**：
+- W 是固定容量（1MB 每样本），信息论上有硬上限
+- LoRA 权重也在演化：`q_proj/v_proj/in_proj/out_proj` 上的 A/B 矩阵随对话变化
+- 类比：W = 今天笔记，LoRA = 写笔记的习惯
 
 **分化过程**：
 ```
-初始：   所有用户的 AI 用同一个预训练 .pt
-第1天：  和用户聊天 → sleep → .pt 微微变化
-第30天：  经历了30次 sleep → .pt 已经明显不同于别人
-第1年：  这个 .pt 就是"它"，换一个 .pt 它就不是同一个"人"了
+初始：所有用户的 AI 用同一个预训练 .pt
+使用 1 周：对话 → W 演化 → burn_in 不同 persona
+使用 1 月：如果开启 online fine-tune（未实现），LoRA 也分化
+使用 1 年：.pt 就是"它"，换一个 .pt 就不是同一个"人"
 ```
 
----
-
-## 8. 为什么用截断 BPTT 而不是完整 BPTT？
-
-**决策**：每 4 个 segment 做一次 detach，截断梯度流。
-
-**为什么不完整反向传播**：
-- 一个 episode 有 16 个 segment，完整 BPTT = 梯度通过 16 次 transformer forward
-- 显存：需要存所有中间激活 → 16 × 一次 forward 的激活量 → 爆显存
-- 梯度消失：通过 16 次 gate 运算后梯度指数衰减
-
-**为什么 4 步**：
-- 4 步足以让梯度流过几轮对话，学到"上一轮说的这轮要记住"
-- 更长的依赖（第 1 轮 → 第 10 轮）靠 gate 机制的"梯度高速公路"间接传递（类似 LSTM 的 forget gate）
-- 显存友好，16GB+ GPU 即可训练
+当前 v5c 部署时**只更新 W，不更新 LoRA**（推理权重冻结）。未来如果开启在线 fine-tune，LoRA 分化的可能性打开。
 
 ---
 
-## 9. 为什么固定容量的 state 不是问题？
+## 9. 为什么固定容量的 state 不是问题
 
-**质疑**：32×768 = 24K 浮点数，能存多少信息？聊久了不是必然丢失？
+**质疑**：`W: (B, 16, 128, 128) = 262144 floats`，聊久了必然丢失？
 
 **回答**：
 
-### 短期来看：压缩效率决定容量
-- Context window 存原文："我叫张三" = 十几个 token
-- State 存压缩表示："张三" 这个概念可能只占几个维度的激活模式
-- 理论上同等大小的 state 能存的"事实数量"远超原文
+### 压缩效率远超原文
+- Context window 存原文："我叫陈杰" = 3 个 token
+- W 的 (k,v) 对存"陈杰"这个概念只占 k_proj 输出空间里的一个方向 + v_proj 输出的一个向量
+- 理论上同等大小的 W 能存的"事实数量"远超原文 token 数
 
-### 长期来看：权重是第二层存储
-- 真正重要的信息通过 sleep 写进权重 → 无容量限制
-- State 只需要存"今天"的工作记忆 → 32 个 token 足够
+### Delta Rule 的原生遗忘
+- 相似 key 的旧值自然被新值覆写（数学机制）
+- 新 fact 反复出现 → β 高 → 写入强 → retention 高
+- 一次性提及 → β 低 → 写入弱 → 自然遗忘
 
-### 哲学来看：固定容量迫使抽象
-- 人脑也是固定容量，不会因为活了 30 年就变大 3 倍
-- 固定容量迫使选择性记忆 + 抽象压缩 → 这正是智能的表现
-- 如果给无限存储，模型可能学会"全存下来"而不是"理解"
+### 固定容量迫使抽象
+- 人脑容量也是固定的，不会活 30 年变大 3 倍
+- 固定容量迫使系统学"什么该记什么该忘" —— 这是智能的表现
+- 给无限存储，模型可能学"全存下来"而不是"理解"
 
-### 未来扩展
-如果确实不够，可以走分层架构：
-- Level 1（快 state）：当前对话
-- Level 2（慢 state）：身份/长期记忆
-- Level 3（外部存档）：历史 state 快照，按需检索
+### 未来扩展空间
+如果真的不够，可以走分层架构：
+- Level 1（快 W）：当前对话
+- Level 2（慢 W）：身份 / 长期 persona
+- Level 3（外部档案）：历史 W 快照，按需加载
 
-但先用固定 state 验证机制，再考虑扩展。
-
----
-
-## 10. 为什么不用 RAG？
-
-**决策**：不用检索增强生成，完全靠内部状态。
-
-**RAG 的问题**：
-- 检索的是原文 chunk，每次使用都要重新"理解"
-- 检索质量依赖于 embedding 相似度，容易漏检
-- 没有真正的"理解"和"压缩"，只是搜索引擎 + LLM 的拼接
-
-**心核的方式**：
-- 信息被消化进状态向量 → 已经是压缩理解
-- 不需要每次检索，信息就在 state 里
-- 类比：RAG = 每次回忆都去翻笔记本找原文；心核 = 已经记住了，直接说
-
-**未来可能的融合**：
-如果需要超长期记忆（几年的对话），可以做"state-level RAG"：
-- 检索的不是原文 chunk，而是历史 state 快照
-- 融合进当前 state，而不是塞进 context window
-- 已经是压缩理解，不需要重新理解
-
-但这是未来的事。当前阶段验证纯状态机制。
+当前用固定 W 验证机制已充分。
 
 ---
 
-## 11. 灾难性遗忘怎么办？
+## 10. 灾难性遗忘怎么办
 
-**问题**：sleep 在线学习会不会破坏之前学到的？
+**问题**：persona_unified 训练会不会破坏 backbone 原有能力？
 
-**核心防护——职责隔离**：
-- Sleep 只更新 Memory MLP（专用长期记忆模块）
-- LoRA（语言适配）和 StateInterface（state 读写）完全冻结
-- Memory MLP 是独立残差分支，输出叠加到 backbone 结果上，不修改 backbone 内部权重
+**v5c 的防护**：
+1. **Backbone 完全冻结** —— 原有知识不丢
+2. **LoRA 用真实对话分布训练**（persona 驱动 + teacher rehearsal）—— LoRA 不会漂到窄任务
+3. **W 初始零 + read_scale sigmoid(-3)** —— 识别了啥都不读出时 backbone 行为 = 原始
 
-**辅助防护**：
-1. **sleep 前保存 checkpoint**：出问题可以回滚
-2. **sanity check**：sleep 后跑几个标准测试，质量下降就回滚
+**v1/v2 遗留的教训**：
+- 早期 Sleep + Memory MLP 设计是为了应对"在线学习破坏能力"的担忧。v5c 没有在线学习（推理不更新权重），这个担忧不存在。
+- LoRA 漂移（persona_unified 之前的问题）由训练数据分布不是部署分布引起，不是架构缺陷。
 
-**本质思考**：适度的"遗忘"不是 bug，是 feature。人也会忘事。关键是忘该忘的（不重要的细节），记该记的（重要的事实和模式）。gate 机制 + sleep 机制的组合就是在学习"什么该忘什么该记"。
+**当前仅存的风险**：LoRA 在窄分布上长时间训练还是会漂。解法是训练分布一致性 + 4 指标联合监控 + 必要时 KL anchor。
+
+---
+
+## 11. 为什么 persona_unified 的 turn mix 这么复杂
+
+10 种 turn kind，不是随便凑的。每种对应一个具体能力：
+
+| Turn kind | 对应能力 |
+|---|---|
+| general_chat | LoRA 保持"自然对话"分布，不漂到模板 |
+| world_qa | 世界知识保留（非 persona memory） |
+| reveal_single | 最基础：单 fact 写入 W |
+| reveal_multi | 多 fact 一句话 → 多 (k,v) 同步写入 |
+| recall | W 读取基础 |
+| refusal | **不知道要说不知道**（v5c 最痛的 bug） |
+| overwrite | Delta Rule 原生强项，保持训练信号 |
+| third_party | 第三方人物记忆（key 空间扩展） |
+| compositional | 跨槽语义组合 |
+| stress/multi_slot_retention | 真实 retention scenario |
+
+砍掉任何一种都会对应产生一类失败 pattern。这是 "first-principles minimum viable distribution" 的最小集。
+
+---
+
+## 历史节点（时间轴）
+
+- **v1**（2024-2025）：state-as-tokens，0.8b 99%，4b 87% 卡
+- **v2**（2025 中）：对称 cross-attention + 专用投影，LoRA 瓶颈解决
+- **v3/v4**（2025 末）：slot keys + entropy 正则，slot 身份伪概念
+- **v5b**（2026-04 初）：slot + contrastive，hash 碰撞无解
+- **v5c**（2026-04-21）：Delta Rule，砍 slot，架构定型
+- **persona_unified**（2026-04-22）：放弃 13-stage 窄分布，改 persona 驱动 + teacher rehearsal
+- **persona_stress / retention_v2**（2026-04-22）：加结构化 retention pattern，严阈值
+- **4b single-course**（2026-04-23）：4b 从 scratch 单 stage 10000 步全达标
+- **2-stage bootstrap refactor**（2026-04-23）：共享 `curriculum_persona.yaml`，0_bootstrap + 1_unified

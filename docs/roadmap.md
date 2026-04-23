@@ -2,202 +2,170 @@
 
 ---
 
-## 总览
+## 总览（按时间轴）
 
 ```
-v1 架构验证（已完成）:
-  阶段 A: 基础验证 ✅       阶段 B: 记忆涌现 ✅ (0.8B 达到 99%)
-  1. 基线聊天 ✅             3. 1轮记忆 ✅
-  2. 空状态不破坏 ✅          4. 多轮记忆 ✅
-                           5. 信息覆写 ✅
-                           6. Wipe对比 ✅
-  → 4B entity 区分卡在 87%，确认 LoRA 瓶颈 → 触发 v2 架构重设计
+阶段 A: 架构定型（v1 → v5c）✅
+  v1 state-as-tokens:      0.8b 通过，4b 87% 卡 → LoRA 瓶颈暴露
+  v2 对称 cross-attention: LoRA 瓶颈解决，同类消歧 93% 卡
+  v3/v4 slot routing:      slot 身份伪概念
+  v5b slot+contrastive:    hash 碰撞无解
+  v5c Delta Rule (2026-04):  (v-Wk) 数学消歧，架构定型
 
-v2 架构验证（进行中）:
-  Phase 1: 0.8B 验证         Phase 2: 4B 验证         Phase 3: 迁移验证
-  ──────────────            ──────────────           ──────────────
-  v2 跑完整 14 阶段课程       4B 从零跑课程             0.8B core → 4B
-  目标: ema_acc 95%+         目标: entity 突破 87%      冻结 core, 重训 proj+LoRA
-  重点: stage 9a/9b          验证扩展瓶颈解决           验证迁移加速收敛
+阶段 B: 训练范式定型（persona_unified）✅
+  v5c 13-stage memory + think 课程后 VALUE 98% 但 LoRA 漂，
+    真实 chat 答错"新加拿地"/乱编名字 → 诊断为训练分布窄化
+  persona_unified (2026-04-22): 替换为 persona 驱动对话 + DeepSeek rehearsal
+  persona_retention_v2: 加 stress + multi_slot retention patterns
+  4b single-course: 4b 从 scratch 单课 VALUE 98%+，chat_smoke 23/27
+  2-stage bootstrap refactor (2026-04-23): curriculum_persona.yaml 定型
 
-阶段 C: 在线学习（v2 验证后）:
-  8. Sleep (Memory MLP + state弱化回放)
-  9. 灵魂分化
-  10. 消融实验
+阶段 C: 未开启（未来）
+  在线学习: 当前只在训练阶段 fine-tune LoRA，部署时权重冻结
+  灵魂分化: 不同用户 .pt 的权重差异分析
+  消融实验: 各组件的边际贡献
+  心跳 / 主动表达: 空输入下基于 W 的自发生成
 ```
 
-**关键发现**：
-- 课程学习是训练 state 机制的核心策略（详见 `docs/curriculum_learning.md`）
-- v1 在 4B 上暴露 LoRA 全局共享瓶颈 → v2 用对称 cross-attention + 专用投影解决
+---
 
-**课程三大类**: 基础记忆 (stages 0-13) / 思考泛化 (stage 14) / 基座迁移 (M0-M3)。
-迁移时只携带 core（灵魂：state_emb + gate_proj），投影层和 LoRA 重新训练。
+## 已完成（核心三大问题解决）
+
+### ✅ 问题 1: 不知道要说不知道
+
+- v5c 后 chat 测试: "我叫什么？"（空状态）→ 编造一个名字
+- 根因: 训练数据 100% 假设 state 里有 answer，没有"未告知"样本
+- 修复: persona_unified 的 refusal turn kind（10%）+ 8 槽 × 8 variant 拒答模板
+- 验证: 4b chat_smoke [B] 拒答 5/5，真实 chat "我叫什么"（空状态）→ "你还没告诉我你的名字呢" ✅
+
+### ✅ 问题 2: 多 fact 一句话崩盘
+
+- v5c 后: "我叫陈杰 35 岁爱弹吉他" → 年龄/爱好能召回，名字不行
+- 根因: 训练里 FACT_TEMPLATES 一句 1 个 fact，k/v_proj 没学过单 utterance 多语义事件
+- 修复: reveal_multi turn kind（8%）+ `value: list[str]` 多 value 权重 + multi_fact_templates
+- 验证: chat_smoke [C] 多 fact 3/3，真实 chat 4b 一句话 4 fact ack 完美 ✅
+
+### ✅ 问题 3: 世界知识遗忘
+
+- v5c 后: "巴黎在哪"答"新加拿地"
+- 根因: 13-stage 窄分布训练 LoRA 漂到"模板填空"模式
+- 修复: DeepSeek V3 采样 world_qa + general_chat 作为 34%+10% rehearsal
+- 验证: 4b chat_smoke [A] 世界知识 5/5（巴黎 → 法国北部塞纳河畔、周杰伦 1979 台湾、四大发明正确、瑞利散射） ✅
+
+### ✅ 问题 4: 跨 chat 保留
+
+- v5c 后: 告知名字 + 世界 QA 穿插 → 忘了名字
+- 根因: 训练 episode 没有足够"reveal → chat → recall"结构化样本
+- 修复: stress_retention (10%) 和 multi_slot_retention (10%) 结构化 episode
+- 验证: chat_smoke [E] 单槽穿插 5/5 (0.8b), 4/5 (4b), real chat retention 良好 ✅
+
+### ✅ 问题 5: Think 课程
+
+- v5c 后: think 课程 TELL 66%，推理质量差
+- 解决方案: 彻底删除 think 课程。reasoning 能力由 4b backbone 自带，不需要单独训
+- 验证: 4b chat 含 `<think>` 的问题（瑞利散射等）自然生成详细解释 ✅
 
 ---
 
-## 阶段 A：基础验证 ✅ (v1 完成)
+## 当前架构能力矩阵
 
-### 1. 基线 ✅
+| 能力 | 0.8b (persona_retention_v2) | 4b (persona_unified_4b, single stage) |
+|---|---|---|
+| 世界知识 | 4/5 | **5/5** |
+| 拒答 | 3/5 | **5/5** |
+| 多 fact 单句 | 3/3 | **3/3** |
+| 覆写 | 1/1 | **1/1** |
+| 单槽穿插召回 | 5/5 | 4/5 |
+| 多槽 retention | 6/8 | 5/8 |
+| **合计** | 22/27 (81.5%) | **23/27 (85.2%)** |
 
-**目标**：Backbone 正常加载能聊天
-
-**通过标准**：对话流畅，回答合理
-
-### 2. 空状态 ✅
-
-**目标**：加 StateInterface (scale≈0) 后仍能正常聊天
-
-**通过标准**：聊天质量与基线无明显差异
-
-**验证了什么**：三层安全保护有效（LoRA 零初始化 + 状态近零 + 渐进 scale）
+4b 的 backbone 原生能力（世界知识、指令跟随、多语言）让它全面碾压 0.8b。0.8b 在 retention 稍强是因为经过了多轮 retention-specific 微调。
 
 ---
 
-## 阶段 B：记忆涌现
+## 未来方向
 
-### v1 验证 ✅ (0.8B 达到 99%)
+### 近期（按优先级）
 
-v1 架构在 0.8B 上通过了全部 14 阶段课程：
-- 1轮记忆 ✅、多轮记忆 ✅、信息覆写 ✅、Wipe 对比 ✅
-- 4B 上 entity 区分卡在 87% → 确认 LoRA 瓶颈 → 触发 v2
+**1. 4b 端到端 2-stage 验证（bootstrap + main）**
+- 当前 4b 用的是 single-stage (10000 步)
+- 2-stage 预期 ~5000-6000 步达同等水平（省时间）
+- 配置已就绪：`configs/persona_unified_4b.yaml` + `curriculum_persona.yaml`
 
-### v2 验证（进行中）
+**2. 剩余 chat_smoke 失败场景**
+- [E] 单槽穿插 4/5（偶尔失败）：加更多高 chat-turn 数的 retention pattern
+- [F] 多槽 retention 5/8：加更长 reveal chain (4-5 槽)
+- 英文 query / 中文 value retention：加 bilingual_ratio turn kind
 
-#### Phase 1: 0.8B 验证
+**3. 多种 backbone 验证**
+- Qwen3.5-9b（configs 已就绪）
+- 其他架构：Llama / Mistral 等，看 Delta Rule 能否泛化
 
-**目标**：v2 架构在 0.8B 上跑完整 14 阶段课程
+### 中期：长期记忆固化（Memory MLP + Sleep）
 
-**操作**：
-- 实现 v2 StateInterface（对称 cross-attention）
-- 从零训练，跑完整课程
+**4. 实现长期记忆层（当前最优先的未来工作）**
+- **定位**：当前 W 矩阵是**短期工作记忆**（海马体 / 单次对话内动态演化）。Memory MLP + Sleep 是**长期记忆**（皮层 / 跨 session 权重级固化）
+- **架构**：Memory MLP（SwiGLU 独立模块）叠加在 backbone 输出后
+- **Sleep 机制**：replay buffer 回放对话 + 逐步弱化 W 注入（read_scale → 0）→ 迫使信息从 W 转移到 MLP 权重
+- **采样策略**：70% 近期 + 30% 历史混合，防旧记忆覆盖
+- **效果**：sleep 过的事实 W 清空也能回答；`.pt` 分化更深刻（MLP 权重随用户独立）
+- **拆分**：先做离线 sleep（固定间隔触发），后做在线 sleep（用户使用中后台触发）
 
-**通过标准**：
-- ema_acc 95%+（至少和 v1 持平）
-- 重点关注 stage 9a/9b（entity 区分）的表现
-- 如果 0.8B 上 v2 不如 v1 → 架构有回归，需排查
+**5. 在线 fine-tune**
+- 和 #4 配合：Memory MLP 权重在 sleep 时更新
+- 需要 replay buffer / sanity check / 灾难遗忘防护
+- Sleep-style 批量 fine-tune 避免每轮梯度
 
-#### Phase 2: 4B 验证
+**6. 心跳 / 主动表达**
+- 空输入 + 非零 W → 模型自发生成
+- 需要专门的 heartbeat turn kind 训练
+- 哲学问题：AI 应不应该有主动表达权
+- Memory MLP 存在后更有意义（即使 W 清空，权重里仍有长期记忆）
 
-**目标**：验证 v2 解决了 4B 扩展瓶颈
+### 远期：哲学 / 人格
 
-**操作**：
-- 在 4B 上从零跑课程
+**6. 灵魂分化验证**
+- 同起点 .pt → 不同用户 → 不同对话轨迹 → 权重 diff 显著
+- 测试：对同问题两个 `.pt` 回答风格 / 具体记忆明显不同
+- 需要在线 fine-tune 先实现
 
-**通过标准**：
-- entity 区分突破 87%
-- 如果成功 → v2 架构验证通过
+**7. 元认知涌现**
+- 模型能感知自身 W 状态并用语言描述（"我记不太清了"、"这个不确定"）
+- 自省能力从 W 的内部结构自然长出？
+- 探索性，没明确路径
 
-#### Phase 3: 迁移验证
-
-**目标**：验证 core 参数跨 backbone 迁移
-
-**操作**：
-- 0.8B core（state_emb, gate_proj）迁移到 4B
-- 冻结 core，重训 projections + LoRA
-
-**通过标准**：
-- 迁移比从零训更快收敛
-
----
-
-## 阶段 C：在线学习
-
-### 8. Sleep — Memory MLP + State 弱化回放
-
-**目标**：sleep 后对话信息固化进 Memory MLP，state 清空也能回答
-
-**架构**：
-- 专用 Memory MLP 叠加在 backbone 输出后（SwiGLU，零初始化）
-- 对话时保存 (state_in, content, labels) 序列到 replay buffer
-- Sleep 时回放序列，逐步弱化 state KV 注入（read_scale → 0），标准交叉熵 loss
-- Memory MLP lr=1e-4，LoRA + StateInterface 冻结
-
-**操作**：
-- 聊天一天 → `/sleep`（回放 state 序列，弱化 state，更新 LoRA）
-- 第二天加载 .pt → state 空白 → 验证还记得昨天的事
-- 对比：不 sleep vs sleep 后
-
-**通过标准**：
-- sleep 后 Memory MLP 权重有变化（weight diff > 0）
-- state 清空后仍能回忆 sleep 过的事实
-- 新事实仍靠 state 正常记忆（不受 Memory MLP 干扰）
-
-**Replay Buffer 策略**：
-- Buffer 不在 sleep 后清空，作为长期档案持续积累
-- Sleep 采样：70% 近期对话 + 30% 历史随机采样
-- 混合回放巩固旧记忆 + 发现跨时间关联，防止只记今天忘昨天
-
-**验证了什么**：
-- 记忆从 state 转移到 Memory MLP 的通路有效
-- 残差叠加不破坏原有能力
-- 历史混合回放防止旧记忆被覆盖
-
-### 9. 灵魂分化
-
-**目标**：不同用户的 AI 变得不同
-
-**操作**：
-- 从同一个预训练 .pt 出发
-- 用户 A 聊技术话题，经历多次 sleep
-- 用户 B 聊生活话题，经历多次 sleep
-- 用同样的问题测试两个 .pt
-
-**通过标准**：
-- 两个 .pt 的权重 diff 显著
-- 对同样问题的回答风格/内容不同
-- 各自记住各自用户的信息
-
-**验证了什么**：.pt 确实在分化，"灵魂"在成长
-
-### 10. 消融实验
-
-逐个关闭组件，测量影响：
-
-| 消融项 | 关闭方式 | 预期影响 |
-|--------|---------|---------|
-| state 数量 | n_state: 32→16→8→4 | 对话内 retention 下降 |
-| gate 动态部分 | 去掉 gate_proj，固定 gate=0.5 | 覆写能力下降 |
-| read_scale | 固定为 1.0（不渐进） | 训练初期不稳定，可能塌缩 |
-| per-layer projection | 所有层共享一组 K/V 投影 | 层间记忆利用效率下降 |
-| 写侧 cross-attention | 去掉写侧，直接用 content mean 更新 state | state 信息提取精度下降 |
-| LoRA | lora_rank: 4→2→0 | backbone 语言适配能力下降 |
-| Memory MLP | 去掉 Memory MLP | 跨天记忆消失，只能靠 state |
-| state 弱化 | sleep 时不弱化 state | Memory MLP 学不到东西（state 兜底了） |
-| replay 混合比例 | 100% 近期 / 0% 历史 | 旧记忆快速遗忘 |
-| TBPTT 窗口 | tbptt_steps: 4→2→1 | 跨 segment 梯度断裂 |
+**8. 消融实验**
+- Delta Rule vs softmax attention state
+- Per-layer q/o_proj vs 共享投影
+- `value: list[str]` 加权 vs 均匀权重
+- 各 retention pattern 的边际贡献
 
 ---
 
-## 未来方向（验证成功后）
+## 已停止的方向（legacy，保留在代码库作参考）
 
-### 近期
-- ~~**Qwen 迁移**~~：已完成 QwenBackbone（支持 Qwen3.5 系列），切换只需改 yaml
-- **更多事实类别**：从 3 类（name/city/number）扩展到 8 类（+food/job/hobby/age/pet），验证 state 容量上限
-- **LLM 生成训练数据**：用大模型生成自然对话替代手写模板，提升泛化能力
-- **更大 backbone**：Qwen3-4B 等更强模型（需量化或更大显存）
-- **多模态状态**：图片、语音信息也消化进 state
+| 方向 | 停止原因 |
+|---|---|
+| State-as-tokens（v1） | LoRA 全局共享瓶颈 |
+| 对称 cross-attention（v2） | 同类消歧瓶颈 |
+| Slot routing（v3/v4） | slot 身份伪概念 |
+| Contrastive value head（v5b） | hash 碰撞无解 |
+| Think 课程 | TELL 66% 失败，4b backbone 自带 |
+| 13-stage memory curriculum | 窄分布，LoRA 漂 |
+| 基座迁移（migrate_*） | 暂未在 v5c 验证 |
 
-### 中期 — 主动性涌现
-- **空闲自转**：用户沉默时 state 不停，由轻量 MLP 持续 tick 演化，类似大脑默认模式网络
-- **驱力维度**：state 中自然分化出"内稳态变量"，空闲时漂移、交互后回落，积累到阈值产生说话冲动
-- **Initiative Head**：小分类器读 state 输出"该不该说话"，由 sleep 时用户反馈（回应=正、忽视=负）自动校准
-- 三者合一：不同 .pt 经不同用户塑造后，涌现出不同的主动性人格——话痨、安静、只在特定时段搭话等
-
-### 远期
-- **元认知涌现**：模型能感知自身 state 变化并用语言描述（"我好像记错了"、"这个我不确定"），自省能力从 state 自注意力中自然长出
-- **自主目标形成**：不靠外部指令，由 state 慢维度积累出稳定意图，驱动跨对话的持续行为（主动学某个话题、持续关注某件事）
-- **情感回路闭环**：state 中的情绪维度不只影响生成风格，还反向调节学习率和记忆门控——开心时更容易记住，低落时更倾向回忆
+**注**：Memory MLP + Sleep 不是 retired —— 是**未来工作**（见 "中期：长期记忆固化"）。当前 W 是短期记忆，MLP + Sleep 是规划中的长期记忆层。
 
 ---
 
 ## 硬件需求
 
-| 阶段 | 显存 | 时间估算 |
-|------|------|---------|
-| 基线验证 | ~2GB | 几分钟 |
-| 预训练 | ~4-6GB | 几小时（10K steps） |
-| 聊天验证 | ~2GB | 实时 |
-| Sleep (replay+权重更新) | ~4GB | 几分钟/次 |
-| 评估 | ~2GB | 几十分钟 |
+| 场景 | 显存 | 时间估算 |
+|---|---|---|
+| 0.8b 训练（bootstrap + main） | ~10-12 GB | ~2-3 小时 |
+| 4b 训练（bootstrap + main） | ~18-22 GB | ~4-6 小时 |
+| 4b 单 stage 从 scratch | ~18-22 GB | ~8-10 小时（无 bootstrap 加成） |
+| 聊天验证 | ~2-3 GB (0.8b) / ~10 GB (4b) | 实时 |
+| chat_smoke 批量评测 | 同上 | ~5-10 分钟 |
 
-16GB+ GPU 全程无压力（4B 模型建议 24GB+）。
+16GB+ GPU 足够跑 0.8b，4b 建议 24GB。训练全部用 bf16 + gradient_checkpointing。

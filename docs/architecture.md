@@ -4,7 +4,7 @@
 
 智能可以从"持续状态 + 可塑性 + 多时间尺度"这种统一动力系统中自然涌现。
 
-不做 RAG、不做模块拼装、不扩大 context window。用最小结构（小 transformer + 持久状态向量），通过持续训练让系统内部自发分化出记忆、抽象、快慢变量。
+不做 RAG、不做模块拼装、不扩大 context window。用最小结构（冻结 transformer + 持久状态矩阵 + LoRA），通过持续训练让系统内部自发分化出记忆、抽象、快慢变量。
 
 ---
 
@@ -12,303 +12,139 @@
 
 ```
 ┌──────────────────────────────────────────────────┐
-│                  XinheModel                       │
+│                   XinheModel                      │
 │                                                   │
-│   state_old                                       │
-│     ├── 读侧: state → 专用 K/V 投影 → 每层 cross-attn │
-│     │                    ↓                        │
-│     │   [Content(T)] → backbone 层 → content      │
-│     │              (每层前 attend 到 state K/V)    │
-│     │                    ↓                        │
-│     │                  logits                     │
-│     │                    │                        │
-│     └── 写侧: state → 专用 Q 投影 → attend to content │
-│                                      ↓            │
-│                                 state_next        │
-│                                                   │
-│   ┌─────────────────────────────────┐             │
-│   │     StateInterface (~5M)        │  ← 可训练    │
-│   │  state_emb    状态初始嵌入       │             │
-│   │  read_k/v_projs 每层K/V投影     │             │
-│   │  read_scale   渐进影响力         │             │
-│   │  write_q      写侧Q投影         │             │
-│   │  write_out    写侧输出投影       │             │
-│   │  gate_proj    动态门控网络       │             │
-│   └─────────────────────────────────┘             │
-│              ↓ layer_hook 注入                     │
-│   ┌─────────────────────────────────┐             │
-│   │   Backbone (可切换)              │  ← 冻结+LoRA │
-│   │  Qwen3.5-0.8B / Qwen3.5-4B 等   │             │
-│   │  LoRA 注入 q_proj / v_proj      │             │
-│   │  LoRA 只负责语言适配             │             │
-│   └─────────────────────────────────┘             │
-│              ↓                                     │
-│   输出: logits (content部分) + state_next (写侧更新) │
+│   输入 content (B,T,D)                             │
+│        ↓ embed                                    │
+│   ┌────────────────────────────────────────┐      │
+│   │ for each hook layer:                   │      │
+│   │   hidden → q_proj[L] → q (B,H,T,d_k)   │      │
+│   │   q = F.normalize(q, dim=-1)           │      │
+│   │   read = einsum(q, W^T) → (B,H,T,d_v)  │      │
+│   │   out = o_proj[L](merge_heads(read))   │      │
+│   │   hidden += sigmoid(read_scale) * out  │ ← 读  │
+│   └────────────────────────────────────────┘      │
+│        ↓ backbone 各层（frozen + LoRA）            │
+│   content_output (B,T,D)                          │
+│        ↓ write_from_content                       │
+│   ┌────────────────────────────────────────┐      │
+│   │ k = normalize(k_proj(content))         │      │
+│   │ v = v_proj(content)                    │      │
+│   │ β = sigmoid(beta_proj(content))        │      │
+│   │ W_new = W + β·(v - W·k) ⊗ k^T  (Delta) │ ← 写  │
+│   └────────────────────────────────────────┘      │
+│        ↓                                           │
+│   logits (via lm_head) + W_new                    │
 └──────────────────────────────────────────────────┘
 ```
 
-### 插件化设计
+### 核心组件
 
-StateInterface 完全独立于 backbone。backbone 只需实现 `BackboneBase` 接口：
+**StateInterface**（`xinhe/model/state_plugin.py`）—— 唯一的可训练状态机制。
 
 ```python
-class BackboneBase(ABC):
-    def embed(self, input_ids) -> Tensor:                              # token → 嵌入
-    def forward_blocks(self, x, mask, pos, layer_hook=None) -> Tensor: # transformer 层
-    def get_lm_head(self) -> nn.Module:                                # 输出头
-    def get_hidden_size(self) -> int:                                   # 隐藏维度
-    def get_num_layers(self) -> int:                                    # 层数
+class StateInterface(nn.Module):
+    # 读侧：每层独立 q/o 投影（per-layer hook 语义）
+    self.q_projs = nn.ModuleList([Linear(hidden, H*d_k)])    # n_layers
+    self.o_projs = nn.ModuleList([Linear(H*d_v, hidden)])    # n_layers
+    self.read_scale = Parameter(tensor(-3.0))                # sigmoid(-3)≈0.047
+
+    # 写侧：全局共享（作用于 content_output 全序列）
+    self.k_proj = Linear(hidden, H*d_k)
+    self.v_proj = Linear(hidden, H*d_v)
+    self.beta_proj = Linear(hidden, H)  # per-head 写强度
 ```
 
-已实现的 backbone：
-- `QwenBackbone`：支持 Qwen3.5 系列 (0.8B / 4B / 9B)
-
-切换 backbone 只需改 yaml 配置，StateInterface 代码不变。
+**状态形状**：`W: (B, n_heads=16, d_v=128, d_k=128)`
+- 每样本 262144 floats ≈ 1MB（bf16）
+- 多头独立的外积矩阵 —— 同一 (k,v) 由 k_proj 分配到不同 head
+- 每个 head 是一个独立的联想记忆空间
 
 ---
 
-## 对称 Cross-Attention（读写分离架构）
+## Delta Rule 读写机制
 
-持久状态通过 **对称的 cross-attention** 实现读写：读是 Content(Q) × State(K,V)，写是 State(Q) × Content(K,V)。Q 和 K/V 角色互换，机制完全对称。
-
-### 核心对称性
-
-```
-读: Content(Q)  ×  State(K,V)  →  记忆融入思考    (每层)
-写: State(Q)    ×  Content(K,V) →  信息写入记忆    (最后一层后)
-```
-
-| | 读 | 写 |
-|---|---|---|
-| Q 来自 | content（backbone 内部） | state（专用投影） |
-| K/V 来自 | state（专用投影） | content（backbone 输出） |
-| 机制 | cross-attention（layer_hook） | cross-attention（独立模块） |
-| 时机 | 每层 | 最后一层输出后 |
-| 意义 | 带着记忆思考 | 从思考中提取记忆 |
-
-### 读侧：state → 每层 cross-attention
-
-通过 `layer_hook` 回调，在每层 backbone 之前执行显式 cross-attention，零侵入 backbone：
+### 读：纯线性，零 softmax
 
 ```python
-# QwenBackbone.forward_blocks 的循环（唯一改动：加 layer_hook 调用）
+def read_layer(hidden_states, W, layer_idx):
+    q = self.q_projs[layer_idx](hidden_states)       # (B,T,H*d_k)
+    q = q.view(B,T,H,d_k).transpose(1,2)             # (B,H,T,d_k)
+    q = F.normalize(q, dim=-1)                       # L2 归一化，匹配写侧
+    read = einsum("bhtd,bhvd->bhtv", q, W)           # (B,H,T,d_v)
+    merged = read.transpose(1,2).reshape(B,T,H*d_v)
+    out = self.o_projs[layer_idx](merged)            # (B,T,D)
+    return hidden_states + sigmoid(read_scale) * out
+```
+
+**为什么纯线性**：
+- 无 softmax 意味着所有 head 同时贡献读出，不会"赢者通吃"
+- `q @ W^T` 本质上是 key 空间的相似度加权 value 求和 —— 和 softmax attention 信息等价，但数学更简洁
+- Identity-preserving：`W=0` 时 `read=0`，`read_scale` 初始 -3 → 初始读贡献≈0.05 × 0 = 0，backbone 行为完全保留
+
+### 写：Delta Rule（外积更新）
+
+```python
+def write_from_content(W_old, content):
+    k = normalize(self.k_proj(content))              # (B,H,T,d_k)
+    v = self.v_proj(content)                         # (B,H,T,d_v)
+    β = sigmoid(self.beta_proj(content))             # (B,H,T) per-head per-token 写强度
+    
+    # 对序列每个 token 依次更新（chunkwise parallel 实现）
+    for t in range(T):
+        W_new = W + β[t] * (v[t] - W·k[t]) ⊗ k[t]^T
+    return W_new
+```
+
+**数学意义**：`W_new·k = W·k + β·(v - W·k) = (1-β)·W·k + β·v`
+- 如果 k 是"新"的 key（W·k ≈ 0）→ 写入 β·v
+- 如果 k 与已存在的 key 相似（W·k ≈ v_old）→ 用 β 权重从 v_old 过渡到 v_new（**天然覆写**）
+- 如果 k 是随机噪声 → 误差 (v - W·k) 的方向与已有 key 正交，对已有 memory 干扰小
+
+**并行实现**（`_delta_parallel`）：通过三角求解代替 Python 级 for 循环，把 GPU 利用率从 20% 提到 80%。详细推导见代码注释。
+
+### Per-token β 的门控特性
+
+`beta_proj(content)` 学习"这个 token 应该写多强"，sigmoid 输出 (0,1)：
+- β ≈ 0：跳过写（chat 闲聊 token 不污染 W）
+- β ≈ 1：强写入（fact value token）
+- 训练良好的 plugin 在 fact token 上 β 达 0.3-0.5，在 chat token 上 β ≈ 0.03
+
+这是**自学的写门控**，不需要额外机制。T2 诊断脚本 `scripts/probe_beta.py` 可量化此行为。
+
+---
+
+## 零侵入 backbone
+
+```python
+# QwenBackbone.forward_blocks 的唯一改动：加 layer_hook 调用
 for layer_idx, layer in enumerate(layers):
     if layer_hook is not None:
-        hidden_states = layer_hook(hidden_states, layer_idx)  # state read
-    hidden_states = layer(hidden_states, ...)                  # backbone 层
+        hidden_states = layer_hook(hidden_states, layer_idx)   # state read
+    hidden_states = layer(hidden_states, attention_mask, ...)  # backbone 层不变
 ```
 
-> **为什么不用 past_key_values**：Qwen3.5 是混合架构（DeltaNet 线性 attention + full attention），
-> DeltaNet 层使用 conv_state + recurrent_state，不支持 K/V cache 注入。
-> layer_hook 对两种层类型统一生效。
+layer_hook 在每个 full-attention 层之前执行读。DeltaNet（线性 attention）层跳过 hook —— 那些层用 conv_state + recurrent_state 不适合额外 state 注入。
 
-每层有独立的 K/V 投影（全参数，不经过 LoRA），通过 cross-attention 注入：
-
-```python
-# StateInterface 读侧
-def generate_read_kv(state):
-    scale = sigmoid(read_scale)
-    for k_proj, v_proj in zip(read_k_projs, read_v_projs):
-        K = k_proj(state) * scale   # (B, n_state, hidden_size)
-        V = v_proj(state) * scale
-        kv_pairs.append((K, V))
-
-def read_layer(hidden_states, kv_pair):
-    K, V = kv_pair
-    attn = softmax(hidden_states @ K.T / sqrt(d)) @ V  # (B, T, hidden_size)
-    return hidden_states + attn  # 残差连接
-```
-
-### 写侧：state 向 content 提问
-
-最后一层输出后，state 通过专用 Q 投影向 content 提取信息：
-
-```python
-# StateInterface 写侧
-Q = write_q(state_old)           # (B, n_state, hidden_size)
-K = content_hidden               # (B, T, hidden_size)
-V = content_hidden
-
-attn = softmax(Q @ K.T / sqrt(d)) @ V
-state_new = write_out(attn)      # (B, n_state, state_dim)
-
-# gate 决定更新
-gate = sigmoid(gate_proj(cat[state_old, state_new]))
-state_next = gate * state_old + (1 - gate) * state_new
-```
-
-### 为什么读写分离
-
-v1 架构中，读写分离利用序列位置和因果 attention 方向性（Read 在序列头部只携带旧信息，Write 在尾部吸收新信息）。
-
-v2 架构中，读写分离通过 Q/K/V 角色互换实现更优雅的对称性：
-- **读侧**：state 提供 K/V，content 的 Q 去查询 → 记忆自然融入每层思考
-- **写侧**：state 提供 Q，content 提供 K/V → 从思考中提取要记住的信息
-- **信息防泄漏**：state 不在序列中，backbone 只处理纯 content，不存在 state 偷看答案的问题
-
-### 状态容量
-
-| 配置 | 值 |
-|------|-----|
-| n_state | 32 tokens |
-| state_dim | 1024 (可独立于 hidden_size) |
-| 原始大小 | 32 × 1024 = 32,768 floats ≈ 128KB |
-| 有效信息 | ~40KB（压缩表示，非原文） |
-
-固定容量是特性，不是缺陷——迫使系统学会选择性记忆和抽象压缩。
+**为什么不用 past_key_values**：Qwen3.5 是混合架构（DeltaNet + full attention 交替），DeltaNet 不支持 KV cache 注入。layer_hook 统一生效。
 
 ---
 
-## Gate：工作记忆刷新器
+## LoRA 的职责
 
-Gate 是纯动态决策，只回答一个问题："这个 slot 此刻要不要更新？"
+v2 之前 LoRA 负责 state 路由 + 语言适配，在 4B 上低秩瓶颈暴露。v5c 把 state 路由**完全移出 LoRA**，交给全参数的 `q/k/v/o_proj`。LoRA 回归单一职责：**语言适配**。
 
-```python
-# 纯动态 gate——根据内容决定此刻该记还是该忘
-gate = sigmoid(gate_proj(cat[state_old, state_new]))
-
-state_next = gate * state_old + (1 - gate) * state_new
+```yaml
+# 默认配置
+lora:
+  rank: 8
+  alpha: 16
+  target_modules: ["q_proj", "v_proj", "in_proj_qkv", "out_proj"]  # 只在 backbone attention
 ```
 
-- `gate ≈ 1` → 保持（这条信息还有用，别覆盖）
-- `gate ≈ 0` → 更新（有新信息要写入）
-- 不再有快慢之分，不再试图涌现长短期分化
-
-### 设计演进
-
-v1 使用双层 gate：`sigmoid(static_bias + dynamic_proj)`，期望静态偏置涌现"慢维度=长期记忆，快维度=工作记忆"。但训练中发现：
-1. 课程全是 16 轮以内的短 episode，没有长短期分化的训练信号
-2. gate_bias 大概率学了近似均匀值，等于没用
-3. State 被迫同时承担工作记忆和长期记忆两个角色
-
-v2 明确了记忆体系的分层：
-
-```
-┌────────────────────────────────────────────────────┐
-│                    心核记忆体系                       │
-│                                                    │
-│   State（工作记忆）          Sleep → MLP（长期记忆）  │
-│   ┌──────────────┐          ┌──────────────────┐   │
-│   │ gate_proj 管理 │          │ sleep 机制固化     │   │
-│   │ 随时更新       │   ──→   │ 缓慢沉淀          │   │
-│   │ 只管当前对话   │  固化    │ 跨对话持久         │   │
-│   │ = 海马体       │          │ = 皮层            │   │
-│   └──────────────┘          └──────────────────┘   │
-│                                                    │
-│   各管各的，gate 只做"海马体的刷新控制器"              │
-└────────────────────────────────────────────────────┘
-```
-
----
-
-## Sleep 机制：记忆固化 + 在线学习
-
-类比人类睡眠：白天积累经验（state），睡眠时突触重塑（权重更新）。
-
-### 两阶段运行模式
-
-```
-白天（推理）：                         Sleep（学习）：
-  权重完全冻结                           Memory MLP 更新
-  只有 state 在流动                      回放 (state_in, content, labels) 序列
-  Memory MLP 输出叠加（已固化的记忆）      逐步弱化 state KV 注入
-  全速生成，无额外开销                    迫使记忆转移到 Memory MLP
-  保存 (state_in, content, labels) 到 buffer
-```
-
-### Memory MLP：专用长期记忆模块
-
-v2 的设计原则是"专用模块做专用事"——state 路由用专用投影而非 LoRA，长期记忆同样用专用 MLP 而非 LoRA 挂在 backbone 上。
-
-```
-backbone output (B, T, hidden_size)
-        ↓
-  + Memory MLP(output) * memory_scale    ← sleep 时训练，零初始化启动
-        ↓
-  final_output → LM head
-              → write_from_content(state, final_output)
-```
-
-Memory MLP 是 xinhe 系统自己的模块（SwiGLU 结构），输出层零初始化 + 渐进 scale，加上不影响原有行为。Sleep 时训练它编码长期记忆。
-
-### Sleep 流程
-
-1. 从 replay buffer 采样：**70% 近期对话 + 30% 历史对话**
-2. 逐步弱化 state KV 注入（read_scale: 当前值 → 0）
-3. 标准交叉熵 loss，模型必须靠 Memory MLP 而非 state 答对
-
-```
-更新:  Memory MLP           lr = 1e-4   专用全参模块，快速学习
-冻结:  LoRA (attention)     lr = 0      只做语言适配，sleep 无需更新
-冻结:  StateInterface       lr = 0      保护 gate + read/write 投影
-```
-
-### Replay Buffer：不清空，持续积累
-
-Buffer 不在 sleep 后清空，而是作为长期记忆档案持续保存。Sleep 时按比例混合采样：
-- **近期对话**（70%）：学习新记忆
-- **历史采样**（30%）：巩固旧记忆 + 发现跨时间的关联
-
-### 醒来后的效果
-
-Memory MLP 通过残差连接**叠加**到 backbone 输出上（加法，非替换）：
-- 新事实（未 sleep）：靠 state，和以前一样
-- Sleep 过的事实：state + Memory MLP 双通道增强
-- State 清空后：Memory MLP 兜底，仍能回答
-
-### 记忆系统对应
-
-```
-人脑                         Xinhe
-──────────                   ─────
-神经激活（工作记忆）           state（当前对话的工作台）
-突触连接（长期记忆）           Memory MLP（sleep 后积累的知识）
-睡眠时海马体→皮层转移          sleep 时弱化 state → 迫使 Memory MLP 学习
-```
-
----
-
-## 参数分类与基座迁移
-
-StateInterface 的参数分为两类，迁移时只保留核心参数（灵魂），丢弃身体适配层：
-
-### 参数分类
-
-| 类别 | 参数 | 依赖 backbone? | 迁移时 |
-|------|------|---------------|--------|
-| **Core（灵魂）** | state_emb, gate_proj | 否 | 保留 |
-| **Projection（身体适配）** | read_k/v_projs, read_scale, write_q, write_out | 是（涉及 hidden_size） | 重新初始化 |
-| **Memory MLP** | up, down, gate, memory_scale | 是（涉及 hidden_size） | 重新初始化 |
-| **LoRA** | attention q/v_proj 上的 LoRA A/B | 是 | 重新初始化 |
-
-Core 参数只在 state_dim 空间操作，编码了"记忆更新决策"的核心技能。这些能力不依赖具体的 backbone。
-
-Projection 参数涉及 hidden_size，是 state_dim 和 backbone 之间的桥接。切换 backbone 时需要重训。
-
-### 迁移流程
-
-```
-源 backbone (0.8B):  完成基础记忆课程 → 保存 checkpoint
-                         ↓ extract_core()
-                     提取 Core 参数 (丢弃 proj/LoRA/optimizer)
-                         ↓
-目标 backbone (4B):  加载 Core → 新 projections 随机初始化 → 新 LoRA 零初始化
-                         ↓
-                     迁移课程: core 冻结, 训 projections + LoRA
-```
-
-### LoRA 职责变化
-
-v2 中各组件职责清晰分离：
-
-```
-专用 K/V 投影: State 读路由（全参数，不受低秩限制）
-专用 Q 投影:   State 写路由（全参数，不受低秩限制）
-Gate:          更新决策（保留 vs 采纳）
-LoRA:          只管语言适配（单一目标，优化更容易）
-```
-
-LoRA 不再负责 state 路由，这是 v2 解决 4B 扩展瓶颈的关键。
+LoRA 参数量随 hidden 扩张：
+- 0.8b (hidden=1024, 24 层): ~1.6M 参数
+- 4b (hidden=2560, 36 层): ~5.9M 参数
 
 ---
 
@@ -316,28 +152,29 @@ LoRA 不再负责 state 路由，这是 v2 解决 4B 扩展瓶颈的关键。
 
 ```python
 checkpoint = {
-    "state_interface": ...,          # StateInterface（gate/scale/state_emb/projections）
-    "memory_mlp": ...,               # Memory MLP（长期记忆，sleep 时更新）
-    "lora_state": ...,               # LoRA（attention 层，语言适配）
-    "state": ...,                    # 当前 state（工作记忆）
-    "replay_buffer": ...,            # 待 sleep 的对话序列
-    "sleep_count": ...,              # AI 的"年龄"
+    "global_step": ...,
+    "plugin_state": ...,           # StateInterface（W 读写投影 + read_scale）
+    "lora_state": ...,             # LoRA A/B 矩阵
+    "optimizer_state": ...,
+    "scheduler_state": ...,
+    "config": ...,
+    "curriculum_stage": ...,
 }
 ```
 
-每个用户的 AI 从同一个预训练起点出发，经历不同的对话和 sleep 周期后 .pt 逐渐分化。不同的 .pt 就是不同的"人"。
+每个用户的 AI 从同一预训练起点出发，经历不同对话后 `.pt` 分化。不同的 `.pt` 就是不同的"人"。
 
 ---
 
-## 安全启动（不破坏聊天能力）
+## 安全启动
 
-三层保护，确保加入 StateInterface 不破坏 backbone 原有能力：
+三层保护，加入 StateInterface 不破坏 backbone：
 
-1. **LoRA 零初始化**：B 矩阵全零 → 训练开始时 backbone 行为 = 原始模型
-2. **状态嵌入近零初始化**：state_emb 近零 (std=0.01)，投影输出接近零
-3. **渐进影响力 read_scale**：`sigmoid(-5.0) ≈ 0.007`，注入的 state K/V 几乎消失
+1. **LoRA 零初始化**：LoRA B 矩阵全零 → LoRA delta = 0，backbone 行为 = 原始
+2. **W 零初始化**：`blank_state` 返回全零 W → `q @ W^T = 0` → 读贡献 = 0
+3. **渐进 read_scale**：`sigmoid(-3.0) ≈ 0.047`，即使 W 非零，读的幅度也很小
 
-v2 的额外优势：state 不在序列中，backbone 处理的是纯 content，不存在额外 token 干扰 attention 分布的问题。
+这三重保护让训练早期 backbone 行为几乎 = 原始 backbone，模型有充分时间学习 state 机制而不破坏语言能力。
 
 ---
 
@@ -345,118 +182,157 @@ v2 的额外优势：state 不在序列中，backbone 处理的是纯 content，
 
 ### Attention Mask
 
-Backbone 只处理纯 content，使用标准因果 mask：
+Backbone 处理纯 content（无 state token），使用标准因果 mask：
 
 ```
-content 占据位置 0..T-1
-mask: 标准因果 mask（位置 i 只看 0..i）+ padding 遮蔽
+position 0..T-1: content
+mask: 标准因果（位置 i 只看 0..i）+ padding 遮蔽
 ```
 
-State 读取通过 layer_hook 中的 cross-attention 实现，不需要额外 mask（所有 content 位置都可以 attend 到所有 state slot）。
+State 读取通过 layer_hook 完成，不需要额外 mask —— `q @ W^T` 是对 W 的线性读，没有位置约束。
 
 ### Position IDs
 
-Content 的 position_ids 是标准 `0..T-1`。State K/V 没有 RoPE——这是合理的：state 不是序列中的某个位置，而是"外部记忆"，不应有位置偏好。Content 对 state 的 attention 是纯内容匹配（通过 layer_hook cross-attention）。
+Content 使用 `0..T-1`。State（W 矩阵）不在序列中，没有 RoPE —— 合理的，state 是"外部关联记忆"，不应有位置偏好。
 
 ---
 
 ## Burn-in：用 prompt 初始化 persona
 
 ```python
-def burn_in(self, token_ids_list):
-    state = self.init_state(batch_size=1)
-    with torch.no_grad():
-        for seg in token_ids_list:
-            result = self.forward(seg, state)
-            state = result["state_next"]
+@torch.no_grad()
+def burn_in(self, token_ids_list, batch_size=1):
+    state = self.init_state(batch_size)  # 全零 W
+    for token_ids in token_ids_list:
+        result = self.forward(token_ids, state)
+        state = result["state_next"]
     return state
 ```
 
-不同 system prompt → 不同初始状态 → 不同 persona。老用户回来 → 从 .pt 恢复。
+不同 system prompt → 写入 W 不同的 (k,v) 对 → 不同初始状态 → 不同 persona。老用户回来从 `.pt` 恢复。
 
 ---
 
-## 训练
+## 训练机制
 
-### 课程学习（Curriculum Learning）
+### 课程结构
 
-State 机制无法一步到位训练——同时学"怎么用 state"和"什么时候用"会陷入死锁（scale 持续下降，模型放弃 state）。必须分阶段递增难度：
-
-```
-阶段 1: 固定 tell + d=1        → 学会 state 基本读写
-阶段 2: 随机 tell 位置          → 学会内容级写入判断
-阶段 3: distance 1-3           → 学会跨距离保持
-阶段 4: distance 1-10 + 多 filler → 完整多轮记忆
-阶段 5+: 多事实 / 覆写          → 区分类别 / 更新能力
-```
-
-课程配置定义在单个 YAML 中，一条命令自动执行所有阶段。详见 `docs/curriculum_learning.md`。
-
-| 项目 | 值 |
-|------|-----|
-| 训练对象 | StateInterface (~5M) + LoRA (注入 q/v_proj) |
-| 冻结 | Backbone 全部原始权重 |
-| 数据 | 合成记忆对话，按课程阶段自动生成 |
-| 状态传递 | state 跨 segment 持续传递 |
-| 梯度截断 | 每 tbptt_steps 个 segment 做 detach + backward |
-| 收敛检测 | EMA loss 低于阈值自动进入下一阶段 |
-
-### Sleep 阶段
-
-| 项目 | 值 |
-|------|-----|
-| 触发 | 用户手动 `/sleep` 或定时触发 |
-| 数据 | 对话时保存的 (state_in, content, labels) 序列回放 |
-| State 弱化 | 逐步 100% → 50% → 0%，迫使记忆转移到权重 |
-| 更新对象 | Memory MLP (lr=1e-4) |
-| 冻结 | StateInterface + LoRA |
-| 安全措施 | sleep 前保存 checkpoint，失败可回滚 |
-
----
-
-## 性能影响
-
-### 序列长度
+新的 `persona_unified` 课程只有 2 stage（详见 [curriculum_learning.md](curriculum_learning.md)）：
 
 ```
-v1: 32(read) + T(content) + 32(write) = T + 64
-v2: T(content)
+Stage 0: 0_bootstrap (2 轮, freeze_lora, 1 fact/name only)
+  → plugin 学会 Delta Rule 基本读写
 
-backbone 处理的序列短了 64 个 token
+Stage 1: 1_persona_unified (12-20 轮, 10 种 turn kind + retention patterns)
+  → 完整能力（世界知识保留 + 拒答 + 多 fact + 覆写 + retention）
 ```
 
-### 额外开销
+### TBPTT
 
-| 操作 | 开销 |
-|------|------|
-| 读侧 K/V 生成 | n_layers × 2 × Linear(state_dim, hidden_size) × 32 tokens ≈ 微秒级 |
-| 每层 cross-attention | n_layers × (T × 32) attention ≈ 微秒级（32 state tokens 很少） |
-| 写侧 cross-attention | 1 次 (32 × T) attention ≈ 微秒级 |
+```python
+state = init_state()
+for seg_idx, segment in enumerate(episode):
+    result = forward(segment, state, labels, weights)
+    loss += result["loss"]
+    state = result["state_next"]
+    if (seg_idx + 1) % tbptt_steps == 0:
+        loss.backward()
+        optimizer.step()
+        state = state.detach()   # 截断梯度流
+        loss = 0
+```
 
-### 兼容性
+典型 tbptt_steps=8，episode_length=16 → 每 episode 做 2 次 backward。
 
-| 优化 | 兼容 | 原因 |
-|------|------|------|
-| torch.compile | 是 | layer_hook 是简单 cross-attention，无动态控制流 |
-| Flash Attention | 是 | backbone 内部 attention 不变 |
-| gradient checkpointing | 是 | layer_hook 在 checkpoint 边界外运行 |
+### 4 指标联合早停
 
-**净效果：大概率比 v1 更快。**
+训练期 `_validate` 计算：
+- VALUE (`eval_value_breakdown`)：召回 value token argmax 准确率
+- WorldQA (`eval_world_qa`)：世界 QA 整体 token 准确率
+- Refusal (`eval_refusal`)：拒答 regex 检测率（且无 fabrication）
+- Compositional (`eval_compositional`)：多 fact 单句全部 value 命中率
+
+**4 个全部过阈值**才触发早停。典型阈值 98 / 85 / 95 / 95。
+
+### 值加权 loss
+
+```python
+# conversation.py: tokenize_turn
+weights = [1.0 if label != -100 else 0.0 for label in labels]  # assistant = 1
+if value_str:
+    for v in values:  # 支持 str | list[str]
+        # 用 offset_mapping 定位 v 在 assistant text 中的 token 区间
+        weights[value_tokens] = VALUE_WEIGHT  # 5.0
+```
+
+Value token 得到 5× 梯度，让模型优先学对具体事实 token 而非 filler。
 
 ---
 
 ## 参数总览
 
-| 参数 | 值 | 说明 |
-|------|-----|------|
-| n_state | 32 | 状态 token 数 |
-| state_dim | 1024 | 状态维度（可独立于 hidden_size） |
-| read_scale_init | -5.0 | 初始影响力 sigmoid(-5)≈0.007 |
-| read_k/v_projs | n_layers × Linear(state_dim, hidden_size) | 每层独立 K/V 投影 |
-| write_q | Linear(state_dim, hidden_size) | 写侧 Q 投影 |
-| write_out | Linear(hidden_size, state_dim) | 写侧输出投影（identity init） |
-| gate_proj | Linear(2×state_dim, state_dim) | 动态门控 |
-| LoRA rank | 4 | 注入 q_proj, v_proj（语言适配） |
-| lora_alpha | 8 | LoRA 缩放 |
-| Memory MLP | SwiGLU(hidden_size, hidden_size*2) | 长期记忆（sleep 时更新） |
-| tbptt_steps | 可变 | 课程学习中随 episode_length 调整 |
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| n_heads | 16 | 多头独立的联想记忆 |
+| head_dim | 128 | d_v = d_k = 128 |
+| W 形状 | (B, 16, 128, 128) | 每样本 262144 floats |
+| read_scale_init | -3.0 | sigmoid(-3)≈0.047，初始读贡献小 |
+| beta_bias_init | -2.0 | sigmoid(-2)≈0.12，初始写强度 |
+| LoRA rank | 8 | 注入 q/v/in_proj/out_proj |
+| lora_alpha | 16 | |
+| segment_length | 256 | 单 segment token 长度 |
+| episode_length | 16 | 单 episode segment 数 |
+| tbptt_steps | 8 | 梯度截断窗口 |
+
+---
+
+## 记忆体系分层：短期（W） vs 长期（Memory MLP + Sleep，未来）
+
+心核的记忆是**双层架构**，对应人脑的海马体 vs 皮层分工：
+
+| 层 | 当前状态 | 载体 | 类比 | 更新时机 |
+|---|---|---|---|---|
+| **短期 / 工作记忆** | ✅ 已实现 | Delta Rule W 矩阵 | 海马体 / 工作记忆 | 对话每轮（推理时动态） |
+| **长期 / 固化记忆** | 🚧 未来工作 | Memory MLP（规划中） | 皮层 / synaptic consolidation | Sleep 时批量固化 |
+
+### 当前（v5c）：只有短期记忆
+
+W: `(B, H=16, d_v=128, d_k=128)` 每样本 1MB，Delta Rule 动态演化。能处理单次对话内的记忆（fact 存储、召回、覆写、跨 chat retention）。
+
+**当前的局限**：
+- W 容量固定，长对话必然遗忘早期信息
+- 对话结束后（`.pt` 保存）W 里的信息是静态的 —— 没被主动"固化"到权重
+- 跨 session 的记忆靠 burn_in 重建，不是真正"消化了"
+
+### 未来：长期记忆固化（Memory MLP + Sleep）
+
+**设计方向**（未实现）：
+- 引入 Memory MLP 模块（SwiGLU 结构，独立于 backbone）作为长期记忆载体
+- Sleep 阶段：replay buffer 回放对话 + 逐步弱化 W（read_scale → 0），迫使信息从 W 转移到 Memory MLP 权重
+- 效果：sleep 过的事实即使 W 清空也能回答（权重里记住了）；`.pt` 分化更深刻（MLP 权重随用户独立演化）
+
+**为什么现在先不做**：
+- 当前 v5c 的 W 在单次对话内已经充分解决了短期记忆问题
+- Memory MLP + Sleep 增加工程复杂度（replay buffer / 两阶段训练 / 灾难遗忘防护）
+- 先验证短期记忆机制，再加长期层。分步 de-risk
+
+### 为什么不用 RAG
+
+RAG 检索原文 chunk，每次回忆都要重新理解 —— 信息没被"消化"。心核的 W 存的是 (k,v) 外积对，信息已经消化进联想记忆结构。未来长期化后，Memory MLP 权重更是完全 implicit 的记忆表示。
+
+**可能的融合点**：跨用户的共享知识（公共世界事实）用 RAG 补充，personal / episodic 记忆用 W + Memory MLP。但这是远期考虑。
+
+---
+
+## 设计演进简史
+
+v1 → v5c 演化详见 [design_rationale.md](design_rationale.md)。一句话版本：
+
+- v1 state-as-tokens + shared LoRA → 0.8b 通过，4b 卡 entity 87%
+- v2 对称 cross-attention + 专用投影 → 解决 LoRA 瓶颈
+- v3 EKS (slot keys) / v4 slot routing → slot 身份伪概念
+- v5b slot + contrastive → slot 线性投影 hash 碰撞
+- **v5c Delta Rule**：`(v - Wk)` 数学消歧，取消 slot，简洁性最大
+- **persona_unified (最新)**：训练数据从窄分布（13-stage memory + think）改为真实使用分布（persona 驱动多轮 + teacher rehearsal + retention patterns）
+
+v5c 是架构终点，persona_unified 是训练范式终点。

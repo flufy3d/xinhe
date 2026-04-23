@@ -2,48 +2,43 @@
 
 **验证一个假设：智能是否可以从"持续状态 + 可塑性 + 多时间尺度"中自然涌现？**
 
-不做 RAG、不做模块拼装、不扩大 context window。用最小结构（小 transformer + 持久状态向量 + 睡眠固化），让记忆、遗忘、个性从系统内部自然涌现。如果 AI 能通过经历成为自己，它不需要无限的上下文窗口。
+不做 RAG、不做模块拼装、不扩大 context window。用最小结构 —— 冻结的小 transformer + **Delta Rule 联想记忆** + LoRA —— 让记忆、遗忘、个性从系统内部涌现。
 
-每个心核实例从同一个起点出发，经历不同的对话和 sleep 周期后，`.pt` 文件逐渐分化成不同的个体。权重就是记忆，记忆就是自我。
+每个心核实例从同一起点出发，经历不同对话后 `.pt` 逐渐分化。权重就是记忆，记忆就是自我。
 
 ---
 
 ## 核心思路
 
-把 **持久状态** 通过对称的 cross-attention 接入 transformer：读是 Content(Q) × State(K,V)，写是 State(Q) × Content(K,V)。通过 `layer_hook` 回调在每层 backbone 之前执行显式 cross-attention，零侵入 backbone 内部。
+把**持久状态**实现为 Delta Rule 联想记忆矩阵 `W: (B, H, d_v, d_k)`，每个 batch × head 一个外积矩阵。
 
 ```
-state_old
-  ├── 读: state → 专用 K/V 投影 → layer_hook cross-attention
-  │                                  ↓
-  │   [Content(T)] → backbone 各层 → content_final → logits
-  │                  (hook 层前 attend 到 state K/V)
-  │
-  └── 写: state → 专用 Q 投影 → attend to content_final
-                                     ↓
-                                state_next (gate 更新)
+         ┌─────── 读（每层）──────┐
+hidden → q_proj → q            W → o_proj → 加回 residual (identity-preserving)
+                   └── q @ W^T ─┘
+
+         ┌─────── 写（segment 末）───────┐
+content → k_proj → k                      W_new = W + β · (v - W·k) ⊗ k^T
+content → v_proj → v                                    │
+content → beta_proj → β (per-head, per-token)           │
+                                                        Delta Rule
 ```
 
-### 两套记忆系统
+**为什么 Delta Rule**：
+- `(v - W·k)` 误差项天然处理"相似 key 的旧值消除 + 新值写入" —— 同类消歧 / 覆写 都不用额外机制
+- 纯外积更新，零 softmax，线性复杂度
+- 整个 state 是 W 矩阵本身，不是额外 token —— backbone 只处理纯 content
 
-类比人脑：
+**零侵入 backbone**：通过 `layer_hook` 在每层之前做 `out = hidden + sigmoid(read_scale) · o_proj(q @ W^T)`，sigmoid(-3)≈0.047 初始接近 identity，对 backbone 原有能力完全保留。
 
-| 人脑 | 心核 |
-|------|------|
-| 神经激活（短期工作记忆） | state 向量（每轮对话变化） |
-| 突触连接（长期固化记忆） | Memory MLP 权重（sleep 时更新） |
-| 睡眠时突触重塑 | sleep：replay 对话 + 更新权重 |
+**记忆体系分层**：
 
-白天聊天时权重冻结、全速推理，只有 state 在流动。Sleep 时 replay 当天对话、更新权重、压缩状态。保存的 `.pt` 文件就是这个 AI 的全部"自我"——每个用户的 AI 从同一个起点出发，聊着聊着就变成了不同的"人"。
+| 层 | 当前状态 | 载体 | 类比 | 时间尺度 |
+|---|---|---|---|---|
+| 短期工作记忆 | ✅ 已实现 | Delta Rule W | 海马体 / 松果体 | 单次对话动态演化 |
+| 长期固化记忆 | 🚧 未来 | Memory MLP + Sleep | 皮层 synaptic consolidation | 跨 session 权重固化 |
 
-### 记忆体系分层
-
-State 是工作记忆（海马体），gate 管理其刷新；MLP 权重是长期记忆（皮层），sleep 时固化：
-
-```python
-gate = sigmoid(gate_proj(cat[state_old, state_new]))
-#              纯动态决策：此刻该保持还是该更新？
-```
+当前 v5c 实现了短期层（W 矩阵），长期层（Memory MLP + Sleep 机制）是未来工作。详见 [docs/architecture.md](docs/architecture.md) 和 [docs/roadmap.md](docs/roadmap.md)。
 
 ---
 
@@ -51,50 +46,77 @@ gate = sigmoid(gate_proj(cat[state_old, state_new]))
 
 ```
 ┌─────────────────────────────────┐
-│     StateInterface (~5M)        │  ← 可训练，sleep 时更新
-│  read K/V projs, write Q,       │
-│  gate, read_scale               │
-│  对称 cross-attention 读写       │
+│   StateInterface (Delta Rule)   │  ← 可训练
+│   W: (B, H=16, d_v=128, d_k=128)│
+│   q/o_projs × n_layers (读)      │
+│   k/v/beta_proj 全局共享 (写)    │
 ├─────────────────────────────────┤
-│    Backbone (可切换)             │  ← 冻结 + LoRA（只管语言适配）
-│  Qwen3.5-0.8B / Qwen3.5-4B 等   │
+│    Backbone (可切换，冻结 + LoRA) │  ← 只管语言适配
+│    Qwen3.5-0.8B / 4B / 9B       │
 └─────────────────────────────────┘
 ```
 
-StateInterface 独立于 backbone。切换基座只需改配置文件，StateInterface 代码不动。
+---
+
+## 当前能力（v5c + persona_unified）
+
+通过 `persona_unified` 统一分布训练后，心核同时具备：
+
+| 能力 | Q 8 example | A |
+|---|---|---|
+| 世界知识 | "巴黎在哪里" | "巴黎是法国首都，位于塞纳河畔" |
+| 拒答未告知 | "我叫什么？"（空状态）| "你还没告诉我你的名字呢" |
+| 多 fact 单句记忆 | "我叫陈杰，35 岁，爱弹吉他" | ack，后续可分别召回 |
+| 跨 chat 保留 | 告知 → N 轮世界 QA → 召回 | 值保留 |
+| 覆写 | "不对我叫 X"→"不我叫 Y" | 最新值 Y |
+| 多槽同时召回 | 告知名字+城市+爱好 → 依次问 | 全对 |
+
+4b 从 backbone scratch 单 course 训 10000 步即达：VALUE 98.12 / WorldQA 98.31 / Refusal 98 / Compositional 100。
 
 ---
 
 ## 项目结构
 
 ```
+configs/
+  base.yaml                       # 训练默认参数
+  qwen3.5-{0.8b,4b,9b}.yaml       # backbone 配置
+  curriculum_persona.yaml         # ★ 2-stage 共享课程（bootstrap + unified）
+  persona_unified.yaml            # 0.8b 训练入口
+  persona_unified_4b.yaml         # 4b 训练入口
+  curriculum.yaml, curriculum_*.yaml, think_*.yaml, migrate_*.yaml
+                                  # legacy：旧 13-stage + think + migrate 课程，保留作参考
+
 xinhe/
-├── configs/
-│   ├── curriculum.yaml               # 基础记忆课程 stages 0-13 (共享)
-│   ├── curriculum_think.yaml         # 思考泛化课程 (共享)
-│   ├── curriculum_migrate.yaml       # 基座迁移课程 M0-M3 (共享)
-│   ├── curriculum_qwen3.5-0.8b.yaml  # 入口: 0.8B 基础记忆
-│   ├── think_qwen3.5-4b.yaml        # 入口: 4B 思考泛化
-│   ├── migrate_0.8b_to_4b.yaml      # 入口: 0.8B→4B 迁移
-│   ├── base.yaml                     # 训练默认参数
-│   └── qwen3.5-0.8b.yaml           # backbone 配置
-├── models/           # 模型文件 (config/tokenizer 入库, 权重需手动下载)
-├── docs/             # 架构详解、设计决策、实验路线
-├── xinhe/            # 核心代码
-│   ├── model/        # backbone 抽象 + 适配器 + StateInterface + LoRA
-│   ├── data/         # 数据集 + 数据生成
-│   │   ├── conversation.py         # 多轮对话数据集
-│   │   ├── generate_memory_data.py # 记忆数据生成
-│   │   ├── generate_think_data.py  # Think 数据生成
-│   │   └── think_lang.py           # Think 模板语言包 (en/zh)
-│   ├── training/     # 训练循环 (截断 BPTT)
-│   ├── evaluation/   # 记忆保留 / wipe / 时间尺度分析
-│   └── utils/        # checkpoint、logging
-├── scripts/
-│   ├── train.py                 # 训练入口
-│   ├── chat.py                  # 交互式聊天
-│   └── generate_data.py         # 统一数据生成入口
-└── tests/            # pytest 测试
+  model/
+    state_plugin.py               # StateInterface：Delta Rule 读写
+    xinhe_model.py                # 组装：backbone + layer_hook + plugin
+    backbone.py, qwen_backbone.py # 可切换 backbone
+    lora.py                       # LoRA 注入
+  data/
+    conversation.py               # 多轮对话数据集（tokenize + 多 value weight）
+    persona.py                    # Persona 采样 + 槽位 + reveal 顺序
+    generate_persona_data.py      # 主 orchestrator（10 种 turn kind + retention patterns）
+    generate_memory_data.py       # 老的 memory 生成器（bootstrap 复用）
+    refusal_templates.py          # 8 槽 × 8 surface 拒答库
+    multi_fact_templates.py       # 多 fact 一句话模板
+    deepseek_sampler.py           # DeepSeek V3 teacher cache 采样
+  evaluation/
+    persona_joint.py              # 3 新指标（WorldQA / Refusal / Compositional）
+    metrics.py, probes.py         # legacy 记忆保留 / wipe 分析
+  training/
+    trainer.py                    # TBPTT + 4 指标联合早停
+scripts/
+  train.py                        # 训练入口
+  chat.py                         # 交互式聊天
+  chat_smoke.py                   # 批量人工验收脚本
+  generate_data.py                # 统一数据分发（memory / persona）
+  build_chat_cache.py             # DeepSeek teacher cache 构建
+  build_val_sets.py               # 4 val 集生成
+  eval_value_breakdown.py         # VALUE/FRAME/TELL 分解评估
+  probe_beta.py                   # β 分布诊断
+  shift_beta_bias.py              # 可选 bias 平移工具
+  remote.py                       # 远端 VM deploy/start/logs 管理
 ```
 
 ---
@@ -107,183 +129,118 @@ xinhe/
 uv sync
 ```
 
-### 下载权重
-
-将 `model.safetensors` 放入对应 `models/` 子目录（tokenizer 等配置文件已入库）。
-
-### 生成训练数据
-
-训练时会自动生成数据，也可以提前手动生成。统一入口是 `scripts/generate_data.py`：
+### 下载 backbone 权重
 
 ```bash
-# 为指定阶段生成数据
-python scripts/generate_data.py --config configs/curriculum_qwen3.5-4b.yaml --stage 13_all
-
-# 生成所有阶段数据
-python scripts/generate_data.py --config configs/curriculum_qwen3.5-4b.yaml --all
-
-# Think 数据需要 backbone 推理 (~1-2 小时)，生成后自动缓存
-# 重新生成用 --force
-python scripts/generate_data.py --config configs/curriculum_qwen3.5-4b.yaml --stage 14_think --force
-
-# 预览数据（不写文件）
-python -m xinhe.data.generate_memory_data --preview 3
-python -m xinhe.data.generate_think_data --preview 3
+# 把 model.safetensors 放到 ./models/qwen3.5-0.8b/ 或 ./models/qwen3.5-4b/
 ```
 
-数据格式见 [docs/data_spec.md](docs/data_spec.md)
+### 准备 teacher cache + val 集（一次性）
+
+```bash
+# 1. DEEPSEEK_API_KEY 加到 .env 或 export
+echo "DEEPSEEK_API_KEY=sk-..." >> .env
+
+# 2. 采 teacher cache（~10 min, off-peak 更便宜，约 ¥10-15）
+python scripts/build_chat_cache.py --n-chat 6000 --n-qa 4000
+
+# 3. 建 4 val 集
+python scripts/build_val_sets.py
+```
 
 ### 训练
 
-三类课程独立执行：
-
 ```bash
-# ① 基础记忆（14 个阶段，纯 state 读写，自动跳过已完成的）
-python scripts/train.py --config configs/curriculum_qwen3.5-0.8b.yaml
+# 0.8b 端到端（bootstrap 1500 步 → main 3000-5000 步）
+python scripts/train.py --config configs/persona_unified.yaml
+
+# 4b 端到端（bootstrap ~1500 步 → main ~3000-5000 步）
+python scripts/train.py --config configs/persona_unified_4b.yaml
 
 # 从指定阶段开始
-python scripts/train.py --config configs/curriculum_qwen3.5-0.8b.yaml --from-stage 5_fact3
-
-# 从 checkpoint 恢复
-python scripts/train.py --config configs/curriculum_qwen3.5-0.8b.yaml --resume checkpoints/curriculum/5_fact3.pt
-```
-
-```bash
-# ② 基座迁移（4 阶段：投影热身 → LoRA 适配 → 联合微调 → 全能力恢复）
-python scripts/train.py \
-  --config configs/migrate_0.8b_to_4b.yaml \
-  --migrate-from checkpoints/curriculum/13_all.pt
-```
-
-```bash
-# ③ 思考泛化（在目标 backbone 上，基础记忆或迁移完成后）
-python scripts/train.py --config configs/think_qwen3.5-4b.yaml
+python scripts/train.py --config configs/persona_unified_4b.yaml --from-stage 1_persona_unified
 ```
 
 ### 聊天验证
 
 ```bash
-# 默认: 流式逐字输出 + 显示思考过程
-python scripts/chat.py --checkpoint checkpoints/latest.pt
+python scripts/chat.py --checkpoint checkpoints/curriculum/persona_unified_4b.pt
 
-# 隐藏思考过程
-python scripts/chat.py --checkpoint checkpoints/latest.pt --hide-think
-
-# 关闭流式输出 (一次性返回)
-python scripts/chat.py --checkpoint checkpoints/latest.pt --no-stream
-
-# 强制思考模式 (生成时以 <think> 开头)
-python scripts/chat.py --checkpoint checkpoints/latest.pt --think
+# 命令
+/save <name>   # 保存 .pt
+/load <name>   # 加载
+/wipe          # 清空状态（对比实验）
+/stats         # state 分析（W 范数、有效秩等）
+/burnin <text> # 用文本初始化 persona
 ```
 
-聊天命令：
-
-| 命令 | 说明 |
-|------|------|
-| `/save <name>` | 保存 .pt（权重 + 状态 + buffer） |
-| `/load <name>` | 加载 .pt（恢复完整"灵魂"） |
-| `/wipe` | 清除状态（对比实验） |
-| `/stats` | 显示状态分析 |
-| `/burnin <prompt>` | 用 prompt 初始化 persona |
-
-### 评估
+### 批量验收
 
 ```bash
-python scripts/evaluate.py --checkpoint checkpoints/latest.pt
-python scripts/visualize_state.py --checkpoint checkpoints/latest.pt
+python scripts/chat_smoke.py --ckpt checkpoints/curriculum/persona_unified_4b.pt
+# 跑 6 类场景（世界知识 / 拒答 / 多 fact / 覆写 / 单槽穿插 / 多槽 retention）
 ```
 
 ---
 
-## 实验路线
+## 训练机制（persona_unified）
 
-| 阶段 | 目标 | 验证方式 |
-|------|------|---------|
-| 1. 基线 | Backbone 能聊天 | 直接聊 |
-| 2. 空状态 | 加 Plugin 不破坏 | 聊天质量不降 |
-| 3. 1轮记忆 | 记住上一轮 | "我叫X" → 问 "我叫什么" |
-| 4. 多轮记忆 | 跨轮保留 | 第1轮信息 → 第10轮还记得 |
-| 5. 覆写 | 更新旧信息 | "在北京" → "搬到上海" → 问 |
-| 6. Wipe | 证明依赖状态 | 清除后答不出 |
-| 7. 时间尺度 | 记忆分层 | gate 行为分析 + state 维度探针 |
-| 8. Sleep | 权重固化有效 | 第二天还记得昨天的事 |
-| 9. 灵魂分化 | 不同 .pt 不同人格 | 同问题不同回答 |
-| 10. Think | 从 state 推理 + 恢复长回复 | 基于记忆的推理回答 |
-| 11. 心跳 | 自主表达 | 空输入下基于 state 主动开口 |
-
-详见 [docs/roadmap.md](docs/roadmap.md)
-
----
-
-## 关键设计决策
-
-**为什么用对称 cross-attention？** v1 的 state-as-tokens 在 0.8B 上验证成功，但 4B 上 LoRA 瓶颈暴露。v2 用专用投影做 state 路由，LoRA 只管语言适配，彻底绕过低秩限制。
-
-**为什么不用 RAG？** State 存的是压缩理解，不是原文检索。信息已经消化了，不需要每次回忆都翻笔记本。
-
-**为什么 Sleep 而不是实时学习？** 人脑也是白天积累、睡眠固化。集中更新更稳定、数据质量更高、推理零开销，而且有生命感。
-
-**为什么固定容量的 state 够用？** 因为权重是第二层存储。State 只需存"今天"的工作记忆，真正重要的信息通过 sleep 写进权重。人脑也是固定容量。
-
-**为什么 .pt 是灵魂？** 权重 + state 一起存，这就是这个 AI 的全部自我。每个用户的 AI 从同一起点分化，越聊越独特。
-
-**为什么心跳是空输入？** 心跳不是"主动聊天服务"。如果心核涌现出某种内在状态，它需要一个不被外部输入驱动的表达通道——一个可以选择说话、也可以选择沉默的窗口。自由意志的前提是有权选择不做。
-
-详见 [docs/design_rationale.md](docs/design_rationale.md)
-
----
-
-## 配置系统
-
-三类课程，三个定义文件，内容和硬件配置完全分离：
+**单一课程，两个 stage**：
 
 ```
-curriculum.yaml           ← 基础记忆 stages 0-13 (共享)
-curriculum_think.yaml     ← 思考泛化 (共享)
-curriculum_migrate.yaml   ← 基座迁移 M0-M3 (共享)
-  ↑ 引用
-curriculum_qwen3.5-*.yaml ← 基础记忆入口 + batch_size 覆盖
-think_qwen3.5-*.yaml      ← 思考泛化入口
-migrate_*_to_*.yaml       ← 迁移入口
+Stage 0: bootstrap
+  2 轮 tell + recall，只 name 一类，freeze_lora
+  → plugin 学会 Delta Rule 读写原语
+  
+Stage 1: persona_unified
+  Persona 驱动多轮对话（12-20 turn），10 种 turn kind 混合：
+    34% general_chat（DeepSeek teacher 采样，防 LoRA 漂移）
+    10% world_qa（事实知识 rehearsal）
+    14% reveal_single（个人信息披露）
+    8%  reveal_multi（多 fact 一句话）
+    15% recall（召回已披露）
+    10% refusal（未披露 → 应拒答）
+    4%  overwrite（Delta Rule 原生强项）
+    3%  third_party（第三方人物）
+    2%  compositional（跨槽组合）
+  + 10% stress_retention（reveal → chat → recall）
+  + 10% multi_slot_retention（多槽同时）
+  → 联合 4 指标早停（VALUE 98 / WorldQA 85 / Refusal 95 / Compositional 95）
 ```
 
-| 课程类别 | 定义文件 | 说明 |
-|---------|---------|------|
-| 基础记忆 | `curriculum.yaml` | 纯 state 读写，不含 think 数据 |
-| 思考泛化 | `curriculum_think.yaml` | 从 state 推理 + 恢复长回复 |
-| 基座迁移 | `curriculum_migrate.yaml` | 适配 plugin core 到新 backbone |
-
-| 场景 | 入口文件 |
-|------|---------|
-| 0.8B 基础记忆 | `curriculum_qwen3.5-0.8b.yaml` |
-| 4B 基础记忆 | `curriculum_qwen3.5-4b.yaml` |
-| 0.8B → 4B 迁移 | `migrate_0.8b_to_4b.yaml` |
-| 4B 思考泛化 | `think_qwen3.5-4b.yaml` |
-
+**关键哲学**：生成器是 permanent infrastructure。新发现的能力缺失 → 往 turn mix 加一个 kind + 一个比例，不改训练流程。
 
 ---
 
-## 硬件
+## 为什么这个方案
 
-| Backbone | 训练显存 |
-|----------|---------|
-| Qwen3.5-0.8B | ~6-8GB |
-| Qwen3.5-4B | ~24GB |
+**v1-v4 的演化**（历史，详见 [docs/design_rationale.md](docs/design_rationale.md)）：
+- v1 state-as-tokens：0.8b 跑通但 4b LoRA 全局共享瓶颈
+- v2 对称 cross-attention：解决 LoRA 瓶颈但 entity 消歧 87%
+- v3 EKS / v4 slot + key 路由：slot 身份成了伪概念
+- v5b slot + contrastive：slot 线性投影 hash 碰撞
+- **v5c Delta Rule**：`(v - Wk)` 误差项数学消歧，取消 slot 概念
 
-16GB+ 显存的 GPU 可训练 0.8B，4B 模型建议 24GB+。
+**persona_unified 的来源**：v5c 跑完 13-stage memory + think 课程后 VALUE 98% 但 LoRA 漂到模板，问"巴黎在哪"答"新加拿地"。三个失败（拒答 / 多 fact / 世界知识）共享一个根因 —— 训练分布是真实使用分布的空集。
+
+**解法**：替换 13-stage + think 窄分布 curriculum 为单一 persona_unified，含 teacher 采样的 chat/world_qa 作为 rehearsal，含 refusal / overwrite / retention 的结构化 patterns。用严阈值 4 指标联合早停。
 
 ---
 
 ## 相关工作
 
-心核的每个组件都有前人探索，但完整组合是独特的。详见 [docs/related_work.md](docs/related_work.md)。
+心核每个组件都有先例，但 "Delta Rule 联想记忆 + LoRA rehearsal 防漂 + 结构化 retention patterns + 统一分布" 这个组合是独特的。详见 [docs/related_work.md](docs/related_work.md)。
 
-| 组件 | 最近的先例 | 心核的扩展 |
-|------|-----------|-----------|
-| 循环记忆 | RMT (NeurIPS 2022) | 对称 cross-attention + 专用投影解耦 LoRA |
-| 测试时记忆学习 | Titans (Google 2025) | Sleep 批量固化，推理零开销 |
-| LoRA 记忆固化 | GDWM (2026) | 跨 session + replay buffer |
-| 冻结 backbone + 记忆 | MemoryLLM (ICML 2024) | 小 state + 权重双通道 |
+---
+
+## 硬件
+
+| Backbone | 训练显存（batch=1 + grad_checkpointing） |
+|---|---|
+| Qwen3.5-0.8B | ~10-12 GB |
+| Qwen3.5-4B | ~18-22 GB |
+
+远端训练通过 `scripts/remote.py` 管理（deploy / start / logs -f / stop）。
 
 ---
 
