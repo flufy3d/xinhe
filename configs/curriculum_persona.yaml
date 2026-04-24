@@ -1,19 +1,20 @@
 # ============================================================
-# Persona 统一训练 — 共享课程定义（被 persona_unified*.yaml 引用）
+# Persona 统一训练 — v6 双流课程（被 persona_unified*.yaml 引用）
 #
-# 两阶段结构：
-#   0_bootstrap         — 2 轮 1-fact（only name），freeze LoRA，只训 plugin
-#                         目标：plugin 学会 Delta Rule 基本读写
-#                         预期：~1000-1500 步收敛，batch 可开大
-#   1_persona_unified   — 完整 persona 驱动对话 + chat/world_qa rehearsal
-#                         + 结构化 retention patterns（10% 单槽 + 10% 多槽）
-#                         严阈值联合早停（VALUE 98 / WorldQA 85 / Refusal 95 / Compositional 95）
+# 三阶段结构（从零重训，不兼容旧 persona_unified.pt）：
+#   0a_fact_bootstrap      — 2 轮 1-fact（only name），freeze LoRA + freeze turn，只训 fact plugin
+#                             目标：fact plugin 学会 Delta Rule 基本读写
+#                             预期：~1000-1500 步 VALUE ≥ 0.98
+#   0b_turn_bootstrap      — 3-6 轮跨距 1-3 的 reveal→filler→recall，freeze LoRA + freeze fact
+#                             目标：turn 读侧（q/o_projs_turn）+ Δτ 头学会"往回看几轮"
+#                             预期：~1500 步跨距 VALUE ≥ 0.90
+#   1_persona_unified_dual — 完整 persona 分布 + 4 个新 turn pattern + legacy retention
+#                             全放开，8 指标联合早停
+#                             预期：~5000-8000 步 8 指标达标
 #
 # 设计理由：
-#   4b 单 stage 从零训曾在 step 5k-7k 遇到 plateau —— plugin 和 LoRA 抢梯度。
-#   先 bootstrap 单独训 plugin，再主 stage 才能不卡在读写原语学习上。
-#
-# 此文件只定义 stages，实际 backbone + stage_overrides 在 persona_unified*.yaml
+#   双流是结构性升级，写侧语义变了（W_turn 有衰减+旋转）、LoRA rank 从 8→16，
+#   旧 ckpt 无法 warm-start。但课程上先 fact 后 turn 逐步放开，避免两 plugin 抢梯度。
 # ============================================================
 
 training_defaults:
@@ -26,10 +27,8 @@ training_defaults:
   segment_length: 256
 
 stages:
-  # ── Stage 0: Bootstrap Delta Rule 读写 ─────────────────────
-  # 2 轮最短 cycle: tell → recall。只 name 一类防过早泛化。
-  # 复用原 generate_memory_data.py（type: memory）
-  - name: "0_bootstrap"
+  # ── Stage 0a: Fact 原语 bootstrap ───────────────────────────
+  - name: "0a_fact_bootstrap"
     data:
       type: "memory"
       num_train: 10000
@@ -38,43 +37,116 @@ stages:
       categories: ["name"]
       no_pre_filler: true
       no_overwrite: true
-      min_distance: 0          # 告知立刻召回，0 距离
+      min_distance: 0
       max_distance: 0
-      max_turns: 2             # tell + recall
+      max_turns: 2
       seed: 42
     training:
       episode_length: 2
       tbptt_steps: 2
-      freeze_lora: true        # 只训 plugin
+      freeze_lora: true
+      freeze_turn: true              # W_turn 路径先锁住，防止随机读侧干扰 fact 原语
+      suppress_turn_read: true       # 彻底屏蔽 turn read 注入，保证 0a 是 clean 单流 fact 训练
       plugin_lr_multiplier: 1.0
       max_steps: 1500
       warmup_steps: 100
-      # 简单任务不用 joint，VALUE 达 98 就进下 stage
       use_joint_early_stop: false
       early_stop_value: 0.98
 
-  # ── Stage 1: 主统一分布训练 ─────────────────────────────────
-  - name: "1_persona_unified"
+  # ── Stage 0b: Turn 原语 bootstrap —— 相位选择（W_turn 专属）────
+  # v4（2026-04-24，保守对抗集方案）：
+  #   v3 (60% verbatim + 40% meta) → phase_ent ≈ 1.68 塌平、phase_mode 随机乱跳，
+  #   根因：单条目 W_turn 不逼相位收敛（任意 τ 读出的都是同一条内容在不同旋转下的投影）
+  #   → 无"选错就答错"的压力，softmax 永远均匀。
+  #
+  # v4 改造：
+  #   60% adversarial_temporal —— 3 条 random alnum phrase + 按时序指定查询其中一条。
+  #                               选错 τ → 读出错 phrase → 强监督信号逼 phase_ent 收敛。
+  #   20% verbatim_recall       —— 单条目 + "记住这句"trigger，保 recall 模板多样性
+  #                               （避免模型学出"只有带时序限定词才读 W_turn"的虚假相关）
+  #   20% meta_recall           —— 单条目 + "我刚才说了什么"自然 trigger（natural chat pattern）
+  #
+  # 训练目标：
+  #   (a) phase_ent < 1.0（初始 log(P+1)=log 6≈1.79），α 真正锐利选中目标 τ
+  #   (b) q_projs_turn / o_projs_turn 学会从 rotated W_turn 解码 phrase token 分布
+  #   (c) read_scale_turn 从初值 0.047 爬升 —— 因 fact 被屏蔽，这是模型唯一可用通路
+  - name: "0b_turn_bootstrap"
     data:
       type: "persona"
-      num_train: 40000
-      num_val: 500
+      num_train: 30000
+      num_val: 400
       cache_dir: "data/cache"
-      min_turns: 12
-      max_turns: 20
-      stress_retention_ratio: 0.10      # 10% 单槽 reveal→chat→recall
-      multi_slot_retention_ratio: 0.10  # 10% 多槽 reveal×N→chat→recall×N
+      min_turns: 3
+      max_turns: 7                      # adversarial 最长 7 turns: S,F,S,F,S,F,R
+      adversarial_temporal_ratio: 0.60  # 主力：多条目时序碰撞，phase 选择唯一监督源
+      verbatim_recall_ratio: 0.20       # 保留 recall trigger 多样性
+      meta_recall_ratio: 0.20           # 保留 natural chat trigger
       seed: 42
     training:
+      episode_length: 7                 # 覆盖 adversarial 最长 episode
+      tbptt_steps: 7
+      grad_accum_steps: 1
       freeze_lora: false
-      plugin_lr_multiplier: 0.3         # plugin 已 bootstrap，refine 小 LR
-      episode_length: 16
-      tbptt_steps: 8
-      max_steps: 5000
+      freeze_fact: true
+      suppress_fact_read: true          # W_turn 唯一通路
+      turn_lr_multiplier: 2.0           # v4.1 加大 turn 读侧 LR，打破 turn_scale 死锁
+      turn_phase_temperature: 30.0      # v4.1 K=30：K=10 步 2350 后 turn_scale 冻结、phase_ent 震荡 1.62，加大力撬动对称性
+      max_steps: 6000                   # 对抗集比单条目难，给更多步数
       warmup_steps: 200
-      # 严阈值联合早停（70% 太松，逼模型训到细节）
+      use_joint_early_stop: false
+      early_stop_value: 0.90            # 对抗集 VALUE ≥ 90% 即 phase 选择学会
+      # 其他 stage 指标显式清零
+      early_stop_world_qa: 0.0
+      early_stop_refusal: 0.0
+      early_stop_compositional: 0.0
+      early_stop_pronoun: 0.0
+      early_stop_disentangle: 0.0
+      early_stop_rapid_overwrite: 0.0
+      early_stop_decay: 0.0
+
+  # ── Stage 1: 双流统一训练 ──────────────────────────────────
+  - name: "1_persona_unified_dual"
+    data:
+      type: "persona"
+      num_train: 50000
+      num_val: 500
+      cache_dir: "data/cache"
+      min_turns: 10
+      max_turns: 16
+      # v6.3 调整（2026-04-24）：
+      #   0b 从 "60% verbatim + 40% meta" 改为 "60% adversarial + 20% verbatim + 20% meta"，
+      #   Stage 1 必须持续 rehearse 全部三个 W_turn 原生能力 + legacy W_fact patterns，
+      #   否则 Stage 1 的 refusal/pronoun 梯度会覆盖 0b 的读侧学习（实测 v6.2 仍 G=0/3 H=0/2）。
+      #   structured ratio 合计 0.60，剩余 0.40 走 default chat mix (world_qa + refusal + general)。
+      # W_fact legacy retention (总 0.35)
+      stress_retention_ratio: 0.05
+      multi_slot_retention_ratio: 0.07
+      variable_distance_ratio: 0.07
+      fact_vs_transient_ratio: 0.05
+      rapid_overwrite_ratio: 0.04
+      decay_awareness_ratio: 0.05       # turn_persistent 能力
+      # W_turn native rehearsal (总 0.27，防遗忘；adversarial 最新最脆弱所以占大头)
+      verbatim_recall_ratio: 0.07      # 单条目 + "记住这句"trigger
+      meta_recall_ratio: 0.07          # 单条目 + "我刚才说了什么"自然 trigger
+      adversarial_temporal_ratio: 0.13 # 多条目时序碰撞，保持 phase 选择能力
+      seed: 43
+    training:
+      freeze_lora: false
+      freeze_fact: false
+      freeze_turn: false
+      plugin_lr_multiplier: 0.3      # fact plugin 已 bootstrap，refine 小 LR
+      turn_lr_multiplier: 0.5        # turn 也已 bootstrap，refine
+      episode_length: 16             # 容纳 decay 的 10-12 filler chain (砍短以降低 4b 显存压力)
+      tbptt_steps: 8
+      max_steps: 8000
+      warmup_steps: 200
+      # 8 指标联合早停（legacy 4 略降 + v6 新 4 温和首轮阈值）
       use_joint_early_stop: true
-      early_stop_value: 0.98
-      early_stop_world_qa: 0.85
-      early_stop_refusal: 0.95
-      early_stop_compositional: 0.95
+      early_stop_value: 0.95
+      early_stop_world_qa: 0.82
+      early_stop_refusal: 0.92
+      early_stop_compositional: 0.92
+      early_stop_pronoun: 0.70
+      early_stop_disentangle: 0.75
+      early_stop_rapid_overwrite: 0.85
+      early_stop_decay: 0.65

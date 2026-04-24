@@ -16,6 +16,6 @@ backbone:
 # state: 继承 base.yaml (n_heads=16, head_dim=64)
 
 lora:
-  rank: 8
-  alpha: 16
+  rank: 16                    # v6 双流：backbone 要适配 fact+turn 两股记忆注入 + 4 类新 curriculum pattern
+  alpha: 32
   target_modules: ["q_proj", "v_proj", "in_proj_qkv", "out_proj"]

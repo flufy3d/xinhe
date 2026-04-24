@@ -35,22 +35,22 @@ def main():
         sys.exit(1)
 
     ckpt = torch.load(in_path, map_location="cpu", weights_only=False)
-    if "plugin_state" not in ckpt:
-        print("错误: checkpoint 缺少 plugin_state")
+    if "fact_plugin_state" not in ckpt:
+        print("错误: checkpoint 缺少 fact_plugin_state")
         sys.exit(1)
 
     bias_key = "beta_proj.bias"
-    if bias_key not in ckpt["plugin_state"]:
+    if bias_key not in ckpt["fact_plugin_state"]:
         # 也许有别的命名
-        cand = [k for k in ckpt["plugin_state"] if "beta_proj" in k and "bias" in k]
+        cand = [k for k in ckpt["fact_plugin_state"] if "beta_proj" in k and "bias" in k]
         if not cand:
-            print(f"错误: plugin_state 里找不到 beta_proj.bias，实际 keys: {list(ckpt['plugin_state'].keys())}")
+            print(f"错误: fact_plugin_state 里找不到 beta_proj.bias，实际 keys: {list(ckpt['fact_plugin_state'].keys())}")
             sys.exit(1)
         bias_key = cand[0]
 
-    old = ckpt["plugin_state"][bias_key].clone()
+    old = ckpt["fact_plugin_state"][bias_key].clone()
     new = old + args.delta
-    ckpt["plugin_state"][bias_key] = new
+    ckpt["fact_plugin_state"][bias_key] = new
 
     print(f"=== beta_bias shift ===")
     print(f"  key: {bias_key}")

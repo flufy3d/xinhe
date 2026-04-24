@@ -70,7 +70,7 @@ def compute_beta(model, tokenizer, user: str, assistant: str, device, seg_len=25
     # Valid token mask (非 pad + 非 prefix 的 assistant + user 全部内容 token)
     valid_mask = (ids[0] != pad_id).cpu()
 
-    # 先跑 embed → backbone 得到 content_output，和 state_plugin.write_from_content 里一致
+    # 先跑 embed → backbone 得到 content_output，和 fact_plugin.write_from_content 里一致
     state = model.init_state(1).to(device)
     from types import SimpleNamespace
     # Hack: 复用 model.forward 的内部流程需要访问 content_output，
@@ -95,14 +95,14 @@ def compute_beta(model, tokenizer, user: str, assistant: str, device, seg_len=25
     def hook(hidden, layer_idx):
         if layer_idx not in model._hook_layer_set:
             return hidden
-        return model.state_interface.read_layer(hidden, state, hook_idx_map[layer_idx])
+        return model.fact_interface.read_layer(hidden, state, hook_idx_map[layer_idx])
 
     content_output = model.backbone.forward_blocks(
         emb, attention_mask=mask, position_ids=position_ids, layer_hook=hook,
     )
 
     # 手动算 β = sigmoid(beta_proj(content_output))
-    plugin = model.state_interface
+    plugin = model.fact_interface
     c = content_output.to(plugin.beta_proj.weight.dtype)
     beta_logits = F.linear(c, plugin.beta_proj.weight, plugin.beta_proj.bias)
     beta = torch.sigmoid(beta_logits)  # (1, T, H)

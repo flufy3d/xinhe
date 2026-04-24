@@ -1,17 +1,17 @@
 """
-测试 StateInterface (v5c: Delta Rule 联想记忆 W)
+测试 FactInterface (v6: Delta Rule 联想记忆 W_fact；继承 v5c 逻辑)
 """
 import inspect
 import torch
 import pytest
 import torch.nn.functional as F
 
-from xinhe.model.state_plugin import StateInterface
+from xinhe.model.fact_plugin import FactInterface
 
 
 @pytest.fixture
 def interface():
-    return StateInterface(hidden_size=64, n_heads=4, head_dim=16, n_layers=4)
+    return FactInterface(hidden_size=64, n_heads=4, head_dim=16, n_layers=4)
 
 
 def test_blank_state_shape(interface):
@@ -23,7 +23,7 @@ def test_blank_state_shape(interface):
 
 def test_blank_state_read_is_identity():
     """零 W 时 read_layer 输出 == 输入（scale*0 residual）"""
-    iface = StateInterface(hidden_size=32, n_heads=4, head_dim=8, n_layers=2)
+    iface = FactInterface(hidden_size=32, n_heads=4, head_dim=8, n_layers=2)
     W = iface.blank_state(1)
     hidden = torch.randn(1, 16, 32)
     out = iface.read_layer(hidden, W, layer_idx=0)
@@ -41,7 +41,7 @@ def test_read_layer_shape(interface):
 
 def test_read_scale_init_near_zero():
     """初始 read_scale 接近 0（空态几乎无影响）"""
-    iface = StateInterface(
+    iface = FactInterface(
         hidden_size=32, n_heads=4, head_dim=8, n_layers=2,
         read_scale_init=-5.0,
     )
@@ -59,7 +59,7 @@ def test_write_from_content_shape(interface):
 
 def test_delta_rule_overwrite():
     """同 key 先写 v1 再写 v2，读回偏向 v2（覆写语义）"""
-    iface = StateInterface(hidden_size=32, n_heads=1, head_dim=8, n_layers=1)
+    iface = FactInterface(hidden_size=32, n_heads=1, head_dim=8, n_layers=1)
     # 手动构造: 2 token 序列，相同 key，不同 value
     # 绕开投影：直接操作 W 验证数学
     B, H, d_k, d_v = 1, 1, 8, 8
@@ -107,14 +107,14 @@ def test_delta_rule_subtract_interference():
 
 def test_no_softmax_in_write():
     """静态断言 write_from_content 里没有 F.softmax / torch.softmax"""
-    src = inspect.getsource(StateInterface.write_from_content)
+    src = inspect.getsource(FactInterface.write_from_content)
     assert "softmax" not in src.lower(), \
         "Delta Rule 写路径绝对不允许 softmax（零 Softmax 约束）"
 
 
 def test_gradient_flow():
     """梯度能通过 read + write 流回各个投影"""
-    iface = StateInterface(hidden_size=32, n_heads=2, head_dim=8, n_layers=2)
+    iface = FactInterface(hidden_size=32, n_heads=2, head_dim=8, n_layers=2)
     W = iface.blank_state(1)
     hidden = torch.randn(1, 8, 32)
     out = iface.read_layer(hidden, W, layer_idx=0)
@@ -131,7 +131,7 @@ def test_gradient_flow():
 
 def test_decoupled_dims():
     """n_heads * head_dim 可以不等于 hidden_size（内部投影桥接）"""
-    iface = StateInterface(hidden_size=64, n_heads=8, head_dim=32, n_layers=2)
+    iface = FactInterface(hidden_size=64, n_heads=8, head_dim=32, n_layers=2)
     W = iface.blank_state(2)
     assert W.shape == (2, 8, 32, 32)
     hidden = torch.randn(2, 16, 64)
@@ -144,7 +144,7 @@ def test_decoupled_dims():
 
 def test_v5c_minimal_surface():
     """v5c: 确认已删除 v5a/v5b 的 slot 架构字段和 API"""
-    iface = StateInterface(hidden_size=32, n_heads=2, head_dim=8, n_layers=2)
+    iface = FactInterface(hidden_size=32, n_heads=2, head_dim=8, n_layers=2)
     # 删除的字段
     for attr in [
         # v4 EKS 遗产
@@ -183,14 +183,14 @@ def test_param_count_budget():
     hidden=1024, n_heads=16, n_layers=6:
       head_dim=64: q/o/k/v 投影都是 1024→1024，约 14.7M
       head_dim=128: 投影变 1024→2048，约 28M"""
-    iface64 = StateInterface(
+    iface64 = FactInterface(
         hidden_size=1024, n_heads=16, head_dim=64, n_layers=6,
     )
     total64 = sum(p.numel() for p in iface64.parameters())
     assert 13_000_000 < total64 < 17_000_000, \
         f"head_dim=64 参数量超预算，实际 {total64:,}"
 
-    iface128 = StateInterface(
+    iface128 = FactInterface(
         hidden_size=1024, n_heads=16, head_dim=128, n_layers=6,
     )
     total128 = sum(p.numel() for p in iface128.parameters())
@@ -208,8 +208,8 @@ def test_delta_parallel_matches_loop():
     v = torch.randn(B, H, T, d_v, dtype=torch.float64)
     beta = torch.sigmoid(torch.randn(B, H, T, dtype=torch.float64))
 
-    W_loop = StateInterface._delta_loop(W0.clone(), k, v, beta, T)
-    W_par = StateInterface._delta_parallel(W0.clone(), k, v, beta)
+    W_loop = FactInterface._delta_loop(W0.clone(), k, v, beta, T)
+    W_par = FactInterface._delta_parallel(W0.clone(), k, v, beta)
     diff = (W_loop - W_par).abs().max().item()
     assert diff < 1e-8, f"parallel vs loop 数值不一致: max|diff|={diff}"
 
@@ -221,14 +221,14 @@ def test_delta_parallel_gradient_flow():
     k = torch.nn.functional.normalize(torch.randn(B, H, T, d_k, requires_grad=True), dim=-1)
     v = torch.randn(B, H, T, d_v, requires_grad=True)
     beta = torch.sigmoid(torch.randn(B, H, T, requires_grad=True))
-    W_new = StateInterface._delta_parallel(W0, k, v, beta)
+    W_new = FactInterface._delta_parallel(W0, k, v, beta)
     W_new.sum().backward()
     assert W0.grad is not None
 
 
 def test_write_then_read_end_to_end():
     """端到端：write 后用不同 content 触发 read，验证形状/非 NaN"""
-    iface = StateInterface(hidden_size=32, n_heads=4, head_dim=8, n_layers=2)
+    iface = FactInterface(hidden_size=32, n_heads=4, head_dim=8, n_layers=2)
     W = iface.blank_state(2)
     content = torch.randn(2, 16, 32)
     W_new = iface.write_from_content(W, content)

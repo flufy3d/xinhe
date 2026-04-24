@@ -124,11 +124,12 @@ def test_state_detach_in_tbptt():
 
 
 def test_v5a_two_param_groups():
-    """v5a: optimizer 只分 plugin / lora 两组 (lora_rank=0 时仅 plugin 一组)"""
+    """v6: optimizer 分 fact / turn / lora 三组 (lora_rank=0 时仅 fact+turn 两组，turn off 时仅 fact 一组)"""
     config = XinheConfig(
         hidden_size=32, n_heads=4, head_dim=8,
         read_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
         tbptt_steps=2, device="cpu", dtype="float32",
+        enable_turn_memory=False,   # 显式关闭，回到单 fact 路径
     )
     backbone = TinyBackbone()
     model = XinheModel(config, backbone=backbone)
@@ -139,8 +140,20 @@ def test_v5a_two_param_groups():
     from xinhe.training.trainer import Trainer
     trainer = Trainer(model, config, loader)
 
-    # lora_rank=0 → 没有 LoRA 参数组, 只剩 plugin 一组
+    # turn_off + lora_rank=0 → 只剩 fact 一组
     assert len(trainer.optimizer.param_groups) == 1
+
+    # 开启 turn → fact + turn 两组
+    config2 = XinheConfig(
+        hidden_size=32, n_heads=4, head_dim=8,
+        read_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
+        tbptt_steps=2, device="cpu", dtype="float32",
+        enable_turn_memory=True,
+    )
+    backbone2 = TinyBackbone()
+    model2 = XinheModel(config2, backbone=backbone2)
+    trainer2 = Trainer(model2, config2, loader)
+    assert len(trainer2.optimizer.param_groups) == 2
 
 
 def test_v5a_plugin_lr_multiplier():

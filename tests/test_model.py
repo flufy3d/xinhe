@@ -9,7 +9,7 @@ import torch.nn as nn
 
 from xinhe.model.config import XinheConfig
 from xinhe.model.backbone import BackboneBase
-from xinhe.model.state_plugin import StateInterface
+from xinhe.model.fact_plugin import FactInterface
 from xinhe.model.xinhe_model import XinheModel
 
 
@@ -88,7 +88,7 @@ def test_forward_with_labels(model):
 
 
 def test_state_persistence(model):
-    """状态在多个 segment 间传递"""
+    """状态在多个 segment 间传递（v6 DualState：只验证 W_fact 的持续演化）"""
     B, T = 1, 8
     state = model.init_state(B)
     states = [state.clone()]
@@ -99,10 +99,10 @@ def test_state_persistence(model):
         state = result["state_next"]
         states.append(state.clone())
 
-    # 状态应该在变化
+    # W_fact 应该在每步变化
     for i in range(1, len(states)):
-        assert not torch.allclose(states[i], states[0], atol=1e-6), \
-            f"状态在 segment {i} 没有变化"
+        assert not torch.allclose(states[i].W_fact, states[0].W_fact, atol=1e-6), \
+            f"W_fact 在 segment {i} 没有变化"
 
 
 def test_gradient_flow(model):
@@ -122,9 +122,9 @@ def test_gradient_flow(model):
     loss = result_2["loss"]
     loss.backward()
 
-    # StateInterface 参数应该有梯度 (v5c: q/k/v/beta/o projections)
-    assert model.state_interface.k_proj.weight.grad is not None
-    assert model.state_interface.beta_proj.weight.grad is not None
+    # FactInterface 参数应该有梯度 (v6: q/k/v/beta/o projections)
+    assert model.fact_interface.k_proj.weight.grad is not None
+    assert model.fact_interface.beta_proj.weight.grad is not None
 
 
 def test_generate(model):
@@ -179,8 +179,9 @@ def test_forward_with_decoupled_dims():
     assert result["state_next"].shape == (B, 4, 8, 8)
     assert result["loss"].item() > 0
 
-    # 梯度流通过 read/write 投影
-    state_loss = result["state_next"].sum() + result["loss"]
+    # 梯度流通过 read/write 投影（v6: state 为 DualState，聚合两流）
+    state_next = result["state_next"]
+    state_loss = state_next.W_fact.sum() + state_next.W_turn.sum() + result["loss"]
     state_loss.backward()
-    assert model.state_interface.q_projs[0].weight.grad is not None
-    assert model.state_interface.v_proj.weight.grad is not None
+    assert model.fact_interface.q_projs[0].weight.grad is not None
+    assert model.fact_interface.v_proj.weight.grad is not None

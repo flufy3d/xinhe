@@ -101,7 +101,11 @@ def main():
 
     model = XinheModel(config)
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
-    model.state_interface.load_state_dict(checkpoint["plugin_state"], strict=False)
+    if "fact_plugin_state" not in checkpoint:
+        raise RuntimeError(
+            "checkpoint 缺少 'fact_plugin_state' 键。v6 不再兼容旧 'plugin_state' 格式。"
+        )
+    model.fact_interface.load_state_dict(checkpoint["fact_plugin_state"], strict=False)
     model.to(device)
     model.eval()
 

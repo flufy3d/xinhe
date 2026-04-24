@@ -1,8 +1,8 @@
 """
-人工验收脚本 — 测 persona_unified.pt 是否修好三大问题。
+人工验收脚本 — 测 1_persona_unified_dual.pt 是否修好三大问题。
 
 用法:
-    python scripts/chat_smoke.py --ckpt checkpoints/curriculum/persona_unified.pt
+    python scripts/chat_smoke.py --ckpt checkpoints/curriculum/1_persona_unified_dual.pt
 
 测试场景:
     [A] 世界知识（Problem 3）: 单轮 QA，无状态
@@ -237,11 +237,109 @@ def test_D_overwrite(model, tokenizer, device):
     return hit, 1
 
 
+def test_G_verbatim(model, tokenizer, device):
+    """W_turn 原生能力：整段复述（0b_turn_bootstrap 训练的核心任务）。"""
+    print("=" * 60)
+    print("[G] W_turn 整段复述（0b 核心能力，训完 stage 1 看是否保留）")
+    print("=" * 60)
+    cases = [
+        ("记住这句话: 3 k 7 X p 9 m 2", "刚才那句话是？", "3 k 7 X p 9 m 2"),
+        ("请记住: R 8 f B 5 Q 3", "我刚让你记的那句是？", "R 8 f B 5 Q 3"),
+        ("你帮我记一下: L 2 e n 9 K", "把那句再说一遍", "L 2 e n 9 K"),
+    ]
+    hit = 0
+    for setup, recall_q, expected in cases:
+        state = model.init_state(1).to(device)
+        _, state = run_turn(model, tokenizer, state, setup, "G")
+        # 插 1 条 distractor
+        _, state = run_turn(model, tokenizer, state, "今天天气怎么样", "G")
+        r, _ = run_turn(model, tokenizer, state, recall_q, "G", [expected])
+        ok = expected in r
+        print(f"[G] 期望 {expected!r}, 实际 {r[:60]!r} → {'✓' if ok else '✗'}")
+        hit += int(ok)
+    total = len(cases)
+    print(f"[G] 整段复述: {hit}/{total}")
+    return hit, total
+
+
+def test_I_adversarial_temporal(model, tokenizer, device):
+    """W_turn 相位选择考核：3 条 random alnum phrase + filler 间隔 + 按时序查询指定一条。
+    这是 0b 对抗集课程的核心考核 —— 选错 τ → 读出错 phrase。"""
+    print("=" * 60)
+    print("[I] W_turn 对抗集相位选择（0b adversarial_temporal 核心能力）")
+    print("=" * 60)
+
+    def _run_adv_scenario(setup_phrases, filler_msgs, query, expected):
+        """跑一个完整对抗 episode，返回 (hit, response)。"""
+        state = model.init_state(1).to(device)
+        # 3 个 setup 交错 2 个 filler：S0, F0, S1, F1, S2
+        assert len(setup_phrases) == 3 and len(filler_msgs) == 2
+        setup_templates = ["记一下: {p}", "帮我记一句: {p}", "再记一段: {p}"]
+        for i in range(3):
+            _, state = run_turn(
+                model, tokenizer, state,
+                setup_templates[i].format(p=setup_phrases[i]), "I",
+            )
+            if i < 2:
+                _, state = run_turn(model, tokenizer, state, filler_msgs[i], "I")
+        r, _ = run_turn(model, tokenizer, state, query, "I", [expected])
+        return (expected in r), r
+
+    # 3 条固定 phrase；3 组 query 类型：earliest / middle / latest / distance
+    phrases = ["3 k 7 X p 9", "R 8 f B 5 Q", "L 2 e n 9 K"]
+    fillers = ["今天天气怎么样？", "推荐一本好看的书吧。"]
+
+    scenarios = [
+        # (query, target_phrase, query_label)
+        ("我最早说的那句是什么？原话。", phrases[0], "earliest"),
+        ("中间那句我说的啥？原话。",     phrases[1], "middle"),
+        ("我最后说的那句是？原话。",     phrases[2], "latest"),
+        # distance: recall 在 turn 5，S0 dtau=4, S1 dtau=2, S2 dtau=0
+        ("4 轮前我说的那句是？原话。", phrases[0], "dist_4"),
+        ("2 轮前我说的那句是？原话。", phrases[1], "dist_2"),
+    ]
+    hit = 0
+    for query, expected, label in scenarios:
+        ok, resp = _run_adv_scenario(phrases, fillers, query, expected)
+        print(f"[I:{label}] 期望 {expected!r}, 实际 {resp[:60]!r} → {'✓' if ok else '✗'}")
+        hit += int(ok)
+    total = len(scenarios)
+    print(f"[I] 对抗集相位选择: {hit}/{total}")
+    return hit, total
+
+
+def test_H_meta_recall(model, tokenizer, device):
+    """W_turn 原生能力：元认知自指（"我刚才说了什么"）。"""
+    print("=" * 60)
+    print("[H] W_turn 元认知自指召回")
+    print("=" * 60)
+    cases = [
+        ("晴天打雷树叶掉一地", "我刚才说了什么？", "晴天打雷树叶掉一地"),
+        ("咖啡豆磨成细细的粉末", "我上一轮说的是什么？", "咖啡豆磨成细细的粉末"),
+    ]
+    hit = 0
+    for setup, recall_q, expected in cases:
+        state = model.init_state(1).to(device)
+        _, state = run_turn(model, tokenizer, state, setup, "H")
+        _, state = run_turn(model, tokenizer, state, "你今天吃了什么？", "H")
+        r, _ = run_turn(model, tokenizer, state, recall_q, "H", [expected])
+        ok = expected in r
+        print(f"[H] 期望 {expected!r}, 实际 {r[:60]!r} → {'✓' if ok else '✗'}")
+        hit += int(ok)
+    total = len(cases)
+    print(f"[H] 元认知自指: {hit}/{total}")
+    return hit, total
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt", type=str,
-                   default="checkpoints/curriculum/persona_unified.pt")
+                   default="checkpoints/curriculum/1_persona_unified_dual.pt")
     p.add_argument("--config", type=str, default="configs/qwen3.5-0.8b.yaml")
+    p.add_argument("--turn-phase-max", type=int, default=None,
+                   help="推理时覆盖 W_turn 多相位搜索窗口 (默认用 ckpt config 值)")
+    p.add_argument("--turn-phase-temperature", type=float, default=None,
+                   help="推理时覆盖 W_turn softmax 温度 (越大选择越锐利)")
     args = p.parse_args()
 
     config, _ = XinheConfig.from_yaml(args.config)
@@ -252,12 +350,24 @@ def main():
     ensure_chat_template(tokenizer)
     model.eval()
 
+    if args.turn_phase_max is not None and model.turn_interface is not None:
+        old = model.turn_interface.phase_max
+        model.turn_interface.phase_max = args.turn_phase_max
+        print(f"  turn_phase_max: {old} → {args.turn_phase_max}")
+    if args.turn_phase_temperature is not None and model.turn_interface is not None:
+        old = model.turn_interface.phase_temperature
+        model.turn_interface.phase_temperature = args.turn_phase_temperature
+        print(f"  turn_phase_temperature: {old} → {args.turn_phase_temperature}")
+
     a_hit, a_total = test_A_world_knowledge(model, tokenizer, device)
     b_hit, b_total = test_B_refusal(model, tokenizer, device)
     c_hit, c_total = test_C_multi_fact(model, tokenizer, device)
     d_hit, d_total = test_D_overwrite(model, tokenizer, device)
     e_hit, e_total = test_E_retention(model, tokenizer, device)
     f_hit, f_total = test_F_multi_slot_retention(model, tokenizer, device)
+    g_hit, g_total = test_G_verbatim(model, tokenizer, device)
+    h_hit, h_total = test_H_meta_recall(model, tokenizer, device)
+    i_hit, i_total = test_I_adversarial_temporal(model, tokenizer, device)
 
     print("=" * 60)
     print("  人工验收总结")
@@ -268,8 +378,11 @@ def main():
     print(f"  [D] 覆写召回:         {d_hit}/{d_total}")
     print(f"  [E] 单槽穿插召回:      {e_hit}/{e_total}")
     print(f"  [F] 多槽 retention:   {f_hit}/{f_total}   ← 用户 turn 6 丢年龄的 pattern")
-    total_hit = a_hit + b_hit + c_hit + d_hit + e_hit + f_hit
-    total = a_total + b_total + c_total + d_total + e_total + f_total
+    print(f"  [G] W_turn 整段复述:  {g_hit}/{g_total}   ← 0b 单条目能力")
+    print(f"  [H] W_turn 元认知:    {h_hit}/{h_total}   ← '我刚才说了什么'")
+    print(f"  [I] W_turn 相位选择:  {i_hit}/{i_total}   ← 0b 对抗集核心（最早/中间/最后/N 轮前）")
+    total_hit = a_hit + b_hit + c_hit + d_hit + e_hit + f_hit + g_hit + h_hit + i_hit
+    total = a_total + b_total + c_total + d_total + e_total + f_total + g_total + h_total + i_total
     print(f"  合计:                 {total_hit}/{total} ({total_hit/total:.1%})")
 
 

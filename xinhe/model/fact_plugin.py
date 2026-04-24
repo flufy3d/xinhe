@@ -1,5 +1,8 @@
 """
-StateInterface (v5c) — Delta Rule 联想记忆矩阵
+FactInterface (v6) — Delta Rule 联想记忆矩阵（W_fact，双流中的绝对语义空间）
+
+v6 双流：与 TurnInterface (W_turn, 自旋时序罗盘) 并行注入 full_attention 层前。
+FactInterface 继承自 v5c 设计，负责稳定的事实/语义记忆；TurnInterface 负责跨轮时序。
 
 v5c 减法续集：
   删 slot 机制 (state_emb, write_q/out, gate_proj, value_head,
@@ -17,7 +20,7 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint as grad_checkpoint
 
 
-class StateInterface(nn.Module):
+class FactInterface(nn.Module):
     """Delta-Rule 联想记忆。W: (B,H,d_v,d_k)，线性读 + Delta Rule 写。"""
 
     def __init__(

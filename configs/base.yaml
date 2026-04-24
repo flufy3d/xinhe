@@ -11,7 +11,7 @@ backbone:
   hidden_size: 1024
   freeze: true
 
-# --- StateInterface (v5c: Delta Rule 联想记忆 W: (B,H,d_v,d_k)) ---
+# --- FactInterface (v6: Delta Rule 联想记忆 W_fact: (B,H,d_v,d_k)) ---
 # read_scale_init=-3 (初始 scale≈0.047): 平衡读强度
 # beta_bias_init=-2 (初始 β=0.12): 写入温和，让 W 稳定建立，避免激进累积
 # head_dim=128 (第二轮): 同类 key 正交化瓶颈 → 扩 key/value 维度，单样本 W 从 64K→256K floats

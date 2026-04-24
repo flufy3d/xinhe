@@ -142,7 +142,7 @@
 
 ---
 
-## 已停止的方向（legacy，保留在代码库作参考）
+## 已停止的方向
 
 | 方向 | 停止原因 |
 |---|---|
@@ -153,6 +153,9 @@
 | Think 课程 | TELL 66% 失败，4b backbone 自带 |
 | 13-stage memory curriculum | 窄分布，LoRA 漂 |
 | 基座迁移（migrate_*） | 暂未在 v5c 验证 |
+| W_turn 多相位对抗集（v6.3） | phase_mode ≈ dtau 均值即未学会，见 `failure_postmortem.md` |
+
+legacy 课程和迁移相关的 config/code 已清理。历史记录保留作训练范式演化参考。
 
 **注**：Memory MLP + Sleep 不是 retired —— 是**未来工作**（见 "中期：长期记忆固化"）。当前 W 是短期记忆，MLP + Sleep 是规划中的长期记忆层。
 

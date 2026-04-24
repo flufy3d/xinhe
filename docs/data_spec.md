@@ -197,9 +197,9 @@ Val 集 seed 固定（12345），跨训练可比。
 
 ---
 
-## 6. 合成记忆数据（legacy，bootstrap stage 仍用）
+## 6. 合成记忆数据（Stage 0a fact bootstrap 用）
 
-**生成器**：`xinhe/data/generate_memory_data.py`（老的纯 memory 数据生成，用于 persona_unified 的 Stage 0 bootstrap 和老 13-stage curriculum）。
+**生成器**：`xinhe/data/generate_memory_data.py`（纯 memory 数据生成，persona_unified 的 Stage 0a fact bootstrap 用于教 W_fact 的 Delta Rule 读写原语）。
 
 ### 6.1 生成脚本
 
@@ -208,7 +208,7 @@ Val 集 seed 固定（12345），跨训练可比。
 python -m xinhe.data.generate_memory_data --preview 3
 
 # 完整 CLI 通过 scripts/generate_data.py
-python scripts/generate_data.py --config configs/persona_unified.yaml --stage 0_bootstrap
+python scripts/generate_data.py --config configs/persona_unified_0.8b.yaml --stage 0a_fact_bootstrap
 ```
 
 ### 6.2 Episode 结构模板
@@ -218,8 +218,7 @@ Bootstrap stage 用最简单的 2-turn：
 [告知 fact] → [recall fact]
 ```
 
-老 curriculum 支持更复杂的 episode（可见 `curriculum.yaml` 的各 stage data 段）：
-- 多 fact × 多 entity × 不同距离 × 覆写 × 对话回忆 × think 模板
+生成器支持更复杂的 episode 类型（多 fact × 多 entity × 不同距离 × 覆写 × 对话回忆），持久化在代码中但当前 Stage 0a 只用最简形式（1 fact、2 turn、no filler）。
 
 ---
 
@@ -259,4 +258,4 @@ data/
 
 `data/cache/*` 和 `data/val/*` 是手动建一次后持久复用的（对应 `scripts/build_chat_cache.py` / `scripts/build_val_sets.py`）。`data/curriculum/*` 是 train.py 按需生成的。
 
-路径通过 `data:` 段配置（见 `configs/persona_unified.yaml`）。
+路径通过 `data:` 段配置（见 `configs/persona_unified_0.8b.yaml`）。

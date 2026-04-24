@@ -14,11 +14,9 @@
     python scripts/chat.py
     python scripts/chat.py --checkpoint checkpoints/xinhe_step_5000.pt
     python scripts/chat.py --state saved_states/james.pt
-    python scripts/chat.py --hide-think      # 隐藏思考过程
     python scripts/chat.py --no-stream       # 关闭流式逐字输出
 """
 import argparse
-import re
 import sys
 from pathlib import Path
 
@@ -92,9 +90,11 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=512, help="最大生成 token 数")
     parser.add_argument("--temperature", type=float, default=0.85)
     parser.add_argument("--top-p", type=float, default=0.95)
-    parser.add_argument("--think", action="store_true", help="启用思考模式 (生成时以 <think> 开头)")
-    parser.add_argument("--hide-think", action="store_true", help="隐藏 <think> 推理过程")
     parser.add_argument("--no-stream", action="store_true", help="关闭流式输出")
+    parser.add_argument("--turn-phase-max", type=int, default=None,
+                        help="推理时覆盖 W_turn 多相位搜索窗口 (默认用 ckpt config 值)")
+    parser.add_argument("--turn-phase-temperature", type=float, default=None,
+                        help="推理时覆盖 W_turn softmax 温度 (越大选择越锐利)")
     args = parser.parse_args()
 
     # 加载 checkpoint（如提供）
@@ -127,9 +127,18 @@ def main():
             if (ckpt_cfg.backbone_type != config.backbone_type) or (ckpt_cfg.hidden_size != config.hidden_size):
                 print("  警告: --config 与 checkpoint 不匹配。")
         try:
-            result = model.state_interface.load_state_dict(checkpoint["plugin_state"], strict=False)
+            if "fact_plugin_state" not in checkpoint:
+                raise RuntimeError(
+                    "checkpoint 缺少 'fact_plugin_state' 键。v6 不再兼容旧 'plugin_state' 格式。"
+                )
+            result = model.fact_interface.load_state_dict(checkpoint["fact_plugin_state"], strict=False)
             if result.missing_keys:
                 print(f"  注意: checkpoint 缺少 {result.missing_keys}，使用默认初始化")
+            # 加载 turn_plugin（若 ckpt 含此键且 model 有 turn_interface）
+            if "turn_plugin_state" in checkpoint and model.turn_interface is not None:
+                tres = model.turn_interface.load_state_dict(checkpoint["turn_plugin_state"], strict=False)
+                if tres.missing_keys:
+                    print(f"  注意: turn_plugin_state 缺失 {tres.missing_keys}（保持随机初始化）")
         except RuntimeError as e:
             raise RuntimeError(
                 "checkpoint 与 --config 不匹配。"
@@ -147,6 +156,16 @@ def main():
 
     model.to(device)
     model.eval()
+
+    # 推理时覆写 turn_phase_max / turn_phase_temperature（都是运行时标量，不影响权重）
+    if args.turn_phase_max is not None and model.turn_interface is not None:
+        old = model.turn_interface.phase_max
+        model.turn_interface.phase_max = args.turn_phase_max
+        print(f"  turn_phase_max: {old} → {args.turn_phase_max}")
+    if args.turn_phase_temperature is not None and model.turn_interface is not None:
+        old = model.turn_interface.phase_temperature
+        model.turn_interface.phase_temperature = args.turn_phase_temperature
+        print(f"  turn_phase_temperature: {old} → {args.turn_phase_temperature}")
 
     # 加载 tokenizer
     tokenizer = load_tokenizer(config)
@@ -250,14 +269,10 @@ def main():
             messages, tokenize=False, add_generation_prompt=True,
         )
         input_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
-        if args.think:
-            think_prefix = tokenizer.encode("<think>\n", add_special_tokens=False)
-            input_ids = input_ids + think_prefix
         input_tensor = torch.tensor([input_ids], dtype=torch.long, device=device)
 
         # eos token id
         eos_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
-        show_think = not args.hide_think
         stream = not args.no_stream
 
         # --- 流式输出 ---
@@ -265,13 +280,11 @@ def main():
             print(f"\n心核: ", end="", flush=True)
             token_buf = []       # 累积 token id，用于增量解码
             printed_len = 0      # 已打印的字符数
-            in_think = False     # 当前是否在 <think> 块中
-            suppressing = False  # hide-think 时抑制输出
             skip_ids = {tokenizer.convert_tokens_to_ids(t)
                         for t in ["</s>", "<|im_end|>", "<|endoftext|>"]} - {None}
 
             def _stream_token(token_id: int):
-                nonlocal printed_len, in_think, suppressing
+                nonlocal printed_len
                 if token_id in skip_ids:
                     return
                 token_buf.append(token_id)
@@ -279,28 +292,6 @@ def main():
                 new_text = text[printed_len:]
                 if not new_text:
                     return
-
-                # 检测 think 标签
-                if "<think>" in new_text:
-                    in_think = True
-                    if show_think:
-                        new_text = new_text.replace("<think>", "\n  [思考] ")
-                    else:
-                        suppressing = True
-                        printed_len = len(text)
-                        return
-                if "</think>" in new_text:
-                    in_think = False
-                    if show_think:
-                        new_text = new_text.replace("</think>", "\n  [/思考]\n")
-                    else:
-                        suppressing = False
-                        printed_len = len(text)
-                        return
-                if suppressing:
-                    printed_len = len(text)
-                    return
-
                 print(new_text, end="", flush=True)
                 printed_len = len(text)
 
@@ -331,13 +322,9 @@ def main():
             for tag in ["</s>", "<|im_end|>", "<|endoftext|>"]:
                 response = response.replace(tag, "")
             response = response.strip()
-            if show_think:
-                response = response.replace("<think>", "\n  [思考] ").replace("</think>", "\n  [/思考]\n")
-            else:
-                response = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL).strip()
             print(f"\n心核: {response}")
 
-        print(f"  [轮次 {turn_count} | scale={torch.sigmoid(model.state_interface.read_scale).item():.3f}]")
+        print(f"  [轮次 {turn_count} | scale={torch.sigmoid(model.fact_interface.read_scale).item():.3f}]")
 
 
 

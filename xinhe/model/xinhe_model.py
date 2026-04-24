@@ -1,7 +1,7 @@
 """
 XinheModel — 顶层模型
 
-组合 backbone + StateInterface，实现:
+组合 backbone + FactInterface (+ TurnInterface 可选)，实现:
 - 带持久状态的 forward pass（通过 layer_hook 注入 state）
 - 带状态的文本生成
 - Burn-in 初始化
@@ -13,13 +13,15 @@ from typing import Optional
 
 from .config import XinheConfig
 from .backbone import BackboneBase
-from .state_plugin import StateInterface
+from .fact_plugin import FactInterface
+from .turn_plugin import TurnInterface
+from .dual_state import DualState
 from .lora import inject_lora, get_lora_params
 
 
 class XinheModel(nn.Module):
     """
-    心核模型: Backbone + StateInterface
+    心核模型: Backbone + FactInterface (+ TurnInterface 可选)
 
     前向传播 (v5c):
         embed → backbone.forward_blocks(layer_hook=state_read(W)) → write_from_content(Delta Rule) → logits + W
@@ -46,12 +48,12 @@ class XinheModel(nn.Module):
                 dropout=config.lora_dropout,
             )
 
-        # StateInterface (v5c: Delta Rule 联想记忆 W)
+        # FactInterface (v6 双流: W_fact Delta Rule 联想记忆)
         # 只在 full attention 层前注入 state（DeltaNet 层跳过）
         self._hook_layer_indices = self.backbone.get_hook_layer_indices()
         n_hook_layers = len(self._hook_layer_indices)
         self._hook_layer_set = set(self._hook_layer_indices)
-        self.state_interface = StateInterface(
+        self.fact_interface = FactInterface(
             hidden_size=config.hidden_size,
             n_heads=config.n_heads,
             head_dim=config.head_dim,
@@ -59,6 +61,23 @@ class XinheModel(nn.Module):
             read_scale_init=config.read_scale_init,
             beta_bias_init=config.beta_bias_init,
         )
+
+        # TurnInterface (v6 双流: W_turn 自旋时序罗盘) —— enable_turn_memory=False 时为 None
+        if getattr(config, "enable_turn_memory", False):
+            self.turn_interface = TurnInterface(
+                fact_interface=self.fact_interface,   # 复用 k_proj/v_proj（写侧 0 可学参数）
+                hidden_size=config.hidden_size,
+                n_heads=config.n_heads,
+                head_dim=config.head_dim,
+                n_layers=n_hook_layers,
+                turn_read_scale_init=getattr(config, "turn_read_scale_init", -8.0),
+                turn_gamma=getattr(config, "turn_gamma", 0.9),
+                turn_rotation_base=getattr(config, "turn_rotation_base", 10000.0),
+                turn_phase_max=getattr(config, "turn_phase_max", 5),
+                turn_phase_temperature=getattr(config, "turn_phase_temperature", 5.0),
+            )
+        else:
+            self.turn_interface = None
 
         # LM head (复用 backbone 的)
         self.lm_head = self.backbone.get_lm_head()
@@ -76,7 +95,7 @@ class XinheModel(nn.Module):
 
         参数:
             input_ids: (B, T) token ids
-            state: (B, H, d_v, d_k) 当前 Delta Rule 联想记忆 W
+            state: DualState(W_fact, W_turn) 或兼容兼容旧单 W tensor (B,H,d_v,d_k)
             labels: (B, T) 可选，用于计算 loss
             pad_token_id: 可选，padding token id，提供时自动遮蔽 padding
             weights: (B, T) 可选，每 token 的 loss 权重 (VALUE token=5.0, 其他=1.0, pad=0.0);
@@ -85,26 +104,41 @@ class XinheModel(nn.Module):
         返回:
             dict:
                 logits: (B, T, V)
-                state_next: (B, H, d_v, d_k)
+                state_next: DualState（或兼容模式下的单 W tensor）
                 loss: scalar (如果提供了 labels)
         """
         B, T = input_ids.shape
         device = input_ids.device
 
+        # 兼容：如果 state 是 bare tensor（无 turn），包装为 DualState（W_turn 用零）
+        if not isinstance(state, DualState):
+            zero_turn = torch.zeros_like(state)
+            state = DualState(state, zero_turn)
+        W_fact = state.W_fact
+        W_turn = state.W_turn
+
         # 1. 嵌入内容 token
         content_emb = self.backbone.embed(input_ids)  # (B, T, D)
 
         # 2. 构建 layer_hook: 只在 full attention 层前执行线性读
-        #    backbone layer_idx → state_interface 第几个 q/o_proj 的映射
+        #    backbone layer_idx → fact_interface 第几个 q/o_proj 的映射
         hook_layer_set = self._hook_layer_set
         hook_idx_map = {layer_idx: kv_idx for kv_idx, layer_idx in enumerate(self._hook_layer_indices)}
+
+        # 读侧屏蔽开关（bootstrap stage 强制单流 clean 训练）
+        suppress_fact = getattr(self.config, "suppress_fact_read", False)
+        suppress_turn = getattr(self.config, "suppress_turn_read", False)
 
         def state_read_hook(hidden_states, layer_idx):
             if layer_idx not in hook_layer_set:
                 return hidden_states
-            return self.state_interface.read_layer(
-                hidden_states, state, hook_idx_map[layer_idx],
-            )
+            kv_idx = hook_idx_map[layer_idx]
+            h = hidden_states
+            if not suppress_fact:
+                h = self.fact_interface.read_layer(h, W_fact, kv_idx)
+            if self.turn_interface is not None and not suppress_turn:
+                h = self.turn_interface.read_layer(h, W_turn, kv_idx)
+            return h
 
         # 4. 标准因果 mask（只有 content，无 state token）
         causal = torch.triu(
@@ -130,11 +164,18 @@ class XinheModel(nn.Module):
             layer_hook=state_read_hook,
         )
 
-        # 7. 写侧: Delta Rule 更新 W（多卡时移回 state_interface 所在设备）
-        interface_device = next(self.state_interface.parameters()).device
+        # 7. 写侧: Delta Rule 更新 W_fact；程序性写入 W_turn（多卡时移回 fact 设备）
+        interface_device = next(self.fact_interface.parameters()).device
         content_output = content_output.to(interface_device)
-        state = state.to(interface_device)
-        state_next = self.state_interface.write_from_content(state, content_output)
+        W_fact = W_fact.to(interface_device)
+        W_fact_next = self.fact_interface.write_from_content(W_fact, content_output)
+
+        if self.turn_interface is not None:
+            W_turn = W_turn.to(interface_device)
+            W_turn_next = self.turn_interface.write_from_content(W_turn, content_output)
+        else:
+            W_turn_next = W_turn  # enable_turn_memory=false：turn 永远 0，直接透传
+        state_next = DualState(W_fact_next, W_turn_next)
 
         # 8. 计算 logits (只对内容部分)
         logits = self.lm_head(content_output)  # (B, T, V)
@@ -186,17 +227,24 @@ class XinheModel(nn.Module):
     def setup_device(self, device: torch.device):
         """
         单卡: 整个模型移到 device。
-        多卡: backbone 已由 device_map 分配，只移 state_interface。
+        多卡: backbone 已由 device_map 分配，只移 fact_interface/turn_interface。
         """
         if torch.cuda.device_count() > 1:
-            self.state_interface.to(device)
+            self.fact_interface.to(device)
+            if self.turn_interface is not None:
+                self.turn_interface.to(device)
         else:
             self.to(device)
 
-    def init_state(self, batch_size: int = 1) -> torch.Tensor:
-        """创建空白初始状态"""
+    def init_state(self, batch_size: int = 1) -> DualState:
+        """创建空白初始状态 DualState(W_fact, W_turn)。"""
         device = next(self.parameters()).device
-        return self.state_interface.blank_state(batch_size, device=device)
+        W_fact = self.fact_interface.blank_state(batch_size, device=device)
+        if self.turn_interface is not None:
+            W_turn = self.turn_interface.blank_state(batch_size, device=device)
+        else:
+            W_turn = torch.zeros_like(W_fact)
+        return DualState(W_fact, W_turn)
 
     @torch.no_grad()
     def burn_in(self, token_ids_list: list[torch.Tensor], batch_size: int = 1) -> torch.Tensor:
@@ -304,13 +352,19 @@ class XinheModel(nn.Module):
         return generated, state_next
 
     def get_trainable_params(self) -> list[nn.Parameter]:
-        """收集所有可训练参数 (StateInterface + LoRA)"""
+        """收集所有可训练参数 (FactInterface + TurnInterface + LoRA)"""
         params = []
 
-        # StateInterface 参数
-        for param in self.state_interface.parameters():
+        # FactInterface 参数
+        for param in self.fact_interface.parameters():
             if param.requires_grad:
                 params.append(param)
+
+        # TurnInterface 参数（若启用）
+        if self.turn_interface is not None:
+            for param in self.turn_interface.parameters():
+                if param.requires_grad:
+                    params.append(param)
 
         # LoRA 参数
         lora_params = get_lora_params(self.backbone)
@@ -326,6 +380,11 @@ class XinheModel(nn.Module):
         """总参数数量"""
         return sum(p.numel() for p in self.parameters())
 
-    def state_stats(self, state: torch.Tensor) -> dict:
-        """获取状态分析统计"""
-        return self.state_interface.get_state_stats(state)
+    def state_stats(self, state) -> dict:
+        """获取状态分析统计。state 可以是 DualState 或 bare tensor (兼容)。"""
+        if isinstance(state, DualState):
+            stats = {"fact": self.fact_interface.get_state_stats(state.W_fact)}
+            if self.turn_interface is not None:
+                stats["turn"] = self.turn_interface.get_state_stats(state.W_turn)
+            return stats
+        return self.fact_interface.get_state_stats(state)

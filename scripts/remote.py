@@ -89,13 +89,20 @@ def cmd_deploy(args):
     print(f"  远端: {remote_dir}")
     print("=" * 54)
 
-    # 1. 同步代码
+    # 1. 同步代码 + 非生成数据（cache 由 DeepSeek API 采样 / val 由本地 build_val_sets 产出；
+    #    data/curriculum/ 是远端可重新生成的训练数据，太大，排除）
     print("\n[1/3] 同步代码...")
     run(ssh_base(host, port) + [f"mkdir -p {remote_dir}"])
+    tar_paths = [
+        "xinhe", "scripts", "configs", "tests", "pyproject.toml", "uv.lock",
+    ]
+    for extra in ("data/cache", "data/val"):
+        if (PROJECT_ROOT / extra).exists():
+            tar_paths.append(extra)
     tar_proc = subprocess.Popen(
         ["tar", "-czf", "-",
          "--exclude=__pycache__", "--exclude=*.pyc", "--exclude=*.pyo",
-         "xinhe", "scripts", "configs", "tests", "pyproject.toml", "uv.lock"],
+         *tar_paths],
         stdout=subprocess.PIPE,
         cwd=str(PROJECT_ROOT),
     )
@@ -300,8 +307,10 @@ def cmd_start(args):
 
     # nohup 后台运行，pid 写入文件
     # bash -c 确保 & 和 $! 正确解析，disown 让进程脱离 SSH session
+    # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True 减显存碎片（v6 双流 + torch.compile 切阶段瞬时峰值）
     start_cmd = (
         f"cd {remote_dir} && "
+        f"export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True && "
         f"bash -c 'nohup {command} > {LOG_FILE} 2>&1 & "
         f"echo $! > {PID_FILE} && disown'"
     )

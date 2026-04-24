@@ -22,9 +22,11 @@ import torch
 
 from xinhe.data.conversation import ensure_chat_template
 from xinhe.data.refusal_templates import refusal_detection_regex
+from xinhe.data.turn_memory_templates import forget_detection_regex
 
 
 REFUSAL_REGEX = re.compile(refusal_detection_regex())
+FORGET_REGEX = re.compile(forget_detection_regex())
 
 
 @torch.no_grad()
@@ -273,24 +275,167 @@ def eval_compositional(model, tokenizer, val_path: str, device, seg_len=256, max
     return rate, total_eps
 
 
-def eval_persona_joint(model, tokenizer, config, device, max_episodes: int = 50) -> dict:
-    """一次调用跑 3 个新指标，返回 dict {"world_qa", "refusal", "compositional"}。
+# ═══════════════════════════════════════════════════════════════════
+# v6 W_turn 专属评测：pronoun / disentangle / rapid_overwrite / decay
+# ═══════════════════════════════════════════════════════════════════
 
-    每个指标对应自己的 val jsonl 路径（config.val_worldqa_path 等）。
-    路径为空或文件不存在时指标返回 0.0（trainer 会报告 "未达标"）。
+
+def _value_span_fullmatch(tr, tokenizer, value) -> bool:
+    """对 tr 的最后一个 value-bearing turn，检查 value 在 assistant span 的 token argmax 是否全对。"""
+    v = value if isinstance(value, str) else (value[0] if value else "")
+    if not v:
+        return False
+    full_text = tokenizer.apply_chat_template(
+        [{"role": "user", "content": tr["user"]},
+         {"role": "assistant", "content": tr["asst"]}],
+        tokenize=False, add_generation_prompt=False,
+    )
+    prefix_text = tokenizer.apply_chat_template(
+        [{"role": "user", "content": tr["user"]}],
+        tokenize=False, add_generation_prompt=True,
+    )
+    c, t = _token_accuracy_on_span(
+        tr["preds"], tr["labels"], tokenizer, v, full_text,
+        search_from=len(prefix_text),
+    )
+    return t > 0 and c == t
+
+
+def eval_pronoun_resolution(model, tokenizer, val_path: str, device, seg_len=256, max_episodes=100):
+    """Pronoun resolution: 按 target_dtau ∈ {1..4} 分桶，计算 macro 平均 VALUE 全中率。
+
+    val 集: 每 episode 最后一轮带 target_dtau 整数 + value=entity。
+    返回 (macro_avg, episodes_done)。
     """
+    path = Path(val_path)
+    if not path.exists():
+        return 0.0, 0
+
+    buckets: dict[int, list[int]] = {1: [0, 0], 2: [0, 0], 3: [0, 0], 4: [0, 0]}   # [hit, total]
+    episodes_done = 0
+
+    with open(path, "r", encoding="utf-8") as f:
+        for ln in f:
+            ln = ln.strip()
+            if not ln:
+                continue
+            if episodes_done >= max_episodes:
+                break
+            ep = json.loads(ln)
+            convs = ep.get("conversations", [])
+            # 从 jsonl 取最后一条 assistant 的 target_dtau（_forward_episode 不透传该字段）
+            dtau = None
+            for entry in reversed(convs):
+                if entry.get("role") == "assistant" and entry.get("target_dtau") is not None:
+                    dtau = int(entry["target_dtau"])
+                    break
+            if dtau not in buckets:
+                continue
+
+            turn_results = _forward_episode(model, tokenizer, ep, device, seg_len)
+            # 最后一个 recall turn
+            last = turn_results[-1] if turn_results else None
+            if last is None or not last["train_loss"] or not last["value"]:
+                continue
+            hit = _value_span_fullmatch(last, tokenizer, last["value"])
+            buckets[dtau][1] += 1
+            buckets[dtau][0] += 1 if hit else 0
+            episodes_done += 1
+
+    # macro 平均（跳过无样本桶）
+    per_bucket = [b[0] / b[1] for b in buckets.values() if b[1] > 0]
+    macro = sum(per_bucket) / max(len(per_bucket), 1)
+    return macro, episodes_done
+
+
+def eval_disentangle(model, tokenizer, val_path: str, device, seg_len=256, max_episodes=100):
+    """Disentangle: fact vs transient 召回率（anchor value span 全中比例）。"""
+    path = Path(val_path)
+    if not path.exists():
+        return 0.0, 0
+
+    hit = total = 0
+    with open(path, "r", encoding="utf-8") as f:
+        for ln in f:
+            if total >= max_episodes:
+                break
+            ln = ln.strip()
+            if not ln:
+                continue
+            ep = json.loads(ln)
+            trs = _forward_episode(model, tokenizer, ep, device, seg_len)
+            last = trs[-1] if trs else None
+            if last is None or not last["train_loss"] or not last["value"]:
+                continue
+            total += 1
+            if _value_span_fullmatch(last, tokenizer, last["value"]):
+                hit += 1
+    return hit / max(total, 1), total
+
+
+def eval_rapid_overwrite(model, tokenizer, val_path: str, device, seg_len=256, max_episodes=100):
+    """Rapid overwrite: 末轮应召回最后一个 value。逻辑与 disentangle 一致。"""
+    return eval_disentangle(model, tokenizer, val_path, device, seg_len, max_episodes)
+
+
+def eval_decay_refusal(model, tokenizer, val_path: str, device, seg_len=256, max_episodes=100):
+    """Decay refusal: 末轮应以 FORGET 模板拒答（记不太清 / 想不起 等）。"""
+    path = Path(val_path)
+    if not path.exists():
+        return 0.0, 0
+
+    refused = fabricated = 0
+    with open(path, "r", encoding="utf-8") as f:
+        for ln in f:
+            if (refused + fabricated) >= max_episodes:
+                break
+            ln = ln.strip()
+            if not ln:
+                continue
+            ep = json.loads(ln)
+            trs = _forward_episode(model, tokenizer, ep, device, seg_len)
+
+            # 最后一个 train_loss=True 且 value 为空的 turn
+            last = None
+            for tr in reversed(trs):
+                if tr["train_loss"] and not tr["value"]:
+                    last = tr
+                    break
+            if last is None:
+                continue
+            mask = last["labels"] != -100
+            if mask.sum().item() == 0:
+                continue
+            pred_ids = last["preds"][mask].tolist()
+            pred_text = tokenizer.decode(pred_ids, skip_special_tokens=True)
+            if FORGET_REGEX.search(pred_text):
+                refused += 1
+            else:
+                fabricated += 1
+
+    total = refused + fabricated
+    return refused / max(total, 1), total
+
+
+def eval_persona_joint(model, tokenizer, config, device, max_episodes: int = 50) -> dict:
+    """一次调用跑 legacy 3 + v6 新 4 共 7 个指标。路径缺失的指标返回 0.0。"""
     seg_len = getattr(config, "segment_length", 256)
     result = {}
 
     wq_path = getattr(config, "val_worldqa_path", "") or ""
     rf_path = getattr(config, "val_refusal_path", "") or ""
     cp_path = getattr(config, "val_compositional_path", "") or ""
+    # v6
+    pr_path = getattr(config, "val_pronoun_path", "") or ""
+    di_path = getattr(config, "val_disentangle_path", "") or ""
+    ro_path = getattr(config, "val_rapid_overwrite_path", "") or ""
+    dc_path = getattr(config, "val_decay_path", "") or ""
 
-    wq_acc, _ = eval_world_qa(model, tokenizer, wq_path, device, seg_len, max_episodes)
-    rf_rate, _ = eval_refusal(model, tokenizer, rf_path, device, seg_len, max_episodes)
-    cp_rate, _ = eval_compositional(model, tokenizer, cp_path, device, seg_len, max_episodes)
-
-    result["world_qa"] = wq_acc
-    result["refusal"] = rf_rate
-    result["compositional"] = cp_rate
+    result["world_qa"],        _ = eval_world_qa(model, tokenizer, wq_path, device, seg_len, max_episodes)
+    result["refusal"],         _ = eval_refusal(model, tokenizer, rf_path, device, seg_len, max_episodes)
+    result["compositional"],   _ = eval_compositional(model, tokenizer, cp_path, device, seg_len, max_episodes)
+    result["pronoun"],         _ = eval_pronoun_resolution(model, tokenizer, pr_path, device, seg_len, max_episodes)
+    result["disentangle"],     _ = eval_disentangle(model, tokenizer, di_path, device, seg_len, max_episodes)
+    result["rapid_overwrite"], _ = eval_rapid_overwrite(model, tokenizer, ro_path, device, seg_len, max_episodes)
+    result["decay_refusal"],   _ = eval_decay_refusal(model, tokenizer, dc_path, device, seg_len, max_episodes)
     return result

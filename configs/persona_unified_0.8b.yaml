@@ -1,0 +1,40 @@
+# ============================================================
+# Persona Unified Dual — Qwen3.5-0.8B 版本 (v6 双流)
+#
+# 前置：
+#   1. export DEEPSEEK_API_KEY=...
+#   2. python scripts/build_chat_cache.py   → data/cache/*.jsonl
+#   3. python scripts/build_val_sets.py     → data/val/*.jsonl (legacy 4 + v6 新 4)
+#
+# 用法（端到端 3 stage，从零训，不 warm-start 旧 persona_unified.pt）：
+#   python scripts/train.py --config configs/persona_unified_0.8b.yaml
+#
+# Stage 0a fact_bootstrap (~1500 步) → Stage 0b turn_bootstrap (~1500 步)
+#   → Stage 1 persona_unified_dual (~8000 步) → 总 ~11k 步
+# ============================================================
+base: qwen3.5-0.8b.yaml
+curriculum_file: curriculum_persona.yaml
+
+data:
+  val_worldqa_path: "data/val/val_worldqa.jsonl"
+  val_refusal_path: "data/val/val_refusal.jsonl"
+  val_compositional_path: "data/val/val_compositional.jsonl"
+  # v6 新 4 val
+  val_pronoun_path: "data/val/val_pronoun.jsonl"
+  val_disentangle_path: "data/val/val_disentangle.jsonl"
+  val_rapid_overwrite_path: "data/val/val_rapid_overwrite.jsonl"
+  val_decay_path: "data/val/val_decay.jsonl"
+
+stage_overrides:
+  default:
+    batch_size: 2
+    grad_accum_steps: 2
+  0a_fact_bootstrap:
+    batch_size: 8        # 2 轮短 ep，显存富裕
+    grad_accum_steps: 1
+  0b_turn_bootstrap:
+    batch_size: 4        # ep_len=6 比旧 4 变长，batch 降到 4 稳一点
+    grad_accum_steps: 2
+  1_persona_unified_dual:
+    batch_size: 2        # ep_len=16 后显存 ~10GB/24GB，可 batch 2
+    grad_accum_steps: 2  # 有效 batch 仍 = 4

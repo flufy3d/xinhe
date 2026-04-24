@@ -4,7 +4,7 @@ Trainer — 训练循环
 核心特性:
 - state 跨 segment (对话轮次) 传递
 - 截断 BPTT: 每 tbptt_steps 轮做 detach + backward + step
-- 只训练 StateInterface + LoRA 参数
+- 只训练 FactInterface (+ TurnInterface) + LoRA 参数
 """
 import math
 import time
@@ -52,6 +52,12 @@ class Trainer:
     ):
         self.model = model
         self.config = config
+        self.model.config = config  # 同步 model 侧 config（forward 读 suppress_*_read）
+        # 同步 turn_interface 运行时标量（model 实例化时用的是 base_config，stage_config 的 override 要补同步）
+        if getattr(self.model, "turn_interface", None) is not None:
+            ti = self.model.turn_interface
+            ti.phase_max = int(getattr(config, "turn_phase_max", ti.phase_max))
+            ti.phase_temperature = float(getattr(config, "turn_phase_temperature", ti.phase_temperature))
         self.train_dataloader = train_dataloader
         self.val_dataloader = val_dataloader
         self.pad_token_id = pad_token_id
@@ -85,25 +91,51 @@ class Trainer:
         self._ema_acc = None
 
     def _apply_freezes(self, config: XinheConfig):
-        """按配置冻结/解冻 LoRA 和 plugin 参数 (v5a: 仅支持 freeze_lora 一个开关)"""
+        """按配置冻结/解冻 LoRA / FactInterface / TurnInterface 参数。
+
+        v6 新增：
+        - freeze_fact: 0b_turn_bootstrap 阶段锁住 fact（fact 已训熟，专心训 turn）
+        - freeze_turn: 0a_fact_bootstrap 阶段锁住 turn（防止随机 turn 读侧干扰 fact 原语学习）
+        - 另：plugin_lr_multiplier=0 或 turn_lr_multiplier=0 也等效冻结
+        """
         freeze_lora = getattr(config, "freeze_lora", False)
         for p in get_lora_params(self.model.backbone):
             p.requires_grad = not freeze_lora
-        # plugin_lr_multiplier=0 表示冻结整个 plugin
-        freeze_plugin = getattr(config, "plugin_lr_multiplier", 1.0) == 0
-        for p in self.model.state_interface.parameters():
-            p.requires_grad = not freeze_plugin
+
+        freeze_fact = (
+            getattr(config, "freeze_fact", False)
+            or getattr(config, "plugin_lr_multiplier", 1.0) == 0
+        )
+        for p in self.model.fact_interface.parameters():
+            p.requires_grad = not freeze_fact
+
+        turn_iface = getattr(self.model, "turn_interface", None)
+        if turn_iface is not None:
+            freeze_turn = (
+                getattr(config, "freeze_turn", False)
+                or getattr(config, "turn_lr_multiplier", 1.0) == 0
+            )
+            for p in turn_iface.parameters():
+                p.requires_grad = not freeze_turn
 
     def _build_optimizer(self, config: XinheConfig) -> torch.optim.AdamW:
-        """构建 optimizer: Plugin / LoRA 两组独立学习率 (Adam 默认 eps)。"""
+        """构建 optimizer: Fact / Turn / LoRA 三组独立学习率 (Adam 默认 eps)。"""
         lr = config.learning_rate
         plugin_mult = getattr(config, "plugin_lr_multiplier", 1.0)
+        turn_mult = getattr(config, "turn_lr_multiplier", 1.0)
 
-        plugin_params = [p for p in self.model.state_interface.parameters() if p.requires_grad]
+        fact_params = [p for p in self.model.fact_interface.parameters() if p.requires_grad]
 
         param_groups = []
-        if plugin_params:
-            param_groups.append({"params": plugin_params, "lr": lr * plugin_mult})
+        if fact_params:
+            param_groups.append({"params": fact_params, "lr": lr * plugin_mult})
+
+        turn_iface = getattr(self.model, "turn_interface", None)
+        if turn_iface is not None:
+            turn_params = [p for p in turn_iface.parameters() if p.requires_grad]
+            if turn_params:
+                param_groups.append({"params": turn_params, "lr": lr * turn_mult})
+
         if not getattr(config, "freeze_lora", False):
             lora_params = [p for p in get_lora_params(self.model.backbone) if p.requires_grad]
             if lora_params:
@@ -175,11 +207,16 @@ class Trainer:
             self._train_epoch()
             # 注: val 已改到 _maybe_optimizer_step 里每 eval_every 步触发, 不再只在 epoch 末
 
-        scale = torch.sigmoid(self.model.state_interface.read_scale).item()
+        fact_scale = torch.sigmoid(self.model.fact_interface.read_scale).item()
+        turn_iface = getattr(self.model, "turn_interface", None)
+        scale_str = f"fact={fact_scale:.4f}"
+        if turn_iface is not None:
+            turn_scale = torch.sigmoid(turn_iface.read_scale_turn).item()
+            scale_str += f" turn={turn_scale:.4f}"
         if self._early_stopped:
-            print(f"训练已收敛, 共 {self.global_step} 步, scale={scale:.4f}")
+            print(f"训练已收敛, 共 {self.global_step} 步, scale=[{scale_str}]")
         else:
-            print(f"训练完成, 共 {self.global_step} 步, scale={scale:.4f}")
+            print(f"训练完成, 共 {self.global_step} 步, scale=[{scale_str}]")
 
     def _train_epoch(self) -> float:
         """训练一个 epoch (遍历所有 episode)"""
@@ -295,6 +332,8 @@ class Trainer:
 
             if not use_joint:
                 # 单指标 VALUE 早停（原行为）
+                # 注：TELL 是"tell 轮 assistant token 准确率"，只在有 tell 轮的数据里有意义；
+                # 0b verbatim/meta 数据里所有 recall 轮都是 VALUE 轮，TELL 为 0 是无分母，不是真失败
                 early_stop_value = getattr(self.config, "early_stop_value", 0.0)
                 if early_stop_value > 0 and value_acc >= early_stop_value:
                     self._early_stopped = True
@@ -302,7 +341,7 @@ class Trainer:
                 self.model.train()
                 return
 
-            # 4 指标联合早停
+            # 联合早停（v6: legacy 4 + 新 4 = 8 指标，threshold=0 的跳过）
             from xinhe.evaluation.persona_joint import eval_persona_joint
             joint = eval_persona_joint(
                 self.model, tokenizer, self.config, self.device,
@@ -311,25 +350,40 @@ class Trainer:
             wq = joint.get("world_qa", 0.0)
             rf = joint.get("refusal", 0.0)
             cp = joint.get("compositional", 0.0)
-            print(f"  [joint] WorldQA={wq:.2%} Refusal={rf:.2%} Compositional={cp:.2%}")
+            pr = joint.get("pronoun", 0.0)
+            di = joint.get("disentangle", 0.0)
+            ro = joint.get("rapid_overwrite", 0.0)
+            dc = joint.get("decay_refusal", 0.0)
+            print(
+                f"  [joint] WorldQA={wq:.2%} Refusal={rf:.2%} Compositional={cp:.2%} "
+                f"| Pronoun={pr:.2%} Disentangle={di:.2%} RapidOverwrite={ro:.2%} Decay={dc:.2%}"
+            )
 
-            thr_v = getattr(self.config, "early_stop_value", 0.95)
-            thr_w = getattr(self.config, "early_stop_world_qa", 0.70)
-            thr_r = getattr(self.config, "early_stop_refusal", 0.85)
-            thr_c = getattr(self.config, "early_stop_compositional", 0.85)
-            all_pass = (value_acc >= thr_v and wq >= thr_w
-                        and rf >= thr_r and cp >= thr_c)
-            if all_pass:
+            # 每个指标有独立阈值；threshold=0 的视作"不检查"（兼容 stage 0/1 三指标）
+            checks = [
+                ("VALUE",         value_acc, getattr(self.config, "early_stop_value", 0.0)),
+                ("WorldQA",       wq,        getattr(self.config, "early_stop_world_qa", 0.0)),
+                ("Refusal",       rf,        getattr(self.config, "early_stop_refusal", 0.0)),
+                ("Compositional", cp,        getattr(self.config, "early_stop_compositional", 0.0)),
+                ("Pronoun",       pr,        getattr(self.config, "early_stop_pronoun", 0.0)),
+                ("Disentangle",   di,        getattr(self.config, "early_stop_disentangle", 0.0)),
+                ("RapidOW",       ro,        getattr(self.config, "early_stop_rapid_overwrite", 0.0)),
+                ("Decay",         dc,        getattr(self.config, "early_stop_decay", 0.0)),
+            ]
+            active = [(name, val, thr) for name, val, thr in checks if thr > 0]
+            if not active:
+                # 没有任何 threshold 启用 → 不做联合早停
+                self.model.train()
+                return
+
+            missed = [(name, val, thr) for name, val, thr in active if val < thr]
+            if not missed:
                 self._early_stopped = True
-                print(f"  [已收敛] 4 指标全部达标：VALUE≥{thr_v:.0%} WorldQA≥{thr_w:.0%} "
-                      f"Refusal≥{thr_r:.0%} Compositional≥{thr_c:.0%}")
+                passed = " ".join(f"{name}≥{thr:.0%}" for name, _, thr in active)
+                print(f"  [已收敛] {len(active)} 个 active 指标全部达标：{passed}")
             else:
-                missed = []
-                if value_acc < thr_v: missed.append(f"VALUE({value_acc:.2%}<{thr_v:.0%})")
-                if wq < thr_w: missed.append(f"WorldQA({wq:.2%}<{thr_w:.0%})")
-                if rf < thr_r: missed.append(f"Refusal({rf:.2%}<{thr_r:.0%})")
-                if cp < thr_c: missed.append(f"Compositional({cp:.2%}<{thr_c:.0%})")
-                print(f"  [未达标] {', '.join(missed)}")
+                summary = ", ".join(f"{name}({val:.2%}<{thr:.0%})" for name, val, thr in missed)
+                print(f"  [未达标] {summary}")
 
         except Exception as e:
             print(f"  [val breakdown] 跳过: {e}")
@@ -362,8 +416,17 @@ class Trainer:
 
         if self.global_step % self.config.log_every == 0:
             lr = self.scheduler.get_last_lr()[0]
-            scale = torch.sigmoid(self.model.state_interface.read_scale).item()
-            print(f"  [Step {self.global_step}] loss={last_loss:.6f} acc={last_acc:.2%} ema_loss={self._ema_loss:.4f} ema_acc={self._ema_acc:.2%} lr={lr:.2e} scale={scale:.4f}")
+            fact_scale = torch.sigmoid(self.model.fact_interface.read_scale).item()
+            turn_iface = getattr(self.model, "turn_interface", None)
+            scale_str = f"fact={fact_scale:.4f}"
+            if turn_iface is not None:
+                turn_scale = torch.sigmoid(turn_iface.read_scale_turn).item()
+                scale_str += f" turn={turn_scale:.4f}"
+                diag = turn_iface.get_phase_diagnostics()
+                if diag is not None:
+                    scale_str += f" phase_ent={diag['turn_phase_entropy']:.3f}"
+                    scale_str += f" phase_mode={diag['turn_phase_argmax_mean']:.2f}"
+            print(f"  [Step {self.global_step}] ema_loss={self._ema_loss:.4f} ema_acc={self._ema_acc:.2%} lr={lr:.2e} {scale_str}")
 
         if self.global_step % self.config.save_every == 0:
             self._save_checkpoint()
@@ -382,6 +445,13 @@ class Trainer:
                             val_dataloader: Optional[DataLoader] = None):
         """课程学习：切换到新阶段，保留模型权重，重建 optimizer/scheduler"""
         self.config = config
+        self.model.config = config  # 同步给 forward 读 suppress_*_read 等 runtime flag
+        # 同步 turn_interface 的运行时标量（yaml 的 stage 覆盖这些值时才生效）
+        if getattr(self.model, "turn_interface", None) is not None:
+            ti = self.model.turn_interface
+            ti.phase_max = int(getattr(config, "turn_phase_max", ti.phase_max))
+            ti.phase_temperature = float(getattr(config, "turn_phase_temperature", ti.phase_temperature))
+            print(f"[turn_interface] phase_max={ti.phase_max} phase_temperature={ti.phase_temperature}")
         self.train_dataloader = train_dataloader
         self.val_dataloader = val_dataloader
         self.global_step = 0
@@ -415,8 +485,10 @@ class Trainer:
         save_dir = Path(path).parent
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        # 收集 StateInterface 和 LoRA 的 state_dict
-        plugin_state = self.model.state_interface.state_dict()
+        # 收集 FactInterface / TurnInterface / LoRA 的 state_dict
+        fact_plugin_state = self.model.fact_interface.state_dict()
+        turn_iface = getattr(self.model, "turn_interface", None)
+        turn_plugin_state = turn_iface.state_dict() if turn_iface is not None else None
 
         # LoRA 参数
         lora_state = {}
@@ -428,7 +500,8 @@ class Trainer:
 
         checkpoint = {
             "global_step": self.global_step,
-            "plugin_state": plugin_state,
+            "fact_plugin_state": fact_plugin_state,
+            "turn_plugin_state": turn_plugin_state,
             "lora_state": lora_state,
             "optimizer_state": self.optimizer.state_dict(),
             "scheduler_state": self.scheduler.state_dict(),
@@ -443,9 +516,25 @@ class Trainer:
         """加载 checkpoint"""
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
 
-        result = self.model.state_interface.load_state_dict(checkpoint["plugin_state"], strict=False)
+        if "fact_plugin_state" not in checkpoint:
+            raise RuntimeError(
+                "checkpoint 缺少 'fact_plugin_state' 键。v6 不再兼容旧 'plugin_state' 格式，"
+                "请从零重训。"
+            )
+        result = self.model.fact_interface.load_state_dict(checkpoint["fact_plugin_state"], strict=False)
         if result.missing_keys:
-            print(f"  注意: checkpoint 缺少 {result.missing_keys}，使用默认初始化")
+            print(f"  注意: fact checkpoint 缺少 {result.missing_keys}，使用默认初始化")
+
+        # TurnInterface 加载（阶段 0a 到 0b 过渡时允许 turn_plugin_state 缺失 → 保持随机初始化静默启动）
+        turn_iface = getattr(self.model, "turn_interface", None)
+        if turn_iface is not None:
+            turn_state = checkpoint.get("turn_plugin_state")
+            if turn_state is not None:
+                tres = turn_iface.load_state_dict(turn_state, strict=False)
+                if tres.missing_keys:
+                    print(f"  注意: turn checkpoint 缺少 {tres.missing_keys}，使用默认初始化")
+            else:
+                print("  [info] ckpt 无 turn_plugin_state（可能来自 0a_fact_bootstrap 或 turn disabled），turn 保持随机初始化 + 静默 read_scale")
         self.global_step = checkpoint["global_step"]
 
         # 恢复 LoRA 参数

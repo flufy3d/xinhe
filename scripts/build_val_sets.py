@@ -1,11 +1,11 @@
 """
-生成 4 个 val jsonl (VALUE / WorldQA / Refusal / Compositional)。
+生成 v6 八个 val jsonl (legacy 4 + 新 4 W_turn pattern)。
 
 用法:
     python scripts/build_val_sets.py \
-        --cache-dir data/cache \
-        --out-dir data/val \
-        --n-value 200 --n-worldqa 150 --n-refusal 200 --n-compositional 100
+        --cache-dir data/cache --out-dir data/val \
+        --n-value 200 --n-worldqa 150 --n-refusal 200 --n-compositional 100 \
+        --n-pronoun 100 --n-disentangle 100 --n-rapid-overwrite 100 --n-decay 100
 """
 import argparse
 import sys
@@ -25,6 +25,11 @@ def main():
     p.add_argument("--n-worldqa", type=int, default=150)
     p.add_argument("--n-refusal", type=int, default=200)
     p.add_argument("--n-compositional", type=int, default=100)
+    # v6 新 4 val
+    p.add_argument("--n-pronoun", type=int, default=100)
+    p.add_argument("--n-disentangle", type=int, default=100)
+    p.add_argument("--n-rapid-overwrite", type=int, default=100)
+    p.add_argument("--n-decay", type=int, default=100)
     p.add_argument("--seed", type=int, default=12345)
     args = p.parse_args()
 
@@ -35,6 +40,10 @@ def main():
         n_worldqa=args.n_worldqa,
         n_refusal=args.n_refusal,
         n_compositional=args.n_compositional,
+        n_pronoun=args.n_pronoun,
+        n_disentangle=args.n_disentangle,
+        n_rapid_overwrite=args.n_rapid_overwrite,
+        n_decay=args.n_decay,
         seed=args.seed,
     )
     print("\n[完成]")

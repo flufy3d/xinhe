@@ -83,9 +83,17 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
         "tbptt_steps": "tbptt_steps",
         "batch_size": "batch_size",
         "grad_accum_steps": "grad_accum_steps",
+        "gradient_checkpointing": "gradient_checkpointing",
         "learning_rate": "learning_rate",
         "plugin_lr_multiplier": "plugin_lr_multiplier",
+        "turn_lr_multiplier": "turn_lr_multiplier",
+        "turn_phase_max": "turn_phase_max",
+        "turn_phase_temperature": "turn_phase_temperature",
         "freeze_lora": "freeze_lora",
+        "freeze_fact": "freeze_fact",
+        "freeze_turn": "freeze_turn",
+        "suppress_turn_read": "suppress_turn_read",
+        "suppress_fact_read": "suppress_fact_read",
         "lora_reset": "lora_reset",
         "weight_decay": "weight_decay",
         "grad_clip": "grad_clip",
@@ -94,10 +102,15 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
         "early_stop_loss": "early_stop_loss",
         "early_stop_patience": "early_stop_patience",
         "early_stop_value": "early_stop_value",
+        "early_stop_tell": "early_stop_tell",
         "use_joint_early_stop": "use_joint_early_stop",
         "early_stop_world_qa": "early_stop_world_qa",
         "early_stop_refusal": "early_stop_refusal",
         "early_stop_compositional": "early_stop_compositional",
+        "early_stop_pronoun": "early_stop_pronoun",
+        "early_stop_disentangle": "early_stop_disentangle",
+        "early_stop_rapid_overwrite": "early_stop_rapid_overwrite",
+        "early_stop_decay": "early_stop_decay",
         "log_every": "log_every",
         "save_every": "save_every",
         "eval_every": "eval_every",
@@ -114,10 +127,10 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
     return replace(base_config, **overrides)
 
 
-def generate_stage_data(stage: dict, stage_name: str, model_path: str = None) -> tuple[str, str]:
-    """为课程阶段生成数据，自动分发到 memory/think 生成器"""
+def generate_stage_data(stage: dict, stage_name: str) -> tuple[str, str]:
+    """为课程阶段生成数据，自动分发到 memory/persona 生成器"""
     from generate_data import generate_stage_data as _gen
-    return _gen(stage, stage_name, model_path=model_path)
+    return _gen(stage, stage_name)
 
 
 def train_single(config, args):
@@ -188,9 +201,24 @@ def train_curriculum(base_config, stages, args):
 
     if init_ckpt:
         ckpt = torch.load(init_ckpt, map_location=base_config.device, weights_only=False)
-        result = model.state_interface.load_state_dict(ckpt["plugin_state"], strict=False)
+        if "fact_plugin_state" not in ckpt:
+            raise RuntimeError(
+                f"checkpoint {init_ckpt} 缺少 'fact_plugin_state' 键。v6 不再兼容旧 'plugin_state' 格式，请从零重训。"
+            )
+        result = model.fact_interface.load_state_dict(ckpt["fact_plugin_state"], strict=False)
         if result.missing_keys:
-            print(f"  注意: checkpoint 缺少 {result.missing_keys}，使用默认初始化")
+            print(f"  注意: fact checkpoint 缺少 {result.missing_keys}，使用默认初始化")
+
+        # TurnInterface 加载（0a → 0b 过渡时 turn_plugin_state 可能为 None，保持随机初始化静默启动）
+        turn_iface = getattr(model, "turn_interface", None)
+        if turn_iface is not None:
+            turn_state = ckpt.get("turn_plugin_state")
+            if turn_state is not None:
+                tres = turn_iface.load_state_dict(turn_state, strict=False)
+                if tres.missing_keys:
+                    print(f"  注意: turn checkpoint 缺少 {tres.missing_keys}，使用默认初始化")
+            else:
+                print(f"  [info] ckpt {init_ckpt} 无 turn_plugin_state，turn 保持随机初始化 + 静默 read_scale")
 
         # persona 统一训练: 可以加载 plugin 但 reset LoRA（新 LoRA 从随机 kaiming_A + zero_B 开始）
         first_stage = stages[start_idx]
@@ -221,9 +249,9 @@ def train_curriculum(base_config, stages, args):
         print(f"  课程阶段 [{i+1}/{len(stages)}]: {stage_name}")
         print(f"{'='*60}")
 
-        # 准备数据 (统一分发: memory/think 自动识别)
+        # 准备数据 (统一分发: memory/persona 自动识别)
         print(f"[数据生成] type={data_cfg.get('type', 'memory')}")
-        train_path, val_path = generate_stage_data(stage, stage_name, model_path=base_config.backbone_model_path)
+        train_path, val_path = generate_stage_data(stage, stage_name)
 
         # 构建本阶段 config
         stage_config = apply_stage_overrides(base_config, stage)

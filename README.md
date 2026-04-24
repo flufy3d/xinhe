@@ -46,7 +46,7 @@ content → beta_proj → β (per-head, per-token)           │
 
 ```
 ┌─────────────────────────────────┐
-│   StateInterface (Delta Rule)   │  ← 可训练
+│   FactInterface (Delta Rule)    │  ← 可训练
 │   W: (B, H=16, d_v=128, d_k=128)│
 │   q/o_projs × n_layers (读)      │
 │   k/v/beta_proj 全局共享 (写)    │
@@ -81,15 +81,13 @@ content → beta_proj → β (per-head, per-token)           │
 configs/
   base.yaml                       # 训练默认参数
   qwen3.5-{0.8b,4b,9b}.yaml       # backbone 配置
-  curriculum_persona.yaml         # ★ 2-stage 共享课程（bootstrap + unified）
-  persona_unified.yaml            # 0.8b 训练入口
+  curriculum_persona.yaml         # ★ 3-stage 共享课程（0a fact bootstrap + 0b turn bootstrap + 1 unified）
+  persona_unified_0.8b.yaml       # 0.8b 训练入口
   persona_unified_4b.yaml         # 4b 训练入口
-  curriculum.yaml, curriculum_*.yaml, think_*.yaml, migrate_*.yaml
-                                  # legacy：旧 13-stage + think + migrate 课程，保留作参考
 
 xinhe/
   model/
-    state_plugin.py               # StateInterface：Delta Rule 读写
+    fact_plugin.py                # FactInterface：Delta Rule 读写（W_fact）
     xinhe_model.py                # 组装：backbone + layer_hook + plugin
     backbone.py, qwen_backbone.py # 可切换 backbone
     lora.py                       # LoRA 注入
@@ -152,7 +150,7 @@ python scripts/build_val_sets.py
 
 ```bash
 # 0.8b 端到端（bootstrap 1500 步 → main 3000-5000 步）
-python scripts/train.py --config configs/persona_unified.yaml
+python scripts/train.py --config configs/persona_unified_0.8b.yaml
 
 # 4b 端到端（bootstrap ~1500 步 → main ~3000-5000 步）
 python scripts/train.py --config configs/persona_unified_4b.yaml
@@ -221,9 +219,9 @@ Stage 1: persona_unified
 - v5b slot + contrastive：slot 线性投影 hash 碰撞
 - **v5c Delta Rule**：`(v - Wk)` 误差项数学消歧，取消 slot 概念
 
-**persona_unified 的来源**：v5c 跑完 13-stage memory + think 课程后 VALUE 98% 但 LoRA 漂到模板，问"巴黎在哪"答"新加拿地"。三个失败（拒答 / 多 fact / 世界知识）共享一个根因 —— 训练分布是真实使用分布的空集。
+**persona_unified 的来源**：早期 13-stage 窄 memory 课程跑完 VALUE 98% 但 LoRA 漂到模板，问"巴黎在哪"答"新加拿地"。三个失败（拒答 / 多 fact / 世界知识）共享一个根因 —— 训练分布是真实使用分布的空集。
 
-**解法**：替换 13-stage + think 窄分布 curriculum 为单一 persona_unified，含 teacher 采样的 chat/world_qa 作为 rehearsal，含 refusal / overwrite / retention 的结构化 patterns。用严阈值 4 指标联合早停。
+**解法**：替换窄分布 curriculum 为单一 persona_unified，含 teacher 采样的 chat/world_qa 作为 rehearsal，含 refusal / overwrite / retention 的结构化 patterns。用严阈值联合早停。
 
 ---
 

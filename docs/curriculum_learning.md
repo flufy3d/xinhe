@@ -8,28 +8,32 @@
 
 ---
 
-## 当前课程：persona_unified（2 stage 端到端）
+## 当前课程：persona_unified（3 stage 端到端）
 
-`configs/curriculum_persona.yaml` 定义所有 stages，`configs/persona_unified.yaml`（0.8b）和 `configs/persona_unified_4b.yaml`（4b）引用它 + 加 backbone-specific 的 batch/lr overrides。
+`configs/curriculum_persona.yaml` 定义所有 stages，`configs/persona_unified_0.8b.yaml`（0.8b）和 `configs/persona_unified_4b.yaml`（4b）引用它 + 加 backbone-specific 的 batch/lr overrides。
 
 ```
-Stage 0: 0_bootstrap
+Stage 0a: 0a_fact_bootstrap
   数据: type=memory, 1 fact（only name）, 2 轮 tell+recall, 无 filler, 无覆写
-  训练: episode_length=2, tbptt=2, freeze_lora=true, plugin_lr_mult=1.0
+  训练: episode_length=2, freeze_lora=true, freeze_turn=true, plugin_lr_mult=1.0
         max_steps=1500, early_stop_value=0.98（只看 VALUE）
-  目标: plugin 学会 Delta Rule 基本读写原语
-  耗时: ~15 min on 4b A100, ~5 min on 0.8b
+  目标: FactInterface 学会 Delta Rule 读写（W_fact）
 
-    ↓ plugin 已会读写，LoRA 未动
+    ↓ fact plugin 已会读写
 
-Stage 1: 1_persona_unified
-  数据: type=persona, 12-20 轮 persona 驱动对话
-         10 种 turn kind 混合（见下）
-         + 10% stress_retention + 10% multi_slot_retention 结构化 episode
-  训练: episode_length=16, tbptt=8, freeze_lora=false, plugin_lr_mult=0.3
-        max_steps=5000, 4 指标联合早停
-  目标: 真实分布 + retention + refusal + 多 fact
-  耗时: 4b 从 scratch 约 8000-10000 步收敛；0.8b 从 bootstrap 继续约 3000-5000 步
+Stage 0b: 0b_turn_bootstrap  ★ 当前失败点，见 docs/failure_postmortem.md
+  数据: type=persona, 对抗集 + verbatim + meta_recall 混合
+  训练: freeze_lora=false, freeze_fact=true, suppress_fact_read=true
+        turn_phase_temperature=30, turn_lr_mult=2.0
+  目标: TurnInterface 学会多相位共振（W_turn）
+  结果: phase_mode ≈ dtau 均值即未学会相位选择；LoRA+backbone 走捷径
+
+Stage 1: 1_persona_unified_dual
+  数据: type=persona, 10-16 轮 persona 驱动对话 + 结构化 retention patterns
+  训练: freeze_lora=false, freeze_fact=false, freeze_turn=false
+        max_steps=8000, 8 指标联合早停
+  目标: 双流协同 + refusal/compositional/retention 全面达标
+  注: 依赖 0b 健康，0b 失败后 Stage 1 也会被 refusal/pronoun 梯度覆盖 W_turn 读侧
 ```
 
 ### Stage 1 的 turn kind 分布（`DEFAULT_TURN_MIX`）
@@ -72,10 +76,11 @@ Stage 1: 1_persona_unified
 
 | 目标 | 配置文件 | 入口 |
 |---|---|---|
-| 0.8b 端到端 | `persona_unified.yaml` | `python scripts/train.py --config configs/persona_unified.yaml` |
+| 0.8b 端到端 | `persona_unified_0.8b.yaml` | `python scripts/train.py --config configs/persona_unified_0.8b.yaml` |
 | 4b 端到端 | `persona_unified_4b.yaml` | `python scripts/train.py --config configs/persona_unified_4b.yaml` |
-| 只跑 bootstrap | 同上 + `--from-stage 0_bootstrap` | 省时调试 plugin 读写 |
-| 从 bootstrap 后接 | 同上 + `--from-stage 1_persona_unified` | 跳过已完成的 bootstrap |
+| 只跑 fact bootstrap | 同上 + `--from-stage 0a_fact_bootstrap` | 省时调试 W_fact 读写 |
+| 从 turn bootstrap 开始 | 同上 + `--from-stage 0b_turn_bootstrap` | 跳过已完成的 0a |
+| 从 Stage 1 开始 | 同上 + `--from-stage 1_persona_unified_dual` | 跳过已完成的 0a + 0b |
 
 `train.py` 的 auto-skip 逻辑会自动跳过 `checkpoints/curriculum/{stage_name}.pt` 已存在的 stage。要重跑，删掉 ckpt 或用 `--from-stage`。
 
@@ -108,30 +113,13 @@ step 9000: 98   (收敛)
 
 ### bootstrap 有没有必要
 
-4b 单 stage 从零能训到 98% 但花了 10000 步；加 bootstrap 后估计 5000-6000 步达同样水平。0.8b 的老 curriculum 就是 13-stage bootstrap，只是更碎片化。2-stage 是平衡点。
+4b 单 stage 从零能训到 98% 但花了 10000 步；加 bootstrap 后估计 5000-6000 步达同样水平。早期 0.8b 用 13-stage 碎片化 bootstrap 证明过度碎片。现在 3-stage（fact bootstrap + turn bootstrap + unified）是平衡点（若 0b 架构修复）。
 
 ### plugin_lr_multiplier 的取值
 
 - Stage 0 bootstrap: 1.0（plugin 需要大 LR 快速学会 Delta Rule）
 - Stage 1 main: 0.3（plugin 已会读写，大 LR 会震荡；LoRA 从零学需要 1.0）
 - 如果从 `--resume` 继续训（persona 二次迭代）: 0.1（plugin 保护，LoRA 继续微调）
-
----
-
-## Legacy：v1-v5c 的老课程（保留作参考）
-
-以下文件仍在仓库中，**但不是当前训练路径**：
-
-| 文件 | 用途 | 状态 |
-|---|---|---|
-| `curriculum.yaml` | 13-stage memory curriculum（v5c） | 保留，legacy |
-| `curriculum_think.yaml` | Think 课程 | 保留，**失败** (TELL=66%，已被 persona_unified 的 turn_mix 吸收) |
-| `curriculum_migrate.yaml` | 基座迁移 M0-M3 | 保留，暂未验证 v5c 迁移 |
-| `curriculum_qwen3.5-{0.8b,4b,9b}.yaml` | 老入口 | 保留，和 persona_unified 并存 |
-| `think_qwen3.5-*.yaml` | 思考入口 | 保留，不推荐 |
-| `migrate_*.yaml` | 迁移入口 | 保留，不推荐 |
-
-要跑老 curriculum 做对比，直接用原文件即可 —— 和 persona_unified 不互相干扰。
 
 ---
 
