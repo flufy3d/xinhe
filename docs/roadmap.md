@@ -5,22 +5,25 @@
 ## 总览（按时间轴）
 
 ```
-阶段 A: 架构定型（v1 → v5c）✅
+阶段 A: 架构定型（v1 → v7）✅
   v1 state-as-tokens:      0.8b 通过，4b 87% 卡 → LoRA 瓶颈暴露
   v2 对称 cross-attention: LoRA 瓶颈解决，同类消歧 93% 卡
   v3/v4 slot routing:      slot 身份伪概念
   v5b slot+contrastive:    hash 碰撞无解
-  v5c Delta Rule (2026-04):  (v-Wk) 数学消歧，架构定型
+  v5c Delta Rule (2026-04): (v-Wk) 数学消歧
+  v6 dual stream (W_fact + W_turn): phase 搜索失败（见 failure_postmortem.md）
+  v7 Hippocampus (2026-04-24, 当前活跃):
+    单一 W + per-head γ 隐式时序 + content-driven time_shift
+    废除 W_turn 分流、废除 RoPE phase 搜索
+    Phase 2 规划: Neocortex (MLP LoRA 长期固化)
 
-阶段 B: 训练范式定型（persona_unified）✅
-  v5c 13-stage memory + think 课程后 VALUE 98% 但 LoRA 漂，
-    真实 chat 答错"新加拿地"/乱编名字 → 诊断为训练分布窄化
-  persona_unified (2026-04-22): 替换为 persona 驱动对话 + DeepSeek rehearsal
-  persona_retention_v2: 加 stress + multi_slot retention patterns
-  4b single-course: 4b 从 scratch 单课 VALUE 98%+，chat_smoke 23/27
-  2-stage bootstrap refactor (2026-04-23): curriculum_persona.yaml 定型
+阶段 B: 训练范式定型（persona_unified 3-stage bootstrap）✅
+  Stage 0a hippocampus_rw  — Delta Rule 基础读写（freeze_lora）
+  Stage 0b gamma_gating    — time_shift 学"废话 → 减寿"（freeze_lora）
+  Stage 1 persona_unified  — 放开 LoRA + 复杂分布 + 6 指标联合早停
 
 阶段 C: 未开启（未来）
+  Neocortex (Phase 2): Sleep 机制把高 γ 记忆蒸馏到 MLP LoRA 权重
   在线学习: 当前只在训练阶段 fine-tune LoRA，部署时权重冻结
   灵魂分化: 不同用户 .pt 的权重差异分析
   消融实验: 各组件的边际贡献
@@ -101,15 +104,16 @@
 - Qwen3.5-9b（configs 已就绪）
 - 其他架构：Llama / Mistral 等，看 Delta Rule 能否泛化
 
-### 中期：长期记忆固化（Memory MLP + Sleep）
+### 中期：长期记忆固化（Neocortex + Sleep）
 
-**4. 实现长期记忆层（当前最优先的未来工作）**
-- **定位**：当前 W 矩阵是**短期工作记忆**（海马体 / 单次对话内动态演化）。Memory MLP + Sleep 是**长期记忆**（皮层 / 跨 session 权重级固化）
-- **架构**：Memory MLP（SwiGLU 独立模块）叠加在 backbone 输出后
-- **Sleep 机制**：replay buffer 回放对话 + 逐步弱化 W 注入（read_scale → 0）→ 迫使信息从 W 转移到 MLP 权重
-- **采样策略**：70% 近期 + 30% 历史混合，防旧记忆覆盖
+**4. 实现 Neocortex 长期记忆层（Phase 2，v7 架构的未来扩展）**
+- **生物类比**：v7 的 Hippocampus（单 W 张量）是**短期工作记忆**（海马体 / 单次对话内动态演化）。Neocortex（MLP LoRA）是**长期记忆**（皮层 / 跨 session 权重级固化）
+- **架构**：Neocortex = MLP LoRA（作用于 `gate_proj/up_proj/down_proj` 三件套）
+- **Sleep 机制**：冻结 Hippocampus 和 Attention LoRA，开 MLP LoRA，replay buffer 回放对话 + 逐步弱化 W 注入（read_scale → 0）→ 迫使信息从 W 转移到 MLP 权重
+- **Replay 采样策略**：利用 γ 历史挑高 γ（长寿命）记忆，混合 70% 近期 + 30% 历史
 - **效果**：sleep 过的事实 W 清空也能回答；`.pt` 分化更深刻（MLP 权重随用户独立）
-- **拆分**：先做离线 sleep（固定间隔触发），后做在线 sleep（用户使用中后台触发）
+- **拆分**：先做离线 sleep（训练收尾一次性蒸馏），后做在线 sleep（用户使用中后台触发）
+- **代码铺垫**：`xinhe/model/hippocampus.py::get_gamma_diagnostics` 已经给 γ 分布打印，Neocortex 可用来挑 replay 样本
 
 **5. 在线 fine-tune**
 - 和 #4 配合：Memory MLP 权重在 sleep 时更新
@@ -153,7 +157,7 @@
 | Think 课程 | TELL 66% 失败，4b backbone 自带 |
 | 13-stage memory curriculum | 窄分布，LoRA 漂 |
 | 基座迁移（migrate_*） | 暂未在 v5c 验证 |
-| W_turn 多相位对抗集（v6.3） | phase_mode ≈ dtau 均值即未学会，见 `failure_postmortem.md` |
+| W_turn 双流（v6）| softmax 多相位选择 + LoRA 捷径，phase_mode ≈ dtau 均值未学会，见 `failure_postmortem.md` |
 
 legacy 课程和迁移相关的 config/code 已清理。历史记录保留作训练范式演化参考。
 

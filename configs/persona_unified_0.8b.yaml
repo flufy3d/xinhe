@@ -1,16 +1,15 @@
 # ============================================================
-# Persona Unified Dual — Qwen3.5-0.8B 版本 (v6 双流)
+# Persona Unified — Qwen3.5-0.8B 版本 (v7.1 Hippocampus)
 #
 # 前置：
 #   1. export DEEPSEEK_API_KEY=...
 #   2. python scripts/build_chat_cache.py   → data/cache/*.jsonl
-#   3. python scripts/build_val_sets.py     → data/val/*.jsonl (legacy 4 + v6 新 4)
+#   3. python scripts/build_val_sets.py     → data/val/*.jsonl
 #
-# 用法（端到端 3 stage，从零训，不 warm-start 旧 persona_unified.pt）：
+# 用法（端到端 5 stage，从零训，不兼容 v7 旧 ckpt）：
 #   python scripts/train.py --config configs/persona_unified_0.8b.yaml
 #
-# Stage 0a fact_bootstrap (~1500 步) → Stage 0b turn_bootstrap (~1500 步)
-#   → Stage 1 persona_unified_dual (~8000 步) → 总 ~11k 步
+# Stage 0a → 0b → 0c → 0d → 1，预估 ~12k 步
 # ============================================================
 base: qwen3.5-0.8b.yaml
 curriculum_file: curriculum_persona.yaml
@@ -19,22 +18,31 @@ data:
   val_worldqa_path: "data/val/val_worldqa.jsonl"
   val_refusal_path: "data/val/val_refusal.jsonl"
   val_compositional_path: "data/val/val_compositional.jsonl"
-  # v6 新 4 val
-  val_pronoun_path: "data/val/val_pronoun.jsonl"
-  val_disentangle_path: "data/val/val_disentangle.jsonl"
   val_rapid_overwrite_path: "data/val/val_rapid_overwrite.jsonl"
-  val_decay_path: "data/val/val_decay.jsonl"
+  val_verbatim_path: "data/val/val_verbatim.jsonl"
+  val_reference_back_path: "data/val/val_reference_back.jsonl"
+  val_context_followup_path: "data/val/val_context_followup.jsonl"
+  val_topic_continuation_path: "data/val/val_topic_continuation.jsonl"
+  val_entity_tracking_path: "data/val/val_entity_tracking.jsonl"
+  val_irrelevant_forget_path: "data/val/val_irrelevant_forget.jsonl"
+  val_multi_slot_retention_path: "data/val/val_multi_slot_retention.jsonl"
 
 stage_overrides:
   default:
     batch_size: 2
     grad_accum_steps: 2
-  0a_fact_bootstrap:
-    batch_size: 8        # 2 轮短 ep，显存富裕
+  0a_basic_rw:
+    batch_size: 8
     grad_accum_steps: 1
-  0b_turn_bootstrap:
-    batch_size: 4        # ep_len=6 比旧 4 变长，batch 降到 4 稳一点
-    grad_accum_steps: 2
-  1_persona_unified_dual:
-    batch_size: 2        # ep_len=16 后显存 ~10GB/24GB，可 batch 2
-    grad_accum_steps: 2  # 有效 batch 仍 = 4
+  0b_verbatim_rw:
+    batch_size: 4
+    grad_accum_steps: 1
+  0c_context_review:
+    batch_size: 4
+    grad_accum_steps: 1
+  0d_irrelevant_forget:
+    batch_size: 4
+    grad_accum_steps: 1
+  1_persona_unified:
+    batch_size: 2
+    grad_accum_steps: 1

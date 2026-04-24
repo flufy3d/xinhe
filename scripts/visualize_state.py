@@ -101,11 +101,11 @@ def main():
 
     model = XinheModel(config)
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
-    if "fact_plugin_state" not in checkpoint:
+    if "hippocampus_state" not in checkpoint:
         raise RuntimeError(
-            "checkpoint 缺少 'fact_plugin_state' 键。v6 不再兼容旧 'plugin_state' 格式。"
+            "checkpoint 缺少 'hippocampus_state' 键。v7 不兼容 v5c/v6 旧格式。"
         )
-    model.fact_interface.load_state_dict(checkpoint["fact_plugin_state"], strict=False)
+    model.hippocampus.load_state_dict(checkpoint["hippocampus_state"], strict=True)
     model.to(device)
     model.eval()
 

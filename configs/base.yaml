@@ -11,22 +11,24 @@ backbone:
   hidden_size: 1024
   freeze: true
 
-# --- FactInterface (v6: Delta Rule 联想记忆 W_fact: (B,H,d_v,d_k)) ---
-# read_scale_init=-3 (初始 scale≈0.047): 平衡读强度
-# beta_bias_init=-2 (初始 β=0.12): 写入温和，让 W 稳定建立，避免激进累积
-# head_dim=128 (第二轮): 同类 key 正交化瓶颈 → 扩 key/value 维度，单样本 W 从 64K→256K floats
+# --- Hippocampus (v7: Delta Rule + per-head γ 联想记忆 W: (B,H,d_v,d_k)) ---
+# read_scale_init=-3 (初始 scale≈0.047): 温和读强度
+# beta_bias_init=-2 (初始 β=0.12): 写入温和，让 W 稳定建立
+# head_dim=128: 扩 key/value 维度，单样本 W ≈ 256K floats
 state:
   n_heads: 16
   head_dim: 128
-  read_scale_init: -3.0
+  read_scale_init: -3.0          # σ(-3)=0.047 初始，训练中可调
   beta_bias_init: -2.0
+  gamma_head_init_low: 0.8       # per-head 时间尺度多样性，linspace(0.8, 0.999)
+  gamma_head_init_high: 0.999
 
 # --- LoRA ---
 lora:
   rank: 4
   alpha: 8
   dropout: 0.0
-  target_modules: ["q_proj", "v_proj"]
+  target_modules: ["q_proj", "v_proj", "o_proj"]
 
 # --- 训练 ---
 training:

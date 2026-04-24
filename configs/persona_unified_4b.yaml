@@ -1,14 +1,5 @@
 # ============================================================
-# Persona Unified — Qwen3.5-4B 版本
-#
-# 前置同 0.8b（data/cache 和 data/val 已就位）。
-#
-# 用法（从 backbone init 2 stage 端到端）：
-#   python scripts/train.py --config configs/persona_unified_4b.yaml
-#
-# 预期：Stage 0 ~1500 步 plugin 学会 Delta Rule →
-#       Stage 1 ~3000-4000 步 4 指标联合达标
-#       总 ~5000-6000 步（比原单 stage 10000 步减半）
+# Persona Unified — Qwen3.5-4B 版本 (v7.1 Hippocampus)
 # ============================================================
 base: qwen3.5-4b.yaml
 curriculum_file: curriculum_persona.yaml
@@ -17,11 +8,28 @@ data:
   val_worldqa_path: "data/val/val_worldqa.jsonl"
   val_refusal_path: "data/val/val_refusal.jsonl"
   val_compositional_path: "data/val/val_compositional.jsonl"
+  val_rapid_overwrite_path: "data/val/val_rapid_overwrite.jsonl"
+  val_verbatim_path: "data/val/val_verbatim.jsonl"
+  val_reference_back_path: "data/val/val_reference_back.jsonl"
+  val_context_followup_path: "data/val/val_context_followup.jsonl"
+  val_topic_continuation_path: "data/val/val_topic_continuation.jsonl"
+  val_entity_tracking_path: "data/val/val_entity_tracking.jsonl"
+  val_irrelevant_forget_path: "data/val/val_irrelevant_forget.jsonl"
+  val_multi_slot_retention_path: "data/val/val_multi_slot_retention.jsonl"
 
 stage_overrides:
   default:
-    batch_size: 1        # 4b 显存紧
+    batch_size: 1
     grad_accum_steps: 4
-  0_bootstrap:
-    batch_size: 4        # 2 轮短 ep 可以放大
+  0a_basic_rw:
+    batch_size: 4
     grad_accum_steps: 1
+  0b_verbatim_rw:
+    batch_size: 2
+    grad_accum_steps: 2
+  0c_context_review:
+    batch_size: 2
+    grad_accum_steps: 2
+  0d_irrelevant_forget:
+    batch_size: 2
+    grad_accum_steps: 2

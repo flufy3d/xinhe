@@ -194,7 +194,22 @@ class ConversationDataset(Dataset):
             segments.append(segment)
 
         if len(segments) > self.episode_length:
-            segments = segments[: self.episode_length]
+            # 截断时保留首 setup 和末 recall（否则丢 value-bearing turn → train 不到 phrase/recall）
+            # 策略: 保留前 (episode_length - 1) 个 + 末尾那个
+            segments = segments[: self.episode_length - 1] + [segments[-1]]
+
+        # Pad 到 episode_length：避免 collate_episodes 用 min_len 截断整个 batch
+        # dummy segment: 全 pad ids + labels=-100 + weights=0 → forward 跑但不算 loss
+        pad_id = (
+            self.tokenizer.pad_token_id
+            if self.tokenizer.pad_token_id is not None
+            else 0
+        )
+        while len(segments) < self.episode_length:
+            dummy_ids = torch.full((self.segment_length,), pad_id, dtype=torch.long)
+            dummy_labels = torch.full((self.segment_length,), -100, dtype=torch.long)
+            dummy_weights = torch.zeros(self.segment_length, dtype=torch.float)
+            segments.append((dummy_ids, dummy_labels, dummy_weights))
 
         return segments
 

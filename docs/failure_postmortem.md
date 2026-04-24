@@ -153,5 +153,26 @@ W_turn 读侧核心代码（`xinhe/model/turn_plugin.py`、`xinhe/model/dual_sta
 
 ---
 
+## v7 设计启示（2026-04-24 大调架构）
+
+v7 "Hippocampus" 架构（`docs/curriculum_learning.md` 3-stage 课程）对应上面 5 条设计原则：
+
+1. ✅ **去掉 softmax 挑赢家**：v7 读侧纯 `q·W^T` 线性读，无 phase 搜索、无 softmax 竞争。依赖 k_proj 学出 content addressing + 正交槽位。
+2. ✅ **读路径初始不再是信号死区**：保留 `read_scale_init=-3` 但通过 freeze_lora bootstrap 让 Hippocampus 必须学会读写。LoRA 捷径在 Stage 0a/0b 全程锁死。
+3. ✅ **关掉所有捷径**：Stage 0a + Stage 0b 全程 `freeze_lora=true`，强迫 Hippocampus 独立承担。time_shift 层零初始化 + Stage 0b 专门数据分布驱动 γ 学习。
+4. ⚠️ **保留 token-level loss** 但加辅助诊断：`gamma_token_std`、`gamma_prior_range`、distractor vs fact 的 γ 差异。若训练指标好但 γ 未分化 → 架构走捷径的早期信号。
+5. ✅ **去掉端到端学 phase 选择**：v7 不再有"选相位"概念。时序由 per-head γ 隐式承载（快代谢 head 承废话、慢代谢 head 承事实），不需要显式预测 Δτ。
+
+v7 清理的文件（本次 commit）：
+- 删 `xinhe/model/turn_plugin.py` / `fact_plugin.py` / `dual_state.py`
+- 删 `tests/test_turn.py` / `tests/test_fact.py`（后者改名为 `test_hippocampus.py`）
+- 新建 `xinhe/model/hippocampus.py`：`Hippocampus` 类（单 W + per-head γ + content-driven time_shift）
+- 重写 `configs/curriculum_persona.yaml`：3-stage (0a_hippocampus_rw + 0b_gamma_gating + 1_persona_unified)
+- 删除 config 里所有 turn_* / freeze_fact / suppress_*_read / early_stop_pronoun 等 v6 字段
+
+Phase 2 （未来工作）将实现 Neocortex —— 夜晚 Sleep 机制把 W 的高 γ 记忆蒸馏到 MLP LoRA 权重，实现短期 → 长期记忆固化。详见 `docs/roadmap.md` "中期：长期记忆固化"。
+
+---
+
 **作者**：James Chen / Claude
-**日期**：2026-04-24
+**日期**：2026-04-24（v6 失败复盘 + v7 设计启示）

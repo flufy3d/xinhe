@@ -86,14 +86,10 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
         "gradient_checkpointing": "gradient_checkpointing",
         "learning_rate": "learning_rate",
         "plugin_lr_multiplier": "plugin_lr_multiplier",
-        "turn_lr_multiplier": "turn_lr_multiplier",
-        "turn_phase_max": "turn_phase_max",
-        "turn_phase_temperature": "turn_phase_temperature",
         "freeze_lora": "freeze_lora",
-        "freeze_fact": "freeze_fact",
-        "freeze_turn": "freeze_turn",
-        "suppress_turn_read": "suppress_turn_read",
-        "suppress_fact_read": "suppress_fact_read",
+        "freeze_time_shift": "freeze_time_shift",
+        "freeze_beta_weight": "freeze_beta_weight",
+        "freeze_read_scale_at": "freeze_read_scale_at",
         "lora_reset": "lora_reset",
         "weight_decay": "weight_decay",
         "grad_clip": "grad_clip",
@@ -107,18 +103,24 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
         "early_stop_world_qa": "early_stop_world_qa",
         "early_stop_refusal": "early_stop_refusal",
         "early_stop_compositional": "early_stop_compositional",
-        "early_stop_pronoun": "early_stop_pronoun",
-        "early_stop_disentangle": "early_stop_disentangle",
         "early_stop_rapid_overwrite": "early_stop_rapid_overwrite",
-        "early_stop_decay": "early_stop_decay",
+        "early_stop_verbatim": "early_stop_verbatim",
+        "early_stop_reference_back": "early_stop_reference_back",
+        "early_stop_context_followup": "early_stop_context_followup",
+        "early_stop_topic_continuation": "early_stop_topic_continuation",
+        "early_stop_entity_tracking": "early_stop_entity_tracking",
+        "early_stop_irrelevant_forget": "early_stop_irrelevant_forget",
+        "early_stop_multi_slot_retention": "early_stop_multi_slot_retention",
         "log_every": "log_every",
         "save_every": "save_every",
         "eval_every": "eval_every",
-        # v5c: 每阶段可调 Delta Rule 配置
+        # v7: 每阶段可调 Hippocampus 配置
         "n_heads": "n_heads",
         "head_dim": "head_dim",
         "read_scale_init": "read_scale_init",
         "beta_bias_init": "beta_bias_init",
+        "gamma_head_init_low": "gamma_head_init_low",
+        "gamma_head_init_high": "gamma_head_init_high",
     }
     for yaml_key, field_name in field_map.items():
         if yaml_key in training:
@@ -128,8 +130,8 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
 
 
 def generate_stage_data(stage: dict, stage_name: str) -> tuple[str, str]:
-    """为课程阶段生成数据，自动分发到 memory/persona 生成器"""
-    from generate_data import generate_stage_data as _gen
+    """为课程阶段生成数据（v7.1 统一 registry 入口）。"""
+    from scripts.generate_data import generate_stage_data as _gen
     return _gen(stage, stage_name)
 
 
@@ -201,24 +203,11 @@ def train_curriculum(base_config, stages, args):
 
     if init_ckpt:
         ckpt = torch.load(init_ckpt, map_location=base_config.device, weights_only=False)
-        if "fact_plugin_state" not in ckpt:
+        if "hippocampus_state" not in ckpt:
             raise RuntimeError(
-                f"checkpoint {init_ckpt} 缺少 'fact_plugin_state' 键。v6 不再兼容旧 'plugin_state' 格式，请从零重训。"
+                f"checkpoint {init_ckpt} 缺少 'hippocampus_state' 键。v7 不兼容 v5c/v6 旧格式，请从零重训。"
             )
-        result = model.fact_interface.load_state_dict(ckpt["fact_plugin_state"], strict=False)
-        if result.missing_keys:
-            print(f"  注意: fact checkpoint 缺少 {result.missing_keys}，使用默认初始化")
-
-        # TurnInterface 加载（0a → 0b 过渡时 turn_plugin_state 可能为 None，保持随机初始化静默启动）
-        turn_iface = getattr(model, "turn_interface", None)
-        if turn_iface is not None:
-            turn_state = ckpt.get("turn_plugin_state")
-            if turn_state is not None:
-                tres = turn_iface.load_state_dict(turn_state, strict=False)
-                if tres.missing_keys:
-                    print(f"  注意: turn checkpoint 缺少 {tres.missing_keys}，使用默认初始化")
-            else:
-                print(f"  [info] ckpt {init_ckpt} 无 turn_plugin_state，turn 保持随机初始化 + 静默 read_scale")
+        model.hippocampus.load_state_dict(ckpt["hippocampus_state"], strict=True)
 
         # persona 统一训练: 可以加载 plugin 但 reset LoRA（新 LoRA 从随机 kaiming_A + zero_B 开始）
         first_stage = stages[start_idx]

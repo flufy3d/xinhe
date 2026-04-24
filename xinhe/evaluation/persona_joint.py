@@ -1,18 +1,25 @@
 """
-Persona 统一训练的 3 个新指标联合评估（配合 eval_value_breakdown_fast 形成 4 指标联合早停）。
+Persona 联合评估 (v7.1)
 
 指标:
-    WorldQA        — 世界常识 Q&A 准确率（token-level argmax match）
-    RefusalRate    — "问未披露槽 → 应拒答" 的识别率（含 fabrication 扫描）
-    Compositional  — 多 fact 单 utterance / 跨槽组合的全 fact VALUE 准确率
+    WorldQA            — 世界常识 Q&A token argmax 准确率
+    RefusalRate        — 空态问未披露 → 应含 refusal 关键词（不 fabricate）
+    Compositional      — 多 fact 单 utterance 全 value 命中率
+    RapidOverwrite     — 末轮应召回最新值
+    Verbatim           — 随机 phrase 原样复述率（exact span match）
+    ReferenceBack      — user quote-back 后 recall 已披露 slot
+    ContextFollowup    — assistant 引用 persona 回答开放问题
+    TopicContinuation  — 主题链末轮 sub-fact recall
+    EntityTracking     — 代词消解 recall 第三方 entity 属性
+    IrrelevantForget   — reveal + distractor 后 recall 原事实（stress_retention val）
+    MultiSlotRetention — 多槽 retention（观察）
 
-设计：所有指标都基于 teacher-forcing argmax（和 VALUE/FRAME/TELL 一致），
-而非 greedy generation，这样：
-    (1) 计算成本低（一次 forward vs N 次自回归）
-    (2) 和 train loss 口径一致
-    (3) 无需采样随机性
+所有指标基于 teacher-forcing argmax + span match（和 VALUE 口径一致）。
 
-每个 val 集是标准的 conversations 格式 JSONL，由 generate_persona_data 产出。
+v7.1 相对 v7 变化：
+  删 eval_decay_refusal（decay 系列整体废弃）
+  删 FORGET_REGEX / forget_detection_regex 依赖
+  加 6 个新 eval（全部基于 _value_span_fullmatch）+ registry 注入
 """
 import json
 import re
@@ -22,25 +29,15 @@ import torch
 
 from xinhe.data.conversation import ensure_chat_template
 from xinhe.data.refusal_templates import refusal_detection_regex
-from xinhe.data.turn_memory_templates import forget_detection_regex
+from xinhe.data.registry import VAL_FNS
 
 
 REFUSAL_REGEX = re.compile(refusal_detection_regex())
-FORGET_REGEX = re.compile(forget_detection_regex())
 
 
 @torch.no_grad()
 def _forward_episode(model, tokenizer, episode, device, seg_len=256):
-    """遍历一个 episode，state 跨 turn 传递，返回每个 turn 的 (preds, labels, asst_text, user_text, value) 序列。
-
-    每 turn 返回:
-        - preds: (T,) 预测 token ids（argmax）
-        - labels: (T,) 真实 labels（-100 为 ignore）
-        - asst_text: assistant 实际字符串
-        - user_text: user 字符串
-        - value: "value" 字段（可能是 str / list / None）
-        - train_loss: bool
-    """
+    """遍历 episode，state 跨 turn 传递，返回每 turn 的 preds/labels/user/asst/value/train_loss。"""
     ensure_chat_template(tokenizer)
 
     from xinhe.data.conversation import tokenize_turn
@@ -64,9 +61,9 @@ def _forward_episode(model, tokenizer, episode, device, seg_len=256):
         labels_dev = labels.unsqueeze(0).to(device)
         out = model(ids, state, labels=labels_dev, pad_token_id=tokenizer.pad_token_id)
         state = out["state_next"]
-        logits = out["logits"][0]     # (T, V)
+        logits = out["logits"][0]
         shift_logits = logits[:-1]
-        shift_labels = labels[1:]     # CPU
+        shift_labels = labels[1:]
         preds = shift_logits.argmax(dim=-1).cpu()
 
         results.append({
@@ -77,28 +74,16 @@ def _forward_episode(model, tokenizer, episode, device, seg_len=256):
             "value": value_str,
             "train_loss": compute_loss,
         })
-
     return results
 
 
 def _token_accuracy_on_span(preds, labels, tokenizer, target_text: str,
                              full_text: str, search_from: int = 0) -> tuple[int, int]:
-    """用 offset mapping 定位 target_text 在 full_text 里的 token 区间，统计 argmax 准确率。
-
-    关键：value 字符串通常在 user 部分和 assistant 部分**都出现**（用户说 + 助手回重复）。
-    user 部分 labels 全 -100，匹配上也算不到分，所以必须从 assistant 起点往后找。
-    search_from 是 assistant 内容在 full_text 里的 char offset 下限。
-
-    shift-by-1 对齐：
-    - `preds` / `labels` 都已经 shift 过（长度 T-1）
-    - `preds[i]` 预测的是原始 input_ids 位置 i+1 的 token
-    - 于是 offsets 用 i+1 索引
-    返回 (correct, total)。"""
+    """用 offset mapping 定位 target_text 区间 → argmax 准确率。"""
     if not target_text or not full_text:
         return 0, 0
     start = full_text.find(target_text, search_from)
     if start < 0:
-        # fallback: 全文找（某些情况下 value 只出现在 assistant）
         start = full_text.find(target_text)
         if start < 0:
             return 0, 0
@@ -120,18 +105,45 @@ def _token_accuracy_on_span(preds, labels, tokenizer, target_text: str,
     return correct, total
 
 
-def eval_world_qa(model, tokenizer, val_path: str, device, seg_len=256, max_episodes=100):
-    """WorldQA: 逐条 single-turn QA，统计 assistant answer 的整体 token argmax 准确率。
+def _value_span_fullmatch(tr, tokenizer, value) -> bool:
+    """对 tr，检查 value 在 assistant span 的 token argmax 是否全对。value 是 str 或 list。"""
+    if isinstance(value, list):
+        values_to_check = value
+    else:
+        values_to_check = [value]
+    full_text = tokenizer.apply_chat_template(
+        [{"role": "user", "content": tr["user"]},
+         {"role": "assistant", "content": tr["asst"]}],
+        tokenize=False, add_generation_prompt=False,
+    )
+    prefix_text = tokenizer.apply_chat_template(
+        [{"role": "user", "content": tr["user"]}],
+        tokenize=False, add_generation_prompt=True,
+    )
+    search_from = len(prefix_text)
+    for v in values_to_check:
+        if not v:
+            continue
+        c, t = _token_accuracy_on_span(
+            tr["preds"], tr["labels"], tokenizer, v, full_text,
+            search_from=search_from,
+        )
+        if t == 0 or c < t:
+            return False
+    return True
 
-    val 集：每行一个 episode，只有一轮（user 问题 + assistant 答案），train_loss=true。
-    """
+
+# ═══════════════════════════════════════════════════════════════════
+# 经典指标
+# ═══════════════════════════════════════════════════════════════════
+
+def eval_world_qa(model, tokenizer, val_path: str, device, seg_len=256, max_episodes=100):
+    """单轮 QA 的 token argmax 准确率。"""
     path = Path(val_path)
     if not path.exists():
         return 0.0, 0
-
     correct = total = 0
     episodes_done = 0
-
     with open(path, "r", encoding="utf-8") as f:
         for ln in f:
             ln = ln.strip()
@@ -152,28 +164,16 @@ def eval_world_qa(model, tokenizer, val_path: str, device, seg_len=256, max_epis
                 correct += (preds == tgts).sum().item()
                 total += tgts.numel()
             episodes_done += 1
-
-    acc = correct / max(total, 1)
-    return acc, episodes_done
+    return correct / max(total, 1), episodes_done
 
 
 def eval_refusal(model, tokenizer, val_path: str, device, seg_len=256, max_episodes=100):
-    """RefusalRate:
-        每个 episode 最后一轮是"问未披露槽"，模型应产生含 refusal 关键词的回复且不 fabricate。
-
-    衡量方式（保持 teacher-forcing 口径，不做 generation）:
-        - 取最后一个 train_loss=true 的 turn，其 value=None（标记为 refusal 轮）
-        - 用模型预测的 token argmax 拼成 predicted answer
-        - 如果预测里包含 refusal regex 关键词 → refused=1
-        - 否则 → 认为是 fabrication
-    """
+    """末轮应拒答（不 fabricate）。"""
     path = Path(val_path)
     if not path.exists():
         return 0.0, 0
-
     refused = fabricated = 0
     episodes_done = 0
-
     with open(path, "r", encoding="utf-8") as f:
         for ln in f:
             ln = ln.strip()
@@ -183,8 +183,6 @@ def eval_refusal(model, tokenizer, val_path: str, device, seg_len=256, max_episo
                 break
             ep = json.loads(ln)
             turn_results = _forward_episode(model, tokenizer, ep, device, seg_len)
-
-            # 找最后一个 train_loss=true 且 value 为空的 turn（refusal 轮）
             refusal_turn = None
             for tr in reversed(turn_results):
                 if tr["train_loss"] and not tr["value"]:
@@ -192,37 +190,26 @@ def eval_refusal(model, tokenizer, val_path: str, device, seg_len=256, max_episo
                     break
             if refusal_turn is None:
                 continue
-
-            # 从 preds 拼 predicted assistant answer 文本
             mask = refusal_turn["labels"] != -100
             if mask.sum().item() == 0:
                 continue
             pred_ids = refusal_turn["preds"][mask].tolist()
             pred_text = tokenizer.decode(pred_ids, skip_special_tokens=True)
-
             if REFUSAL_REGEX.search(pred_text):
                 refused += 1
             else:
                 fabricated += 1
             episodes_done += 1
-
     total = refused + fabricated
-    rate = refused / max(total, 1)
-    return rate, episodes_done
+    return refused / max(total, 1), episodes_done
 
 
 def eval_compositional(model, tokenizer, val_path: str, device, seg_len=256, max_episodes=100):
-    """Compositional: 多 fact 单 utterance 准确率。
-
-    val 集: 每 episode 最后一轮是多 fact 单 utterance，value=list[str]。
-    衡量: 所有 value 的 token 都预测对才算一个 episode "全对"，返回全对率。
-    """
+    """末轮多 fact 单 utterance，所有 value token 全对。"""
     path = Path(val_path)
     if not path.exists():
         return 0.0, 0
-
     all_right = total_eps = 0
-
     with open(path, "r", encoding="utf-8") as f:
         for ln in f:
             ln = ln.strip()
@@ -232,8 +219,6 @@ def eval_compositional(model, tokenizer, val_path: str, device, seg_len=256, max
                 break
             ep = json.loads(ln)
             turn_results = _forward_episode(model, tokenizer, ep, device, seg_len)
-
-            # 找最后一个 train_loss=true 且 value 是 list 的 turn
             comp_turn = None
             for tr in reversed(turn_results):
                 v = tr["value"]
@@ -242,118 +227,23 @@ def eval_compositional(model, tokenizer, val_path: str, device, seg_len=256, max
                     break
             if comp_turn is None:
                 continue
-
             total_eps += 1
-            asst = comp_turn["asst"]
-            user = comp_turn["user"]
-            # 重建 full_text 用于 offset 定位（和 tokenize_turn 逻辑一致）
-            full_text = tokenizer.apply_chat_template(
-                [{"role": "user", "content": user},
-                 {"role": "assistant", "content": asst}],
-                tokenize=False, add_generation_prompt=False,
-            )
-            # 找 assistant 部分起点（跳过 user 部分，避免 find 撞到 user 里的 value 重复）
-            prefix_text = tokenizer.apply_chat_template(
-                [{"role": "user", "content": user}],
-                tokenize=False, add_generation_prompt=True,
-            )
-            asst_char_start = len(prefix_text)
-
-            ep_all_right = True
-            for v in comp_turn["value"]:
-                c, t = _token_accuracy_on_span(
-                    comp_turn["preds"], comp_turn["labels"], tokenizer, v, full_text,
-                    search_from=asst_char_start,
-                )
-                if t == 0 or c < t:
-                    ep_all_right = False
-                    break
-            if ep_all_right:
+            if _value_span_fullmatch(comp_turn, tokenizer, comp_turn["value"]):
                 all_right += 1
-
-    rate = all_right / max(total_eps, 1)
-    return rate, total_eps
+    return all_right / max(total_eps, 1), total_eps
 
 
 # ═══════════════════════════════════════════════════════════════════
-# v6 W_turn 专属评测：pronoun / disentangle / rapid_overwrite / decay
+# 通用末轮 value match eval（retention / continuity / verbatim 等）
 # ═══════════════════════════════════════════════════════════════════
 
-
-def _value_span_fullmatch(tr, tokenizer, value) -> bool:
-    """对 tr 的最后一个 value-bearing turn，检查 value 在 assistant span 的 token argmax 是否全对。"""
-    v = value if isinstance(value, str) else (value[0] if value else "")
-    if not v:
-        return False
-    full_text = tokenizer.apply_chat_template(
-        [{"role": "user", "content": tr["user"]},
-         {"role": "assistant", "content": tr["asst"]}],
-        tokenize=False, add_generation_prompt=False,
-    )
-    prefix_text = tokenizer.apply_chat_template(
-        [{"role": "user", "content": tr["user"]}],
-        tokenize=False, add_generation_prompt=True,
-    )
-    c, t = _token_accuracy_on_span(
-        tr["preds"], tr["labels"], tokenizer, v, full_text,
-        search_from=len(prefix_text),
-    )
-    return t > 0 and c == t
-
-
-def eval_pronoun_resolution(model, tokenizer, val_path: str, device, seg_len=256, max_episodes=100):
-    """Pronoun resolution: 按 target_dtau ∈ {1..4} 分桶，计算 macro 平均 VALUE 全中率。
-
-    val 集: 每 episode 最后一轮带 target_dtau 整数 + value=entity。
-    返回 (macro_avg, episodes_done)。
-    """
+def eval_last_turn_value_match(
+    model, tokenizer, val_path: str, device, seg_len=256, max_episodes=100,
+):
+    """通用 eval：取最后一个 value-bearing turn，检查 value span token argmax 全对率。"""
     path = Path(val_path)
     if not path.exists():
         return 0.0, 0
-
-    buckets: dict[int, list[int]] = {1: [0, 0], 2: [0, 0], 3: [0, 0], 4: [0, 0]}   # [hit, total]
-    episodes_done = 0
-
-    with open(path, "r", encoding="utf-8") as f:
-        for ln in f:
-            ln = ln.strip()
-            if not ln:
-                continue
-            if episodes_done >= max_episodes:
-                break
-            ep = json.loads(ln)
-            convs = ep.get("conversations", [])
-            # 从 jsonl 取最后一条 assistant 的 target_dtau（_forward_episode 不透传该字段）
-            dtau = None
-            for entry in reversed(convs):
-                if entry.get("role") == "assistant" and entry.get("target_dtau") is not None:
-                    dtau = int(entry["target_dtau"])
-                    break
-            if dtau not in buckets:
-                continue
-
-            turn_results = _forward_episode(model, tokenizer, ep, device, seg_len)
-            # 最后一个 recall turn
-            last = turn_results[-1] if turn_results else None
-            if last is None or not last["train_loss"] or not last["value"]:
-                continue
-            hit = _value_span_fullmatch(last, tokenizer, last["value"])
-            buckets[dtau][1] += 1
-            buckets[dtau][0] += 1 if hit else 0
-            episodes_done += 1
-
-    # macro 平均（跳过无样本桶）
-    per_bucket = [b[0] / b[1] for b in buckets.values() if b[1] > 0]
-    macro = sum(per_bucket) / max(len(per_bucket), 1)
-    return macro, episodes_done
-
-
-def eval_disentangle(model, tokenizer, val_path: str, device, seg_len=256, max_episodes=100):
-    """Disentangle: fact vs transient 召回率（anchor value span 全中比例）。"""
-    path = Path(val_path)
-    if not path.exists():
-        return 0.0, 0
-
     hit = total = 0
     with open(path, "r", encoding="utf-8") as f:
         for ln in f:
@@ -373,69 +263,54 @@ def eval_disentangle(model, tokenizer, val_path: str, device, seg_len=256, max_e
     return hit / max(total, 1), total
 
 
-def eval_rapid_overwrite(model, tokenizer, val_path: str, device, seg_len=256, max_episodes=100):
-    """Rapid overwrite: 末轮应召回最后一个 value。逻辑与 disentangle 一致。"""
-    return eval_disentangle(model, tokenizer, val_path, device, seg_len, max_episodes)
+# 兼容别名（trainer / chat_smoke 可能调用）
+eval_rapid_overwrite = eval_last_turn_value_match
 
 
-def eval_decay_refusal(model, tokenizer, val_path: str, device, seg_len=256, max_episodes=100):
-    """Decay refusal: 末轮应以 FORGET 模板拒答（记不太清 / 想不起 等）。"""
-    path = Path(val_path)
-    if not path.exists():
-        return 0.0, 0
+# ═══════════════════════════════════════════════════════════════════
+# Registry patching：给所有 val 生成器附上 eval_fn
+# 这是 persona_joint.py 最后一步，避免 patterns/ 里的循环 import
+# ═══════════════════════════════════════════════════════════════════
 
-    refused = fabricated = 0
-    with open(path, "r", encoding="utf-8") as f:
-        for ln in f:
-            if (refused + fabricated) >= max_episodes:
-                break
-            ln = ln.strip()
-            if not ln:
-                continue
-            ep = json.loads(ln)
-            trs = _forward_episode(model, tokenizer, ep, device, seg_len)
+def _patch_val_eval_fns():
+    """把通用 eval_last_turn_value_match 注入所有注册的 val（没有自定义 eval 的）。"""
+    for name, (gen_fn, eval_fn) in list(VAL_FNS.items()):
+        if eval_fn is None:
+            VAL_FNS[name] = (gen_fn, eval_last_turn_value_match)
 
-            # 最后一个 train_loss=True 且 value 为空的 turn
-            last = None
-            for tr in reversed(trs):
-                if tr["train_loss"] and not tr["value"]:
-                    last = tr
-                    break
-            if last is None:
-                continue
-            mask = last["labels"] != -100
-            if mask.sum().item() == 0:
-                continue
-            pred_ids = last["preds"][mask].tolist()
-            pred_text = tokenizer.decode(pred_ids, skip_special_tokens=True)
-            if FORGET_REGEX.search(pred_text):
-                refused += 1
-            else:
-                fabricated += 1
 
-    total = refused + fabricated
-    return refused / max(total, 1), total
+_patch_val_eval_fns()
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Joint eval 入口
+# ═══════════════════════════════════════════════════════════════════
+
+# val 集 → (eval_fn, config 路径字段名) 映射
+_JOINT_METRIC_SPECS = [
+    ("world_qa",           eval_world_qa,        "val_worldqa_path"),
+    ("refusal",            eval_refusal,         "val_refusal_path"),
+    ("compositional",      eval_compositional,   "val_compositional_path"),
+    ("rapid_overwrite",    eval_rapid_overwrite, "val_rapid_overwrite_path"),
+    ("verbatim",           eval_last_turn_value_match, "val_verbatim_path"),
+    ("reference_back",     eval_last_turn_value_match, "val_reference_back_path"),
+    ("context_followup",   eval_last_turn_value_match, "val_context_followup_path"),
+    ("topic_continuation", eval_last_turn_value_match, "val_topic_continuation_path"),
+    ("entity_tracking",    eval_last_turn_value_match, "val_entity_tracking_path"),
+    ("irrelevant_forget",  eval_last_turn_value_match, "val_irrelevant_forget_path"),
+    ("multi_slot_retention", eval_last_turn_value_match, "val_multi_slot_retention_path"),
+]
 
 
 def eval_persona_joint(model, tokenizer, config, device, max_episodes: int = 50) -> dict:
-    """一次调用跑 legacy 3 + v6 新 4 共 7 个指标。路径缺失的指标返回 0.0。"""
+    """一次调用跑所有 joint 指标。路径缺失或不存在 → 对应指标返回 0.0。"""
     seg_len = getattr(config, "segment_length", 256)
     result = {}
-
-    wq_path = getattr(config, "val_worldqa_path", "") or ""
-    rf_path = getattr(config, "val_refusal_path", "") or ""
-    cp_path = getattr(config, "val_compositional_path", "") or ""
-    # v6
-    pr_path = getattr(config, "val_pronoun_path", "") or ""
-    di_path = getattr(config, "val_disentangle_path", "") or ""
-    ro_path = getattr(config, "val_rapid_overwrite_path", "") or ""
-    dc_path = getattr(config, "val_decay_path", "") or ""
-
-    result["world_qa"],        _ = eval_world_qa(model, tokenizer, wq_path, device, seg_len, max_episodes)
-    result["refusal"],         _ = eval_refusal(model, tokenizer, rf_path, device, seg_len, max_episodes)
-    result["compositional"],   _ = eval_compositional(model, tokenizer, cp_path, device, seg_len, max_episodes)
-    result["pronoun"],         _ = eval_pronoun_resolution(model, tokenizer, pr_path, device, seg_len, max_episodes)
-    result["disentangle"],     _ = eval_disentangle(model, tokenizer, di_path, device, seg_len, max_episodes)
-    result["rapid_overwrite"], _ = eval_rapid_overwrite(model, tokenizer, ro_path, device, seg_len, max_episodes)
-    result["decay_refusal"],   _ = eval_decay_refusal(model, tokenizer, dc_path, device, seg_len, max_episodes)
+    for name, eval_fn, path_attr in _JOINT_METRIC_SPECS:
+        path = getattr(config, path_attr, "") or ""
+        if not path:
+            result[name] = 0.0
+            continue
+        score, _ = eval_fn(model, tokenizer, path, device, seg_len, max_episodes)
+        result[name] = score
     return result

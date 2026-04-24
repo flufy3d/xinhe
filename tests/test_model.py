@@ -1,5 +1,5 @@
 """
-测试 XinheModel 整体前向传播
+测试 XinheModel 整体前向传播 (v7: 单 Hippocampus, 单 W)
 
 使用 mock backbone 替代真实模型，避免依赖预训练权重。
 """
@@ -9,7 +9,6 @@ import torch.nn as nn
 
 from xinhe.model.config import XinheConfig
 from xinhe.model.backbone import BackboneBase
-from xinhe.model.fact_plugin import FactInterface
 from xinhe.model.xinhe_model import XinheModel
 
 
@@ -47,7 +46,7 @@ class MockBackbone(nn.Module, BackboneBase):
 
 @pytest.fixture
 def model():
-    """创建带 mock backbone 的测试模型 (v5c)"""
+    """创建带 mock backbone 的测试模型 (v7)"""
     config = XinheConfig(
         hidden_size=64,
         n_heads=4,
@@ -62,7 +61,7 @@ def model():
 
 
 def test_forward_shape(model):
-    """forward 输出形状正确 (v5c: W=(B,H,d_v,d_k))"""
+    """forward 输出形状正确 (v7: W=(B,H,d_v,d_k) 单张量)"""
     B, T = 2, 16
     input_ids = torch.randint(0, 100, (B, T))
     state = model.init_state(B)
@@ -83,12 +82,12 @@ def test_forward_with_labels(model):
     result = model(input_ids, state, labels=labels)
 
     assert "loss" in result
-    assert result["loss"].dim() == 0  # scalar
+    assert result["loss"].dim() == 0
     assert result["loss"].item() > 0
 
 
 def test_state_persistence(model):
-    """状态在多个 segment 间传递（v6 DualState：只验证 W_fact 的持续演化）"""
+    """状态在多个 segment 间传递（v7: 单 W 持续演化）"""
     B, T = 1, 8
     state = model.init_state(B)
     states = [state.clone()]
@@ -99,10 +98,10 @@ def test_state_persistence(model):
         state = result["state_next"]
         states.append(state.clone())
 
-    # W_fact 应该在每步变化
+    # W 应该在每步变化
     for i in range(1, len(states)):
-        assert not torch.allclose(states[i].W_fact, states[0].W_fact, atol=1e-6), \
-            f"W_fact 在 segment {i} 没有变化"
+        assert not torch.allclose(states[i], states[0], atol=1e-6), \
+            f"W 在 segment {i} 没有变化"
 
 
 def test_gradient_flow(model):
@@ -110,10 +109,9 @@ def test_gradient_flow(model):
     B, T = 1, 8
     state = model.init_state(B)
 
-    # 两个 segment，不 detach
     input_ids_1 = torch.randint(0, 100, (B, T))
     result_1 = model(input_ids_1, state)
-    state_1 = result_1["state_next"]  # 不 detach
+    state_1 = result_1["state_next"]
 
     input_ids_2 = torch.randint(0, 100, (B, T))
     labels_2 = torch.randint(0, 100, (B, T))
@@ -122,9 +120,11 @@ def test_gradient_flow(model):
     loss = result_2["loss"]
     loss.backward()
 
-    # FactInterface 参数应该有梯度 (v6: q/k/v/beta/o projections)
-    assert model.fact_interface.k_proj.weight.grad is not None
-    assert model.fact_interface.beta_proj.weight.grad is not None
+    # Hippocampus 参数应该有梯度
+    assert model.hippocampus.k_proj.weight.grad is not None
+    assert model.hippocampus.beta_proj.weight.grad is not None
+    assert model.hippocampus.head_decay_logits.grad is not None
+    assert model.hippocampus.time_shift.weight.grad is not None
 
 
 def test_generate(model):
@@ -141,9 +141,8 @@ def test_generate(model):
     assert generated.shape[1] > input_ids.shape[1]
     assert new_state.shape == state.shape
 
-    # 生成的 token 不应全部相同（排除乱码退化）
     new_tokens = generated[0, input_ids.shape[1]:]
-    assert not (new_tokens == new_tokens[0]).all(), "生成的 token 全部相同，可能退化"
+    assert not (new_tokens == new_tokens[0]).all()
 
 
 def test_trainable_params(model):
@@ -155,12 +154,12 @@ def test_trainable_params(model):
 
 
 def test_forward_with_decoupled_dims():
-    """n_heads*head_dim != hidden_size 时全流程正确 (v5c)"""
+    """n_heads*head_dim != hidden_size 时全流程正确 (v7)"""
     config = XinheConfig(
         hidden_size=64,
         n_heads=4,
         head_dim=8,            # 4*8=32 != hidden_size=64
-        read_scale_init=0.0,   # scale=0.5，确保 state 有梯度信号
+        read_scale_init=0.0,
         lora_rank=0,
         freeze_backbone=False,
     )
@@ -169,7 +168,7 @@ def test_forward_with_decoupled_dims():
 
     B, T = 2, 16
     state = model.init_state(B)
-    assert state.shape == (B, 4, 8, 8)  # (B, H, d_v, d_k)
+    assert state.shape == (B, 4, 8, 8)
 
     input_ids = torch.randint(0, 100, (B, T))
     labels = torch.randint(0, 100, (B, T))
@@ -179,9 +178,8 @@ def test_forward_with_decoupled_dims():
     assert result["state_next"].shape == (B, 4, 8, 8)
     assert result["loss"].item() > 0
 
-    # 梯度流通过 read/write 投影（v6: state 为 DualState，聚合两流）
     state_next = result["state_next"]
-    state_loss = state_next.W_fact.sum() + state_next.W_turn.sum() + result["loss"]
+    state_loss = state_next.sum() + result["loss"]
     state_loss.backward()
-    assert model.fact_interface.q_projs[0].weight.grad is not None
-    assert model.fact_interface.v_proj.weight.grad is not None
+    assert model.hippocampus.q_projs[0].weight.grad is not None
+    assert model.hippocampus.v_proj.weight.grad is not None

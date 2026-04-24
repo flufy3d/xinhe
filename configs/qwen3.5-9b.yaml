@@ -18,4 +18,4 @@ backbone:
 lora:
   rank: 16
   alpha: 32
-  target_modules: ["q_proj", "v_proj", "in_proj_qkv", "out_proj"]
+  target_modules: ["q_proj", "v_proj", "o_proj", "in_proj_qkv", "out_proj"]

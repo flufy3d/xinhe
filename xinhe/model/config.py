@@ -1,10 +1,9 @@
 """
-XinheConfig — 心核配置 (v5c)
+XinheConfig — 心核配置 (v7)
 
-包含状态机制、LoRA、训练等超参数。
-v5c: Delta Rule 联想记忆 W: (B,H,d_v,d_k)，删除 n_state/state_dim/
-     contrastive_weight/write_iterations；新增 n_heads/head_dim/
-     beta_bias_init；state_scale_init → read_scale_init。
+v7: Hippocampus 大一统短期记忆
+  删 v6 遗产：W_turn / dual stream / freeze_fact / suppress_*_read / early_stop_pronoun-disentangle
+  加 γ 机制：gamma_head_init_low/high, freeze_time_shift
 """
 from dataclasses import dataclass, field
 from typing import Optional
@@ -20,30 +19,24 @@ class XinheConfig:
     hidden_size: int = 1024
     freeze_backbone: bool = True
 
-    # --- 持久状态 W_fact (v6: Delta Rule) ---
+    # --- Hippocampus (v7: 单一 W, Delta Rule + per-head γ) ---
     n_heads: int = 16               # 头数
     head_dim: int = 64              # d_k = d_v = head_dim
     read_scale_init: float = -5.0   # sigmoid(-5) ≈ 0.007，空态几乎无影响
     beta_bias_init: float = 0.0     # sigmoid(0)=0.5，初始 Delta Rule 学习率
 
-    # --- 持久状态 W_turn (v6: 自旋时序罗盘，与 W_fact 双流) ---
-    enable_turn_memory: bool = True             # 默认开；yaml 可显式 false 做 ablation
-    turn_read_scale_init: float = -3.0          # sigmoid(-3) ≈ 0.047（和 fact read_scale 同档次）。
-                                                # -8 的静默启动在 Stage 0a 由 freeze_turn + W_turn=0 保证，
-                                                # -3 让 0b/1 时 scale 的梯度（sigmoid'≈0.045）能被 LM loss 推动。
-    turn_gamma: float = 0.9                     # 固定衰减（非 Parameter，config 超参）
-    turn_rotation_base: float = 10000.0         # 旋转频率 base（同 Qwen RoPE）
-    turn_phase_max: int = 5                     # 多相位共振搜索窗口 τ ∈ {0..phase_max}
-    turn_phase_temperature: float = 5.0         # softmax 温度系数：score×K，K 越大选择越锐利（防止早期梯度稀释）
-    turn_dtau_hidden: int = 128                 # [deprecated] 旧 Δτ 头隐层，多相位搜索后无用
-    turn_lr_multiplier: float = 1.0             # turn 读侧参数 lr 倍率
-    freeze_turn: bool = False                   # 0a_fact_bootstrap 用
-    freeze_fact: bool = False                   # 0b_turn_bootstrap 用
-    # 彻底屏蔽对应 interface 的 read_layer（跳过 forward 注入）。
-    # freeze_* 只锁参数，但 read_layer 仍会执行并注入 sigmoid(scale)×(q·W) 噪声；
-    # suppress_*_read 完全跳过，强制 clean 单流训练
-    suppress_turn_read: bool = False            # 0a 用：完全不让 W_turn 影响 forward
-    suppress_fact_read: bool = False            # 0b 用：逼模型只能用 W_turn 解题
+    # v7 per-head γ 先验：σ(head_decay_logits) = linspace(low, high, H)
+    gamma_head_init_low: float = 0.8
+    gamma_head_init_high: float = 0.999
+    # 是否冻结 time_shift（Linear(hidden, H)，内容驱动的 Δγ）
+    # Stage 0a 无 distractor 信号时 time_shift 自然不动，无需显式冻结
+    freeze_time_shift: bool = False
+    # 是否冻结 beta_proj.weight（保留 bias 可训，β 回归 per-head 静态先验）
+    # 用于防止 β 在 W 空态死锁中被梯度压到 0
+    freeze_beta_weight: bool = False
+    # 冻结 read_scale 在指定 σ 值（0<x<1）。0 = 不冻（默认）
+    # 破 chicken-and-egg: read_scale 自然稳态 0.04 太弱，强制 0.3+ 让 W 必须参与 output
+    freeze_read_scale_at: float = 0.0
 
     # --- LoRA ---
     lora_rank: int = 16
@@ -70,24 +63,31 @@ class XinheConfig:
     early_stop_patience: int = 0        # (deprecated) 早停耐心
     early_stop_value: float = 0.995     # 早停 VALUE 阈值 (val breakdown 跨过即切下一 stage)
     early_stop_tell: float = 0.0        # 早停 TELL 阈值（整段 exact-match 率）；0 = 不查 TELL
-    # persona 统一训练: 联合早停（legacy 4 + v6 新 4 = 8 指标）
+    # persona 统一训练: 联合早停（v7.1: 11 指标，threshold=0 跳过）
     use_joint_early_stop: bool = False
-    early_stop_world_qa: float = 0.70
-    early_stop_refusal: float = 0.85
-    early_stop_compositional: float = 0.85
-    # v6 新 4 个阈值（0.0 = 跳过该指标的联合早停检查）
-    early_stop_pronoun: float = 0.0
-    early_stop_disentangle: float = 0.0
+    early_stop_world_qa: float = 0.0
+    early_stop_refusal: float = 0.0
+    early_stop_compositional: float = 0.0
     early_stop_rapid_overwrite: float = 0.0
-    early_stop_decay: float = 0.0
-    val_worldqa_path: str = ""          # 世界 QA val jsonl（单轮 Q/A）
-    val_refusal_path: str = ""          # Refusal val jsonl（多轮，每 ep 最后问未披露）
-    val_compositional_path: str = ""    # Compositional val jsonl（多 fact 单 utterance）
-    # v6 新 4 val 路径
-    val_pronoun_path: str = ""          # 变距代词消解 val
-    val_disentangle_path: str = ""      # fact vs transient val
-    val_rapid_overwrite_path: str = ""  # 快速覆写 val
-    val_decay_path: str = ""            # 遗忘感知 val
+    early_stop_verbatim: float = 0.0
+    early_stop_reference_back: float = 0.0
+    early_stop_context_followup: float = 0.0
+    early_stop_topic_continuation: float = 0.0
+    early_stop_entity_tracking: float = 0.0
+    early_stop_irrelevant_forget: float = 0.0
+    early_stop_multi_slot_retention: float = 0.0
+    # val 路径
+    val_worldqa_path: str = ""
+    val_refusal_path: str = ""
+    val_compositional_path: str = ""
+    val_rapid_overwrite_path: str = ""
+    val_verbatim_path: str = ""
+    val_reference_back_path: str = ""
+    val_context_followup_path: str = ""
+    val_topic_continuation_path: str = ""
+    val_entity_tracking_path: str = ""
+    val_irrelevant_forget_path: str = ""
+    val_multi_slot_retention_path: str = ""
     warmup_steps: int = 100
     max_steps: int = 10000
     eval_every: int = 500
@@ -204,14 +204,8 @@ class XinheConfig:
                 "head_dim": "head_dim",
                 "read_scale_init": "read_scale_init",
                 "beta_bias_init": "beta_bias_init",
-                # --- v6 双流 W_turn ---
-                "enable_turn_memory": "enable_turn_memory",
-                "turn_read_scale_init": "turn_read_scale_init",
-                "turn_gamma": "turn_gamma",
-                "turn_rotation_base": "turn_rotation_base",
-                "turn_phase_max": "turn_phase_max",
-                "turn_phase_temperature": "turn_phase_temperature",
-                "turn_dtau_hidden": "turn_dtau_hidden",     # [deprecated] 仅为兼容旧 yaml，不再使用
+                "gamma_head_init_low": "gamma_head_init_low",
+                "gamma_head_init_high": "gamma_head_init_high",
             },
             "lora": {
                 "rank": "lora_rank",
@@ -226,12 +220,10 @@ class XinheConfig:
                 "batch_size": "batch_size",
                 "learning_rate": "learning_rate",
                 "plugin_lr_multiplier": "plugin_lr_multiplier",
-                "turn_lr_multiplier": "turn_lr_multiplier",
                 "freeze_lora": "freeze_lora",
-                "freeze_turn": "freeze_turn",
-                "freeze_fact": "freeze_fact",
-                "suppress_turn_read": "suppress_turn_read",
-                "suppress_fact_read": "suppress_fact_read",
+                "freeze_time_shift": "freeze_time_shift",
+                "freeze_beta_weight": "freeze_beta_weight",
+                "freeze_read_scale_at": "freeze_read_scale_at",
                 "lora_reset": "lora_reset",
                 "weight_decay": "weight_decay",
                 "grad_clip": "grad_clip",
@@ -246,10 +238,14 @@ class XinheConfig:
                 "early_stop_world_qa": "early_stop_world_qa",
                 "early_stop_refusal": "early_stop_refusal",
                 "early_stop_compositional": "early_stop_compositional",
-                "early_stop_pronoun": "early_stop_pronoun",
-                "early_stop_disentangle": "early_stop_disentangle",
                 "early_stop_rapid_overwrite": "early_stop_rapid_overwrite",
-                "early_stop_decay": "early_stop_decay",
+                "early_stop_verbatim": "early_stop_verbatim",
+                "early_stop_reference_back": "early_stop_reference_back",
+                "early_stop_context_followup": "early_stop_context_followup",
+                "early_stop_topic_continuation": "early_stop_topic_continuation",
+                "early_stop_entity_tracking": "early_stop_entity_tracking",
+                "early_stop_irrelevant_forget": "early_stop_irrelevant_forget",
+                "early_stop_multi_slot_retention": "early_stop_multi_slot_retention",
                 "warmup_steps": "warmup_steps",
                 "max_steps": "max_steps",
                 "eval_every": "eval_every",
@@ -264,11 +260,14 @@ class XinheConfig:
                 "val_worldqa_path": "val_worldqa_path",
                 "val_refusal_path": "val_refusal_path",
                 "val_compositional_path": "val_compositional_path",
-                # v6 新 val 路径
-                "val_pronoun_path": "val_pronoun_path",
-                "val_disentangle_path": "val_disentangle_path",
                 "val_rapid_overwrite_path": "val_rapid_overwrite_path",
-                "val_decay_path": "val_decay_path",
+                "val_verbatim_path": "val_verbatim_path",
+                "val_reference_back_path": "val_reference_back_path",
+                "val_context_followup_path": "val_context_followup_path",
+                "val_topic_continuation_path": "val_topic_continuation_path",
+                "val_entity_tracking_path": "val_entity_tracking_path",
+                "val_irrelevant_forget_path": "val_irrelevant_forget_path",
+                "val_multi_slot_retention_path": "val_multi_slot_retention_path",
             },
             "logging": {
                 "use_wandb": "use_wandb",

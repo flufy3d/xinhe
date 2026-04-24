@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import random
 
-from xinhe.data.generate_memory_data import (
+from xinhe.data.samplers import (
     random_name, random_city, random_food, random_job,
     random_hobby, random_age, random_pet, random_number,
 )

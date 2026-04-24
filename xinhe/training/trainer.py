@@ -1,18 +1,16 @@
 """
-Trainer — 训练循环
+Trainer (v7) — 训练循环
 
 核心特性:
-- state 跨 segment (对话轮次) 传递
+- state 跨 segment (对话轮次) 传递，state 是单张量 W: (B, H, d_v, d_k)
 - 截断 BPTT: 每 tbptt_steps 轮做 detach + backward + step
-- 只训练 FactInterface (+ TurnInterface) + LoRA 参数
+- 只训练 Hippocampus + LoRA 参数
 """
 import math
-import time
 from pathlib import Path
 from typing import Optional
 
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader
 
 # 预加载 torch 子模块 (如果在函数内 import, Python 会把 torch 误作 local 变量,
@@ -52,12 +50,7 @@ class Trainer:
     ):
         self.model = model
         self.config = config
-        self.model.config = config  # 同步 model 侧 config（forward 读 suppress_*_read）
-        # 同步 turn_interface 运行时标量（model 实例化时用的是 base_config，stage_config 的 override 要补同步）
-        if getattr(self.model, "turn_interface", None) is not None:
-            ti = self.model.turn_interface
-            ti.phase_max = int(getattr(config, "turn_phase_max", ti.phase_max))
-            ti.phase_temperature = float(getattr(config, "turn_phase_temperature", ti.phase_temperature))
+        self.model.config = config
         self.train_dataloader = train_dataloader
         self.val_dataloader = val_dataloader
         self.pad_token_id = pad_token_id
@@ -81,7 +74,7 @@ class Trainer:
         self.best_val_loss = float("inf")
         self._accum_count = 0  # 梯度累积计数器
 
-        # 早停状态 (滑动窗口: 连续 N 步 loss 低 + acc 高才收敛)
+        # 早停状态
         self._recent_losses = []
         self._recent_accs = []
         self._early_stopped = False
@@ -91,50 +84,60 @@ class Trainer:
         self._ema_acc = None
 
     def _apply_freezes(self, config: XinheConfig):
-        """按配置冻结/解冻 LoRA / FactInterface / TurnInterface 参数。
+        """按配置冻结/解冻 LoRA / Hippocampus 参数。
 
-        v6 新增：
-        - freeze_fact: 0b_turn_bootstrap 阶段锁住 fact（fact 已训熟，专心训 turn）
-        - freeze_turn: 0a_fact_bootstrap 阶段锁住 turn（防止随机 turn 读侧干扰 fact 原语学习）
-        - 另：plugin_lr_multiplier=0 或 turn_lr_multiplier=0 也等效冻结
+        v7:
+        - freeze_lora: Stage 0a/0b bootstrap 用，强迫 Hippocampus 独立承担
+        - freeze_time_shift: 实验用，冻结 Linear(hidden, H) 的 γ 偏移层
+        - plugin_lr_multiplier=0 也等效冻结整个 Hippocampus
         """
         freeze_lora = getattr(config, "freeze_lora", False)
         for p in get_lora_params(self.model.backbone):
             p.requires_grad = not freeze_lora
 
-        freeze_fact = (
-            getattr(config, "freeze_fact", False)
-            or getattr(config, "plugin_lr_multiplier", 1.0) == 0
-        )
-        for p in self.model.fact_interface.parameters():
-            p.requires_grad = not freeze_fact
+        freeze_plugin = getattr(config, "plugin_lr_multiplier", 1.0) == 0
+        for p in self.model.hippocampus.parameters():
+            p.requires_grad = not freeze_plugin
 
-        turn_iface = getattr(self.model, "turn_interface", None)
-        if turn_iface is not None:
-            freeze_turn = (
-                getattr(config, "freeze_turn", False)
-                or getattr(config, "turn_lr_multiplier", 1.0) == 0
-            )
-            for p in turn_iface.parameters():
-                p.requires_grad = not freeze_turn
+        # 额外：freeze_time_shift 单独冻 Δγ 层 + reset 到零初值
+        # 语义："我不要内容驱动的 γ，只用静态先验"。如果前一阶段学偏了，必须 reset 才符合语义。
+        if getattr(config, "freeze_time_shift", False):
+            import torch.nn as nn
+            nn.init.zeros_(self.model.hippocampus.time_shift.weight)
+            nn.init.zeros_(self.model.hippocampus.time_shift.bias)
+            for p in self.model.hippocampus.time_shift.parameters():
+                p.requires_grad = False
+            print("  [freeze_time_shift] time_shift 已 reset 到零 + 冻结（γ 仅用静态先验 σ(θ_h)）")
+
+        # freeze_beta_weight：reset beta_proj.weight 到零 + 冻结，保留 bias 可训
+        # 让 β = σ(bias) 纯 per-head 静态先验。防止 β 在 W 空态死锁中被压到 0。
+        if getattr(config, "freeze_beta_weight", False):
+            import torch.nn as nn
+            nn.init.zeros_(self.model.hippocampus.beta_proj.weight)
+            self.model.hippocampus.beta_proj.weight.requires_grad = False
+            # bias 保留可训（让模型调节整体写强度）
+            print("  [freeze_beta_weight] beta_proj.weight reset 到零 + 冻结（β=σ(bias) per-head 静态）")
+
+        # freeze_read_scale_at: 强制 read_scale = logit(x) 并冻结。破 chicken-and-egg
+        scale_val = getattr(config, "freeze_read_scale_at", 0.0)
+        if scale_val > 0.0 and scale_val < 1.0:
+            import math as _math
+            logit = _math.log(scale_val / (1.0 - scale_val))
+            with torch.no_grad():
+                self.model.hippocampus.read_scale.data.fill_(logit)
+            self.model.hippocampus.read_scale.requires_grad = False
+            print(f"  [freeze_read_scale_at] read_scale = {scale_val:.3f} (logit={logit:.3f}) 冻结")
 
     def _build_optimizer(self, config: XinheConfig) -> torch.optim.AdamW:
-        """构建 optimizer: Fact / Turn / LoRA 三组独立学习率 (Adam 默认 eps)。"""
+        """构建 optimizer: Hippocampus / LoRA 两组独立学习率。"""
         lr = config.learning_rate
         plugin_mult = getattr(config, "plugin_lr_multiplier", 1.0)
-        turn_mult = getattr(config, "turn_lr_multiplier", 1.0)
 
-        fact_params = [p for p in self.model.fact_interface.parameters() if p.requires_grad]
+        plugin_params = [p for p in self.model.hippocampus.parameters() if p.requires_grad]
 
         param_groups = []
-        if fact_params:
-            param_groups.append({"params": fact_params, "lr": lr * plugin_mult})
-
-        turn_iface = getattr(self.model, "turn_interface", None)
-        if turn_iface is not None:
-            turn_params = [p for p in turn_iface.parameters() if p.requires_grad]
-            if turn_params:
-                param_groups.append({"params": turn_params, "lr": lr * turn_mult})
+        if plugin_params:
+            param_groups.append({"params": plugin_params, "lr": lr * plugin_mult})
 
         if not getattr(config, "freeze_lora", False):
             lora_params = [p for p in get_lora_params(self.model.backbone) if p.requires_grad]
@@ -143,16 +146,10 @@ class Trainer:
         return torch.optim.AdamW(param_groups, weight_decay=config.weight_decay)
 
     def _build_scheduler(self):
-        """Cosine schedule with linear warmup + min LR clamp (5% of peak)。
-
-        Min clamp 避免 LR→0 时 Adam 的 v_hat 长期低估 + 小梯度 spike 产生
-        巨大 update step (grad / sqrt(v_hat)) 导致训练末期崩盘 (observed v5e stage 2)。
-        真正阻断崩盘的主要是 grad_clip，clamp 只是给末期留一点优化能力，
-        所以 5% 即可；v5e 阶段性提到 10% 是临时保守，v5c 回归 5%。
-        """
+        """Cosine schedule with linear warmup + min LR clamp (1% of peak)。"""
         warmup = self.config.warmup_steps
         max_steps = self.config.max_steps
-        min_mult = 0.01  # LR 最低降到 peak 的 1% (末期收敛更紧；grad_clip=1.0 主防崩盘)
+        min_mult = 0.01
 
         def lr_lambda(step):
             if step < warmup:
@@ -168,19 +165,17 @@ class Trainer:
         self.model.setup_device(self.device)
         self.model.train()
 
-        # TF32 加速 (float32 矩阵乘法用 TensorFloat32)
+        # TF32 加速
         torch.set_float32_matmul_precision('high')
 
         # torch.compile: 只编译 backbone (transformer blocks)，plugin 的 state 操作不编译
-        # 配套: reset_for_new_stage() 里显式 dynamo.reset() 清掉 cache, 避免跨阶段 OOM
         import sys
         import warnings
         if sys.platform == "linux" and not getattr(self, "_compiled", False):
-            # 屏蔽 Dynamo 追踪 FLA 库时的良性告警
             warnings.filterwarnings("ignore", message=".*Dynamo.*", category=UserWarning)
             warnings.filterwarnings("ignore", module=r"torch\._dynamo.*", category=UserWarning)
             try:
-                torch._logging.set_logs(dynamo=40)  # ERROR only
+                torch._logging.set_logs(dynamo=40)
             except Exception:
                 pass
             try:
@@ -198,25 +193,26 @@ class Trainer:
             print(f"梯度累积: {self.config.grad_accum_steps} 步")
 
         self.optimizer.zero_grad()
-        self._last_eval_step = -1  # 避免同步骤重复 eval
+        self._last_eval_step = -1
         epoch = 0
         while self.global_step < self.config.max_steps:
             if self._early_stopped:
                 break
             epoch += 1
             self._train_epoch()
-            # 注: val 已改到 _maybe_optimizer_step 里每 eval_every 步触发, 不再只在 epoch 末
 
-        fact_scale = torch.sigmoid(self.model.fact_interface.read_scale).item()
-        turn_iface = getattr(self.model, "turn_interface", None)
-        scale_str = f"fact={fact_scale:.4f}"
-        if turn_iface is not None:
-            turn_scale = torch.sigmoid(turn_iface.read_scale_turn).item()
-            scale_str += f" turn={turn_scale:.4f}"
+        # 阶段末尾最终 val（若和上一次 eval 不同 step）
+        if (self.val_dataloader is not None
+                and self.global_step != self._last_eval_step):
+            self._last_eval_step = self.global_step
+            print(f"  [最终 val @ step {self.global_step}]")
+            self._validate()
+
+        read_scale = torch.sigmoid(self.model.hippocampus.read_scale).item()
         if self._early_stopped:
-            print(f"训练已收敛, 共 {self.global_step} 步, scale=[{scale_str}]")
+            print(f"训练已收敛, 共 {self.global_step} 步, read_scale={read_scale:.4f}")
         else:
-            print(f"训练完成, 共 {self.global_step} 步, scale=[{scale_str}]")
+            print(f"训练完成, 共 {self.global_step} 步, read_scale={read_scale:.4f}")
 
     def _train_epoch(self) -> float:
         """训练一个 epoch (遍历所有 episode)"""
@@ -234,8 +230,7 @@ class Trainer:
         return total_loss / max(num_episodes, 1)
 
     def _train_episode(self, episode_segments) -> float:
-        """
-        训练一个 episode (多轮对话)。
+        """训练一个 episode (多轮对话)。
 
         episode_segments: segment 列表，每个是 (input_ids, labels, weights) tuple，shape (B, T)
         """
@@ -245,7 +240,7 @@ class Trainer:
         episode_total_loss = 0.0
         episode_correct = 0
         episode_total = 0
-        loss_segments = 0  # 只计数有真实 loss 的 segment
+        loss_segments = 0
 
         for seg_idx, batch in enumerate(episode_segments):
             segment, labels, weights = batch
@@ -253,23 +248,17 @@ class Trainer:
             labels = labels.to(self.device)
             weights = weights.to(self.device)
 
-            # 截断 BPTT: 每 tbptt_steps 切断梯度
             if seg_idx > 0 and seg_idx % self.config.tbptt_steps == 0:
-                # 先做 backward (+ 可能的 optimizer step)
                 if loss_segments > 0:
                     avg_loss = accumulated_loss / loss_segments
                     (avg_loss / self.config.grad_accum_steps).backward()
                     episode_total_loss += avg_loss.item()
                     self._maybe_optimizer_step(avg_loss.item())
-                elif seg_idx > 0:
-                    pass  # 没有 loss segment，跳过
 
-                # 切断梯度
                 state = state.detach()
                 accumulated_loss = torch.tensor(0.0, device=self.device)
                 loss_segments = 0
 
-            # Forward
             with torch.amp.autocast("cuda", dtype=self.dtype):
                 result = self.model(segment, state, labels=labels, pad_token_id=self.pad_token_id, weights=weights)
 
@@ -280,12 +269,10 @@ class Trainer:
             total = result.get("total", 0)
             episode_correct += correct.item() if hasattr(correct, 'item') else correct
             episode_total += total.item() if hasattr(total, 'item') else total
-            # 只有真正有 loss 的 segment 才计数
             has_valid_labels = (labels != -100).any()
             if has_valid_labels:
                 loss_segments += 1
 
-        # 处理剩余的 accumulated loss
         if loss_segments > 0:
             avg_loss = accumulated_loss / loss_segments
             (avg_loss / self.config.grad_accum_steps).backward()
@@ -298,8 +285,8 @@ class Trainer:
     @torch.no_grad()
     def _validate(self) -> None:
         """验证集评估。
-        默认模式: VALUE/FRAME/TELL 分解，VALUE ≥ early_stop_value 触发早停。
-        use_joint_early_stop=True 时: 额外跑 WorldQA/Refusal/Compositional 3 指标，4 个全过才早停。
+        默认: VALUE/FRAME/TELL breakdown，VALUE ≥ early_stop_value 触发早停。
+        use_joint_early_stop=True 时: 额外跑 WorldQA/Refusal/Compositional/Decay/RapidOW 5 指标。
         """
         self.model.eval()
         try:
@@ -331,9 +318,6 @@ class Trainer:
             use_joint = getattr(self.config, "use_joint_early_stop", False)
 
             if not use_joint:
-                # 单指标 VALUE 早停（原行为）
-                # 注：TELL 是"tell 轮 assistant token 准确率"，只在有 tell 轮的数据里有意义；
-                # 0b verbatim/meta 数据里所有 recall 轮都是 VALUE 轮，TELL 为 0 是无分母，不是真失败
                 early_stop_value = getattr(self.config, "early_stop_value", 0.0)
                 if early_stop_value > 0 and value_acc >= early_stop_value:
                     self._early_stopped = True
@@ -341,38 +325,35 @@ class Trainer:
                 self.model.train()
                 return
 
-            # 联合早停（v6: legacy 4 + 新 4 = 8 指标，threshold=0 的跳过）
+            # 联合早停（v7.1: 11 指标，threshold=0 跳过）
             from xinhe.evaluation.persona_joint import eval_persona_joint
             joint = eval_persona_joint(
                 self.model, tokenizer, self.config, self.device,
                 max_episodes=50,
             )
-            wq = joint.get("world_qa", 0.0)
-            rf = joint.get("refusal", 0.0)
-            cp = joint.get("compositional", 0.0)
-            pr = joint.get("pronoun", 0.0)
-            di = joint.get("disentangle", 0.0)
-            ro = joint.get("rapid_overwrite", 0.0)
-            dc = joint.get("decay_refusal", 0.0)
-            print(
-                f"  [joint] WorldQA={wq:.2%} Refusal={rf:.2%} Compositional={cp:.2%} "
-                f"| Pronoun={pr:.2%} Disentangle={di:.2%} RapidOverwrite={ro:.2%} Decay={dc:.2%}"
+            # 打印所有非零指标
+            def _fmt(x): return f"{x:.2%}"
+            line = " ".join(
+                f"{k}={_fmt(v)}" for k, v in joint.items() if v > 0
             )
+            print(f"  [joint] {line}")
 
-            # 每个指标有独立阈值；threshold=0 的视作"不检查"（兼容 stage 0/1 三指标）
             checks = [
-                ("VALUE",         value_acc, getattr(self.config, "early_stop_value", 0.0)),
-                ("WorldQA",       wq,        getattr(self.config, "early_stop_world_qa", 0.0)),
-                ("Refusal",       rf,        getattr(self.config, "early_stop_refusal", 0.0)),
-                ("Compositional", cp,        getattr(self.config, "early_stop_compositional", 0.0)),
-                ("Pronoun",       pr,        getattr(self.config, "early_stop_pronoun", 0.0)),
-                ("Disentangle",   di,        getattr(self.config, "early_stop_disentangle", 0.0)),
-                ("RapidOW",       ro,        getattr(self.config, "early_stop_rapid_overwrite", 0.0)),
-                ("Decay",         dc,        getattr(self.config, "early_stop_decay", 0.0)),
+                ("VALUE",            value_acc,                         getattr(self.config, "early_stop_value", 0.0)),
+                ("WorldQA",          joint.get("world_qa", 0.0),        getattr(self.config, "early_stop_world_qa", 0.0)),
+                ("Refusal",          joint.get("refusal", 0.0),         getattr(self.config, "early_stop_refusal", 0.0)),
+                ("Compositional",    joint.get("compositional", 0.0),   getattr(self.config, "early_stop_compositional", 0.0)),
+                ("RapidOW",          joint.get("rapid_overwrite", 0.0), getattr(self.config, "early_stop_rapid_overwrite", 0.0)),
+                ("Verbatim",         joint.get("verbatim", 0.0),        getattr(self.config, "early_stop_verbatim", 0.0)),
+                ("RefBack",          joint.get("reference_back", 0.0),  getattr(self.config, "early_stop_reference_back", 0.0)),
+                ("CtxFollowup",      joint.get("context_followup", 0.0), getattr(self.config, "early_stop_context_followup", 0.0)),
+                ("TopicCont",        joint.get("topic_continuation", 0.0), getattr(self.config, "early_stop_topic_continuation", 0.0)),
+                ("EntityTrack",      joint.get("entity_tracking", 0.0), getattr(self.config, "early_stop_entity_tracking", 0.0)),
+                ("IrrelevantForget", joint.get("irrelevant_forget", 0.0), getattr(self.config, "early_stop_irrelevant_forget", 0.0)),
+                ("MultiSlot",        joint.get("multi_slot_retention", 0.0), getattr(self.config, "early_stop_multi_slot_retention", 0.0)),
             ]
             active = [(name, val, thr) for name, val, thr in checks if thr > 0]
             if not active:
-                # 没有任何 threshold 启用 → 不做联合早停
                 self.model.train()
                 return
 
@@ -405,7 +386,7 @@ class Trainer:
         self.global_step += 1
         self._accum_count = 0
 
-        # 更新 EMA (窗口 ≈ log_every 步)
+        # 更新 EMA
         alpha = 2.0 / (self.config.log_every + 1)
         if self._ema_loss is None:
             self._ema_loss = last_loss
@@ -416,42 +397,39 @@ class Trainer:
 
         if self.global_step % self.config.log_every == 0:
             lr = self.scheduler.get_last_lr()[0]
-            fact_scale = torch.sigmoid(self.model.fact_interface.read_scale).item()
-            turn_iface = getattr(self.model, "turn_interface", None)
-            scale_str = f"fact={fact_scale:.4f}"
-            if turn_iface is not None:
-                turn_scale = torch.sigmoid(turn_iface.read_scale_turn).item()
-                scale_str += f" turn={turn_scale:.4f}"
-                diag = turn_iface.get_phase_diagnostics()
-                if diag is not None:
-                    scale_str += f" phase_ent={diag['turn_phase_entropy']:.3f}"
-                    scale_str += f" phase_mode={diag['turn_phase_argmax_mean']:.2f}"
-            print(f"  [Step {self.global_step}] ema_loss={self._ema_loss:.4f} ema_acc={self._ema_acc:.2%} lr={lr:.2e} {scale_str}")
+            hippo = self.model.hippocampus
+            read_scale = torch.sigmoid(hippo.read_scale).item()
+            # v7 γ 诊断
+            gamma_prior = torch.sigmoid(hippo.head_decay_logits)
+            gp_min = gamma_prior.min().item()
+            gp_max = gamma_prior.max().item()
+            diag = hippo.get_gamma_diagnostics()
+            gamma_str = f"γ_prior=[{gp_min:.3f},{gp_max:.3f}]"
+            if diag is not None:
+                gamma_str += (
+                    f" γ_tok={diag['gamma_token_mean']:.3f}±{diag['gamma_token_std']:.3f}"
+                    f" γ_min={diag['gamma_token_min']:.3f}"
+                )
+            print(
+                f"  [Step {self.global_step}] ema_loss={self._ema_loss:.4f} "
+                f"ema_acc={self._ema_acc:.2%} lr={lr:.2e} "
+                f"read_scale={read_scale:.4f} {gamma_str}"
+            )
 
         if self.global_step % self.config.save_every == 0:
             self._save_checkpoint()
 
-        # 每 eval_every 步跑一次 val breakdown (不再依赖 epoch 边界)
         if (self.val_dataloader is not None
                 and self.global_step % self.config.eval_every == 0
                 and self.global_step != self._last_eval_step):
             self._last_eval_step = self.global_step
             self._validate()
 
-        # v5c: 早停改为基于 val breakdown 的 VALUE 指标（在 _validate 里触发），
-        # 不再看训练 loss —— loss 被 TELL/FRAME 主导，不能反映核心 VALUE 能力。
-
     def reset_for_new_stage(self, config: XinheConfig, train_dataloader: DataLoader,
                             val_dataloader: Optional[DataLoader] = None):
         """课程学习：切换到新阶段，保留模型权重，重建 optimizer/scheduler"""
         self.config = config
-        self.model.config = config  # 同步给 forward 读 suppress_*_read 等 runtime flag
-        # 同步 turn_interface 的运行时标量（yaml 的 stage 覆盖这些值时才生效）
-        if getattr(self.model, "turn_interface", None) is not None:
-            ti = self.model.turn_interface
-            ti.phase_max = int(getattr(config, "turn_phase_max", ti.phase_max))
-            ti.phase_temperature = float(getattr(config, "turn_phase_temperature", ti.phase_temperature))
-            print(f"[turn_interface] phase_max={ti.phase_max} phase_temperature={ti.phase_temperature}")
+        self.model.config = config
         self.train_dataloader = train_dataloader
         self.val_dataloader = val_dataloader
         self.global_step = 0
@@ -462,8 +440,6 @@ class Trainer:
         self._ema_loss = None
         self._ema_acc = None
 
-        # 清掉 Dynamo 编译缓存: 新 stage 的 episode_length/batch_size 变化会触发重编译,
-        # 若不清, 旧阶段的编译 graph 还占着显存 → 跨阶段 OOM
         if getattr(self, "_compiled", False):
             try:
                 torch._dynamo.reset()
@@ -485,10 +461,7 @@ class Trainer:
         save_dir = Path(path).parent
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        # 收集 FactInterface / TurnInterface / LoRA 的 state_dict
-        fact_plugin_state = self.model.fact_interface.state_dict()
-        turn_iface = getattr(self.model, "turn_interface", None)
-        turn_plugin_state = turn_iface.state_dict() if turn_iface is not None else None
+        hippocampus_state = self.model.hippocampus.state_dict()
 
         # LoRA 参数
         lora_state = {}
@@ -500,8 +473,7 @@ class Trainer:
 
         checkpoint = {
             "global_step": self.global_step,
-            "fact_plugin_state": fact_plugin_state,
-            "turn_plugin_state": turn_plugin_state,
+            "hippocampus_state": hippocampus_state,
             "lora_state": lora_state,
             "optimizer_state": self.optimizer.state_dict(),
             "scheduler_state": self.scheduler.state_dict(),
@@ -513,28 +485,15 @@ class Trainer:
         print(f"  [Checkpoint] 保存到 {path}")
 
     def load_checkpoint(self, path: str):
-        """加载 checkpoint"""
+        """加载 checkpoint（v7 strict=True，不兼容 v5c/v6 旧格式）"""
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
 
-        if "fact_plugin_state" not in checkpoint:
+        if "hippocampus_state" not in checkpoint:
             raise RuntimeError(
-                "checkpoint 缺少 'fact_plugin_state' 键。v6 不再兼容旧 'plugin_state' 格式，"
+                "checkpoint 缺少 'hippocampus_state' 键。v7 不兼容 v5c/v6 旧格式，"
                 "请从零重训。"
             )
-        result = self.model.fact_interface.load_state_dict(checkpoint["fact_plugin_state"], strict=False)
-        if result.missing_keys:
-            print(f"  注意: fact checkpoint 缺少 {result.missing_keys}，使用默认初始化")
-
-        # TurnInterface 加载（阶段 0a 到 0b 过渡时允许 turn_plugin_state 缺失 → 保持随机初始化静默启动）
-        turn_iface = getattr(self.model, "turn_interface", None)
-        if turn_iface is not None:
-            turn_state = checkpoint.get("turn_plugin_state")
-            if turn_state is not None:
-                tres = turn_iface.load_state_dict(turn_state, strict=False)
-                if tres.missing_keys:
-                    print(f"  注意: turn checkpoint 缺少 {tres.missing_keys}，使用默认初始化")
-            else:
-                print("  [info] ckpt 无 turn_plugin_state（可能来自 0a_fact_bootstrap 或 turn disabled），turn 保持随机初始化 + 静默 read_scale")
+        self.model.hippocampus.load_state_dict(checkpoint["hippocampus_state"], strict=True)
         self.global_step = checkpoint["global_step"]
 
         # 恢复 LoRA 参数
@@ -549,7 +508,6 @@ class Trainer:
 
         if "optimizer_state" in checkpoint:
             self.optimizer.load_state_dict(checkpoint["optimizer_state"])
-            # 将 optimizer state 搬到正确设备
             for state in self.optimizer.state.values():
                 for k, v in state.items():
                     if isinstance(v, torch.Tensor):

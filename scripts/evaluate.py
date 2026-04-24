@@ -26,20 +26,11 @@ def load_model_and_tokenizer(config, checkpoint_path, device):
 
     if checkpoint_path:
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-        try:
-            if "fact_plugin_state" not in checkpoint:
-                raise RuntimeError(
-                    "checkpoint 缺少 'fact_plugin_state' 键。v6 不再兼容旧 'plugin_state' 格式。"
-                )
-            result = model.fact_interface.load_state_dict(checkpoint["fact_plugin_state"], strict=False)
-            if result.missing_keys:
-                print(f"  注意: checkpoint 缺少 {result.missing_keys}，使用默认初始化")
-            if "turn_plugin_state" in checkpoint and model.turn_interface is not None:
-                model.turn_interface.load_state_dict(checkpoint["turn_plugin_state"], strict=False)
-        except RuntimeError as e:
+        if "hippocampus_state" not in checkpoint:
             raise RuntimeError(
-                "checkpoint 与 --config 不匹配。"
-            ) from e
+                "checkpoint 缺少 'hippocampus_state' 键。v7 不兼容 v5c/v6 旧格式。"
+            )
+        model.hippocampus.load_state_dict(checkpoint["hippocampus_state"], strict=True)
         from xinhe.model.lora import LoRALinear
         lora_state = checkpoint.get("lora_state", {})
         for name, module in model.backbone.named_modules():

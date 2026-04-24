@@ -1,11 +1,14 @@
 """
-生成 v6 八个 val jsonl (legacy 4 + 新 4 W_turn pattern)。
+生成 persona 联合评测的 val jsonl 集合 (v7.1)
+
+通过 registry 遍历所有注册的 val 类别。覆盖：
+  value / worldqa / refusal / compositional / rapid_overwrite
+  verbatim / reference_back / context_followup / topic_continuation
+  entity_tracking / irrelevant_forget / multi_slot_retention
 
 用法:
-    python scripts/build_val_sets.py \
-        --cache-dir data/cache --out-dir data/val \
-        --n-value 200 --n-worldqa 150 --n-refusal 200 --n-compositional 100 \
-        --n-pronoun 100 --n-disentangle 100 --n-rapid-overwrite 100 --n-decay 100
+    python scripts/build_val_sets.py --out-dir data/val --cache-dir data/cache
+    python scripts/build_val_sets.py --value 200 --verbatim 100 --reference_back 100
 """
 import argparse
 import sys
@@ -14,36 +17,26 @@ from pathlib import Path
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
-from xinhe.data.generate_persona_data import generate_val_sets
+from xinhe.data.curriculum_data import generate_val_sets, DEFAULT_VAL_SIZES
 
 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--cache-dir", type=str, default="data/cache")
     p.add_argument("--out-dir", type=str, default="data/val")
-    p.add_argument("--n-value", type=int, default=200)
-    p.add_argument("--n-worldqa", type=int, default=150)
-    p.add_argument("--n-refusal", type=int, default=200)
-    p.add_argument("--n-compositional", type=int, default=100)
-    # v6 新 4 val
-    p.add_argument("--n-pronoun", type=int, default=100)
-    p.add_argument("--n-disentangle", type=int, default=100)
-    p.add_argument("--n-rapid-overwrite", type=int, default=100)
-    p.add_argument("--n-decay", type=int, default=100)
     p.add_argument("--seed", type=int, default=12345)
+    # 每个 val 数量可单独覆盖
+    for name, default_n in DEFAULT_VAL_SIZES.items():
+        p.add_argument(f"--{name}", type=int, default=default_n,
+                       help=f"{name} val 集样本数 (默认 {default_n})")
     args = p.parse_args()
 
+    sizes = {name: getattr(args, name.replace("-", "_"), default)
+             for name, default in DEFAULT_VAL_SIZES.items()}
     paths = generate_val_sets(
         out_dir=args.out_dir,
         cache_dir=args.cache_dir,
-        n_value=args.n_value,
-        n_worldqa=args.n_worldqa,
-        n_refusal=args.n_refusal,
-        n_compositional=args.n_compositional,
-        n_pronoun=args.n_pronoun,
-        n_disentangle=args.n_disentangle,
-        n_rapid_overwrite=args.n_rapid_overwrite,
-        n_decay=args.n_decay,
+        sizes=sizes,
         seed=args.seed,
     )
     print("\n[完成]")

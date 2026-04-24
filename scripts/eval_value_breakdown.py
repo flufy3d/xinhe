@@ -356,53 +356,9 @@ def eval_value_breakdown_fast(model, tokenizer, data_path, device, seg_len=256, 
 
 
 def sweep_same_cat(model, tokenizer, device, seg_len, values, max_episodes, out_base="data/_sweep"):
-    """对每个 same_category 值生成一组 val 数据, 跑 eval, 汇总 VALUE 曲线。"""
-    from xinhe.data.generate_memory_data import generate_data
-
-    print(f"\n=== Sweep same_category ∈ {values} ===")
-    print(f"每点生成 {max_episodes} eval episodes (num_facts=2, entity_ratio=1.0, max_turns=7)")
-    results = []
-    for v in values:
-        out_dir = Path(out_base) / f"same_cat_{v}"
-        print(f"\n[sweep {v}] 生成数据 → {out_dir}")
-        _, val_path = generate_data(
-            out_dir=str(out_dir),
-            num_train=10,
-            num_val=max_episodes,
-            min_distance=1,
-            max_distance=3,
-            max_turns=7,
-            num_facts=2,
-            no_pre_filler=False,
-            max_pre_filler=1,
-            no_overwrite=True,
-            entity_ratio=1.0,
-            same_category=v,
-            seed=42,
-        )
-        ws_agg, _, n = run_eval_on_path(
-            model, tokenizer, val_path, device, seg_len, max_episodes,
-            also_blank=False, track_confusion=True, track_slot_norms=True,
-        )
-        format_table(f"same_category={v} (n={n})", ws_agg, None)
-        counts, extras = ws_agg
-        results.append({
-            "same_category": v,
-            "VALUE": counts[CLS_VALUE][0] / max(counts[CLS_VALUE][1], 1),
-            "FRAME": counts[CLS_FRAME][0] / max(counts[CLS_FRAME][1], 1),
-            "TELL": counts[CLS_TELL][0] / max(counts[CLS_TELL][1], 1),
-            "routing_err_ratio": (
-                extras["value_err_crossed"] / max(extras["value_err_total"], 1)
-            ),
-        })
-
-    # 汇总曲线
-    print(f"\n=== VALUE sweep summary ===")
-    print(f"{'same_cat':<10} {'VALUE':<10} {'routing_err%':<14}")
-    print("-" * 36)
-    for r in results:
-        print(f"{r['same_category']:<10} {r['VALUE']:>7.2%}   {r['routing_err_ratio']:>7.1%}")
-    return results
+    """[deprecated in v7.1] sweep 依赖已删除的 same_category 参数，本函数不再可用。"""
+    print("  [deprecated] sweep_same_cat 已废弃（v7.1 数据生成 API 不再支持 same_category）")
+    return []
 
 
 def main():

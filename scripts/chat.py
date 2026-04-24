@@ -46,14 +46,20 @@ def load_tokenizer(config: XinheConfig):
 
 
 def print_stats(model: XinheModel, state: torch.Tensor):
-    """打印状态分析 (v5c: Delta Rule W 联想记忆)"""
+    """打印 Hippocampus 状态分析 (v7: 单 W + γ 分布)"""
     stats = model.state_stats(state)
     print(f"\n{'='*50}")
-    print(f"  状态分析 (W: {tuple(state.shape)})")
+    print(f"  Hippocampus 状态分析 (W: {tuple(state.shape)})")
     print(f"{'='*50}")
-    print(f"  read_scale (影响力):  {stats['read_scale']:.4f}")
+    print(f"  read_scale:           {stats['read_scale']:.4f}")
     print(f"  W_norm:               {stats['W_norm']:.4f}")
     print(f"  W_effective_rank:     {stats['W_effective_rank']:.2f}")
+    print(f"  γ_prior (head 寿命):  [{stats['gamma_prior_min']:.3f}, {stats['gamma_prior_max']:.3f}]")
+    print(f"  γ_prior_mean:         {stats['gamma_prior_mean']:.3f}")
+    diag = model.hippocampus.get_gamma_diagnostics()
+    if diag is not None:
+        print(f"  γ_token (最近 batch): {diag['gamma_token_mean']:.3f} ± {diag['gamma_token_std']:.3f}")
+        print(f"  γ_token_min:          {diag['gamma_token_min']:.3f}")
     print(f"{'='*50}\n")
 
 
@@ -91,10 +97,6 @@ def main():
     parser.add_argument("--temperature", type=float, default=0.85)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--no-stream", action="store_true", help="关闭流式输出")
-    parser.add_argument("--turn-phase-max", type=int, default=None,
-                        help="推理时覆盖 W_turn 多相位搜索窗口 (默认用 ckpt config 值)")
-    parser.add_argument("--turn-phase-temperature", type=float, default=None,
-                        help="推理时覆盖 W_turn softmax 温度 (越大选择越锐利)")
     args = parser.parse_args()
 
     # 加载 checkpoint（如提供）
@@ -126,23 +128,11 @@ def main():
         if config_explicit and isinstance(ckpt_cfg, XinheConfig):
             if (ckpt_cfg.backbone_type != config.backbone_type) or (ckpt_cfg.hidden_size != config.hidden_size):
                 print("  警告: --config 与 checkpoint 不匹配。")
-        try:
-            if "fact_plugin_state" not in checkpoint:
-                raise RuntimeError(
-                    "checkpoint 缺少 'fact_plugin_state' 键。v6 不再兼容旧 'plugin_state' 格式。"
-                )
-            result = model.fact_interface.load_state_dict(checkpoint["fact_plugin_state"], strict=False)
-            if result.missing_keys:
-                print(f"  注意: checkpoint 缺少 {result.missing_keys}，使用默认初始化")
-            # 加载 turn_plugin（若 ckpt 含此键且 model 有 turn_interface）
-            if "turn_plugin_state" in checkpoint and model.turn_interface is not None:
-                tres = model.turn_interface.load_state_dict(checkpoint["turn_plugin_state"], strict=False)
-                if tres.missing_keys:
-                    print(f"  注意: turn_plugin_state 缺失 {tres.missing_keys}（保持随机初始化）")
-        except RuntimeError as e:
+        if "hippocampus_state" not in checkpoint:
             raise RuntimeError(
-                "checkpoint 与 --config 不匹配。"
-            ) from e
+                "checkpoint 缺少 'hippocampus_state' 键。v7 不兼容 v5c/v6 旧格式。"
+            )
+        model.hippocampus.load_state_dict(checkpoint["hippocampus_state"], strict=True)
         # 恢复 LoRA
         from xinhe.model.lora import LoRALinear
         lora_state = checkpoint.get("lora_state", {})
@@ -156,16 +146,6 @@ def main():
 
     model.to(device)
     model.eval()
-
-    # 推理时覆写 turn_phase_max / turn_phase_temperature（都是运行时标量，不影响权重）
-    if args.turn_phase_max is not None and model.turn_interface is not None:
-        old = model.turn_interface.phase_max
-        model.turn_interface.phase_max = args.turn_phase_max
-        print(f"  turn_phase_max: {old} → {args.turn_phase_max}")
-    if args.turn_phase_temperature is not None and model.turn_interface is not None:
-        old = model.turn_interface.phase_temperature
-        model.turn_interface.phase_temperature = args.turn_phase_temperature
-        print(f"  turn_phase_temperature: {old} → {args.turn_phase_temperature}")
 
     # 加载 tokenizer
     tokenizer = load_tokenizer(config)
@@ -324,7 +304,7 @@ def main():
             response = response.strip()
             print(f"\n心核: {response}")
 
-        print(f"  [轮次 {turn_count} | scale={torch.sigmoid(model.fact_interface.read_scale).item():.3f}]")
+        print(f"  [轮次 {turn_count} | scale={torch.sigmoid(model.hippocampus.read_scale).item():.3f}]")
 
 
 
