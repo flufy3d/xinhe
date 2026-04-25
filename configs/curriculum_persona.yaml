@@ -157,7 +157,7 @@ stages:
       freeze_lora: false
       plugin_lr_multiplier: 0.3
       episode_length: 16
-      tbptt_steps: 8
+      tbptt_steps: 16   # v8 per_segment_checkpoint=True 后 BPTT 深度不再受显存限制
       max_steps: 8000
       warmup_steps: 200
       use_joint_early_stop: true

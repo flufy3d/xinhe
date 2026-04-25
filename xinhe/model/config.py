@@ -28,6 +28,8 @@ class XinheConfig:
     # v7 per-head γ 先验：σ(head_decay_logits) = linspace(low, high, H)
     gamma_head_init_low: float = 0.8
     gamma_head_init_high: float = 0.999
+    # v8 写 kernel 后端: auto (Linux+FLA → fla, 否则 torch) / fla / torch
+    delta_backend: str = "auto"
     # 是否冻结 time_shift（Linear(hidden, H)，内容驱动的 Δγ）
     # Stage 0a 无 distractor 信号时 time_shift 自然不动，无需显式冻结
     freeze_time_shift: bool = False
@@ -57,6 +59,9 @@ class XinheConfig:
     grad_clip: float = 1.0
     grad_accum_steps: int = 1           # 梯度累积步数 (模拟更大 batch)
     gradient_checkpointing: bool = False  # 用计算换显存 (重算激活值)
+    # v8 外层 per-segment ckpt: 把整个 model.forward(segment, W_in) 包进 checkpoint，
+    # 跨 N 个 segment BPTT 显存从 N×L_turn 降到 ~1×L_turn（默认开）
+    per_segment_checkpoint: bool = True
     resume_from: str = ""               # checkpoint 路径 (为空则不恢复)
     # v5c: 早停基于 val VALUE，不再看 loss；下面两项保留字段避免破坏 YAML 兼容但实际无效
     early_stop_loss: float = 0.0        # (deprecated) 早停 loss 阈值 (0=不启用)
@@ -206,6 +211,7 @@ class XinheConfig:
                 "beta_bias_init": "beta_bias_init",
                 "gamma_head_init_low": "gamma_head_init_low",
                 "gamma_head_init_high": "gamma_head_init_high",
+                "delta_backend": "delta_backend",
             },
             "lora": {
                 "rank": "lora_rank",
@@ -229,6 +235,7 @@ class XinheConfig:
                 "grad_clip": "grad_clip",
                 "grad_accum_steps": "grad_accum_steps",
                 "gradient_checkpointing": "gradient_checkpointing",
+                "per_segment_checkpoint": "per_segment_checkpoint",
                 "resume_from": "resume_from",
                 "early_stop_loss": "early_stop_loss",
                 "early_stop_patience": "early_stop_patience",

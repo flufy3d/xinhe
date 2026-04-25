@@ -35,14 +35,14 @@ stage_overrides:
     batch_size: 8
     grad_accum_steps: 1
   0b_verbatim_rw:
-    batch_size: 4
+    batch_size: 8
     grad_accum_steps: 1
   0c_context_review:
-    batch_size: 4
+    batch_size: 8
     grad_accum_steps: 1
   0d_irrelevant_forget:
-    batch_size: 4
+    batch_size: 8
     grad_accum_steps: 1
   1_persona_unified:
-    batch_size: 2
+    batch_size: 8
     grad_accum_steps: 1

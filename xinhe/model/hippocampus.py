@@ -17,7 +17,8 @@ Neocortex 模块（MLP 长期固化）将从 Hippocampus 蒸馏。
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint as grad_checkpoint
+
+from .delta_kernel import delta_rule_write
 
 
 class Hippocampus(nn.Module):
@@ -33,12 +34,14 @@ class Hippocampus(nn.Module):
         beta_bias_init: float = 0.0,
         gamma_head_init_low: float = 0.8,
         gamma_head_init_high: float = 0.999,
+        delta_backend: str = "auto",
     ):
         super().__init__()
         self.hidden_size = hidden_size
         self.H = n_heads
         self.d_k = head_dim
         self.d_v = head_dim
+        self._delta_backend = delta_backend
 
         # ── 读侧: 每层独立 q/o 投影（保留 per-layer hook 语义） ──
         self.q_projs = nn.ModuleList([
@@ -123,7 +126,10 @@ class Hippocampus(nn.Module):
 
         γ_{h,t} = σ(head_decay_logits_h + time_shift(x_t)_h)  —— per-head × per-token
         W_old: (B,H,d_v,d_k)；content: (B,T,D)；返回 W_new 同 W_old 形状。
-        训练时用 torch.utils.checkpoint 包住循环以省显存。"""
+
+        写 kernel 后端由 self._delta_backend 决定（auto/fla/torch）。外层 per-segment
+        gradient checkpoint 由 XinheModel.forward 按 config.per_segment_checkpoint 控制；
+        本函数不再内层 checkpoint（FLA 后端有自带 backward；torch 后端由外层 ckpt 兜底）。"""
         B, T, _ = content.shape
         dtype = W_old.dtype
         c = content.to(dtype=dtype)
@@ -145,13 +151,7 @@ class Hippocampus(nn.Module):
         ts = F.linear(c, ts_w, ts_b)                                       # (B,T,H)
         gamma = torch.sigmoid(hd_logits + ts).transpose(1, 2)              # (B,H,T)
 
-        if self.training:
-            W = grad_checkpoint(
-                self._delta_parallel, W_old, k, v, beta, gamma,
-                use_reentrant=False,
-            )
-        else:
-            W = self._delta_parallel(W_old, k, v, beta, gamma)
+        W = delta_rule_write(W_old, k, v, beta, gamma, backend=self._delta_backend)
 
         # 诊断快照（detached, no grad）
         self._last_gamma = gamma.detach()

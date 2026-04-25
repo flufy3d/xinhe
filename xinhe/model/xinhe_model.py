@@ -65,10 +65,14 @@ class XinheModel(nn.Module):
             beta_bias_init=config.beta_bias_init,
             gamma_head_init_low=getattr(config, "gamma_head_init_low", 0.8),
             gamma_head_init_high=getattr(config, "gamma_head_init_high", 0.999),
+            delta_backend=getattr(config, "delta_backend", "auto"),
         )
 
         # LM head (复用 backbone 的)
         self.lm_head = self.backbone.get_lm_head()
+
+        # forward 入口设置；_forward_impl 内引用，便于外层 checkpoint 包裹
+        self._pad_token_id: Optional[int] = None
 
     def forward(
         self,
@@ -95,10 +99,35 @@ class XinheModel(nn.Module):
                 state_next: W 张量 (B, H, d_v, d_k)
                 loss: scalar (如果提供了 labels)
         """
+        # pad_token_id 是 Python int / None，不进 checkpoint 的 tensor 派发链
+        # （use_reentrant=False 仅允许 tensor / None inputs），改成实例属性传递
+        self._pad_token_id = pad_token_id
+
+        if getattr(self.config, "per_segment_checkpoint", False) and self.training:
+            from torch.utils.checkpoint import checkpoint
+            return checkpoint(
+                self._forward_impl,
+                input_ids, state, labels, weights,
+                use_reentrant=False,
+            )
+        return self._forward_impl(input_ids, state, labels, weights)
+
+    def _forward_impl(
+        self,
+        input_ids: torch.Tensor,
+        W_in: torch.Tensor,
+        labels: Optional[torch.Tensor],
+        weights: Optional[torch.Tensor],
+    ) -> dict:
+        """forward 主体，独立成方法以便外层 torch.utils.checkpoint 包裹。
+
+        所有原本闭包捕获的非 leaf 张量（W）现在通过 W_in 入参传入；pad_token_id
+        通过 self._pad_token_id 读取（Python int / None 不进 checkpoint 派发链）。
+        返回 dict 内值都是 tensor 或 None，满足 checkpoint(use_reentrant=False) 契约。
+        """
         B, T = input_ids.shape
         device = input_ids.device
-
-        W = state
+        pad_token_id = self._pad_token_id
 
         # 1. 嵌入内容 token
         content_emb = self.backbone.embed(input_ids)  # (B, T, D)
@@ -111,7 +140,7 @@ class XinheModel(nn.Module):
             if layer_idx not in hook_layer_set:
                 return hidden_states
             kv_idx = hook_idx_map[layer_idx]
-            return self.hippocampus.read_layer(hidden_states, W, kv_idx)
+            return self.hippocampus.read_layer(hidden_states, W_in, kv_idx)
 
         # 3. 标准因果 mask（只有 content，无 state token）
         causal = torch.triu(
@@ -140,8 +169,8 @@ class XinheModel(nn.Module):
         # 6. 写侧: Delta Rule + γ 衰减 更新 W（多卡时移回 plugin 设备）
         interface_device = next(self.hippocampus.parameters()).device
         content_output = content_output.to(interface_device)
-        W = W.to(interface_device)
-        W_next = self.hippocampus.write_from_content(W, content_output)
+        W_local = W_in.to(interface_device)
+        W_next = self.hippocampus.write_from_content(W_local, content_output)
 
         # 7. 计算 logits (只对内容部分)
         logits = self.lm_head(content_output)  # (B, T, V)
@@ -183,8 +212,9 @@ class XinheModel(nn.Module):
                 result["total"] = valid_count
             else:
                 loss = torch.tensor(0.0, device=logits.device, requires_grad=True)
-                result["correct"] = 0
-                result["total"] = 0
+                # 0-dim tensor 替 Python int，兼容 checkpoint(use_reentrant=False) 输出契约
+                result["correct"] = torch.tensor(0, device=logits.device)
+                result["total"] = torch.tensor(0, device=logits.device)
 
             result["loss"] = loss
 

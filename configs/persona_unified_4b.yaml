@@ -18,18 +18,22 @@ data:
   val_multi_slot_retention_path: "data/val/val_multi_slot_retention.jsonl"
 
 stage_overrides:
+  # v8 per_segment_checkpoint=True 后 BPTT 深度不再吃显存，4B 24GB 卡 batch=8 turn=16 单段激活 ~8GB 仍剩 ~5GB 余量
   default:
-    batch_size: 1
-    grad_accum_steps: 4
+    batch_size: 8
+    grad_accum_steps: 1
   0a_basic_rw:
-    batch_size: 4
+    batch_size: 8
     grad_accum_steps: 1
   0b_verbatim_rw:
-    batch_size: 2
-    grad_accum_steps: 2
+    batch_size: 8
+    grad_accum_steps: 1
   0c_context_review:
-    batch_size: 2
-    grad_accum_steps: 2
+    batch_size: 8
+    grad_accum_steps: 1
   0d_irrelevant_forget:
-    batch_size: 2
-    grad_accum_steps: 2
+    batch_size: 8
+    grad_accum_steps: 1
+  1_persona_unified:
+    batch_size: 8
+    grad_accum_steps: 1
