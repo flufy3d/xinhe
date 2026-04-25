@@ -20,7 +20,7 @@ from typing import Optional
 
 
 DEEPSEEK_ENDPOINT = "https://api.deepseek.com/v1/chat/completions"
-DEFAULT_MODEL = "deepseek-chat"   # DeepSeek V3
+DEFAULT_MODEL = "deepseek-v4-flash"  # DeepSeek V4 Flash
 
 
 class DeepSeekError(Exception):
