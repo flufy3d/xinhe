@@ -136,21 +136,22 @@ class Persona:
 
 详见 [curriculum_learning.md](curriculum_learning.md) "Stage 1 的 turn kind 分布"。
 
-### 4.3 DeepSeek teacher cache
+### 4.3 DeepSeek 对话语料 (v8)
 
-`general_chat` 和 `world_qa` 两种 turn 从 `data/cache/*.jsonl` 取，这是一次性采样得到的 rehearsal 池。
+`distract_chat` 和 `world_qa` 两种语料统一收纳到 `xinhe/data/dicts/files/*.jsonl`，
+按 SHA1(user) % 10 切到 train/val/test，可直接 `bank.load_pairs(name, split)` 消费。
 
 生成方式：
 ```bash
 # 需要 DEEPSEEK_API_KEY
-python scripts/build_chat_cache.py --n-chat 6000 --n-qa 4000
+python scripts/build_dicts.py --expand --target-pairs 5000
 ```
 
 输出：
-- `data/cache/general_chat.jsonl`：日常闲聊 turn（每行 `{user, assistant, type}`，train_loss=false）
-- `data/cache/world_qa.jsonl`：事实 Q&A turn（train_loss=true, 无 VALUE）
+- `xinhe/data/dicts/files/distract_chat.jsonl`：日常闲聊 turn（事件 E 消费，train_loss=lm_only）
+- `xinhe/data/dicts/files/world_qa.jsonl`：事实 Q&A turn（Stage 1 1B 子流消费，train_loss=true，无 VALUE）
 
-质量过滤在采样时做（长度、n-gram 重复、无 persona 槽 leak、无 refusal 冲突）。采样过程用 16 路并发 + JSON 模式输出，10k 条约 20 分钟。
+质量过滤在 PairBank 加载时做（user 字符串去重）；采样阶段做主题分散 + 长度约束。
 
 ### 4.4 结构化 retention pattern
 
@@ -238,24 +239,24 @@ Bootstrap stage 用最简单的 2-turn：
 ## 8. 文件组织
 
 ```
-data/
-├── cache/                        # DeepSeek teacher cache（一次性采样）
-│   ├── general_chat.jsonl        # 6000 条闲聊
-│   └── world_qa.jsonl            # 4000 条事实 QA
-├── val/                          # 4 个 val 集（早停用）
-│   ├── val_value.jsonl
-│   ├── val_worldqa.jsonl
-│   ├── val_refusal.jsonl
-│   └── val_compositional.jsonl
-└── curriculum/                   # 训练时每 stage 自动生成
-    ├── 0_bootstrap/
-    │   ├── train.jsonl
-    │   └── val.jsonl
-    └── 1_persona_unified/
-        ├── train.jsonl           # 40000 个 persona episode
-        └── val.jsonl             # 500 个 val episode
+xinhe/data/dicts/files/           # 入 git：素材根（小，可复现根）
+├── surnames.txt 等 12 个 .txt    # 字符串字典
+├── distract_chat.jsonl            # 闲聊语料 (事件 E)
+├── world_qa.jsonl                 # 世界知识 QA (Stage 1 1B)
+└── version.json                   # 版本与切分清单
+
+data/v8/                          # 不入 git：训练数据（可重生成）
+├── stage0/
+│   ├── train.jsonl
+│   └── val.jsonl
+├── stage1/
+│   ├── train.jsonl
+│   └── val.jsonl
+└── val/
+    ├── stage0/seen_entity.jsonl 等
+    └── stage1/seen_entity.jsonl 等
 ```
 
-`data/cache/*` 和 `data/val/*` 是手动建一次后持久复用的（对应 `scripts/build_chat_cache.py` / `scripts/build_val_sets.py`）。`data/curriculum/*` 是 train.py 按需生成的。
+v8 起：词典/语料统一在 `xinhe/data/dicts/files/`（入 git，由 `scripts/build_dicts.py` 维护），训练数据在 `data/v8/`（不入 git，由 `scripts/generate_data.py` 按需生成）。
 
 路径通过 `data:` 段配置（见 `configs/persona_unified_0.8b.yaml`）。

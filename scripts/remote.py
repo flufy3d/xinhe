@@ -89,16 +89,13 @@ def cmd_deploy(args):
     print(f"  远端: {remote_dir}")
     print("=" * 54)
 
-    # 1. 同步代码 + 非生成数据（cache 由 DeepSeek API 采样 / val 由本地 build_val_sets 产出；
-    #    data/curriculum/ 是远端可重新生成的训练数据，太大，排除）
+    # 1. 同步代码 + 词典/语料（xinhe/data/dicts/files/*.txt + *.jsonl 随 xinhe 一起带上）。
+    #    训练集 data/v8/ 不在这里同步（自行 upload 或在远端 generate_data.py 生成）。
     print("\n[1/3] 同步代码...")
     run(ssh_base(host, port) + [f"mkdir -p {remote_dir}"])
     tar_paths = [
         "xinhe", "scripts", "configs", "tests", "pyproject.toml", "uv.lock",
     ]
-    for extra in ("data/cache", "data/val"):
-        if (PROJECT_ROOT / extra).exists():
-            tar_paths.append(extra)
     tar_proc = subprocess.Popen(
         ["tar", "-czf", "-",
          "--exclude=__pycache__", "--exclude=*.pyc", "--exclude=*.pyo",

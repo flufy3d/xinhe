@@ -68,31 +68,11 @@ class XinheConfig:
     early_stop_patience: int = 0        # (deprecated) 早停耐心
     early_stop_value: float = 0.995     # 早停 VALUE 阈值 (val breakdown 跨过即切下一 stage)
     early_stop_tell: float = 0.0        # 早停 TELL 阈值（整段 exact-match 率）；0 = 不查 TELL
-    # persona 统一训练: 联合早停（v7.1: 11 指标，threshold=0 跳过）
+    # v8 联合早停: 通用 dict 形式（key 必须与 event_eval 输出指标名一致）
     use_joint_early_stop: bool = False
-    early_stop_world_qa: float = 0.0
-    early_stop_refusal: float = 0.0
-    early_stop_compositional: float = 0.0
-    early_stop_rapid_overwrite: float = 0.0
-    early_stop_verbatim: float = 0.0
-    early_stop_reference_back: float = 0.0
-    early_stop_context_followup: float = 0.0
-    early_stop_topic_continuation: float = 0.0
-    early_stop_entity_tracking: float = 0.0
-    early_stop_irrelevant_forget: float = 0.0
-    early_stop_multi_slot_retention: float = 0.0
-    # val 路径
-    val_worldqa_path: str = ""
-    val_refusal_path: str = ""
-    val_compositional_path: str = ""
-    val_rapid_overwrite_path: str = ""
-    val_verbatim_path: str = ""
-    val_reference_back_path: str = ""
-    val_context_followup_path: str = ""
-    val_topic_continuation_path: str = ""
-    val_entity_tracking_path: str = ""
-    val_irrelevant_forget_path: str = ""
-    val_multi_slot_retention_path: str = ""
+    early_stop: dict = field(default_factory=dict)
+    # v8 val 集合: list[{"name": str, "path": str}]，由 event_eval.eval_joint_v8 消费
+    val_sets: list = field(default_factory=list)
     warmup_steps: int = 100
     max_steps: int = 10000
     eval_every: int = 500
@@ -242,17 +222,7 @@ class XinheConfig:
                 "early_stop_value": "early_stop_value",
                 "early_stop_tell": "early_stop_tell",
                 "use_joint_early_stop": "use_joint_early_stop",
-                "early_stop_world_qa": "early_stop_world_qa",
-                "early_stop_refusal": "early_stop_refusal",
-                "early_stop_compositional": "early_stop_compositional",
-                "early_stop_rapid_overwrite": "early_stop_rapid_overwrite",
-                "early_stop_verbatim": "early_stop_verbatim",
-                "early_stop_reference_back": "early_stop_reference_back",
-                "early_stop_context_followup": "early_stop_context_followup",
-                "early_stop_topic_continuation": "early_stop_topic_continuation",
-                "early_stop_entity_tracking": "early_stop_entity_tracking",
-                "early_stop_irrelevant_forget": "early_stop_irrelevant_forget",
-                "early_stop_multi_slot_retention": "early_stop_multi_slot_retention",
+                "early_stop": "early_stop",
                 "warmup_steps": "warmup_steps",
                 "max_steps": "max_steps",
                 "eval_every": "eval_every",
@@ -264,17 +234,7 @@ class XinheConfig:
             "data": {
                 "train_path": "train_path",
                 "val_path": "val_path",
-                "val_worldqa_path": "val_worldqa_path",
-                "val_refusal_path": "val_refusal_path",
-                "val_compositional_path": "val_compositional_path",
-                "val_rapid_overwrite_path": "val_rapid_overwrite_path",
-                "val_verbatim_path": "val_verbatim_path",
-                "val_reference_back_path": "val_reference_back_path",
-                "val_context_followup_path": "val_context_followup_path",
-                "val_topic_continuation_path": "val_topic_continuation_path",
-                "val_entity_tracking_path": "val_entity_tracking_path",
-                "val_irrelevant_forget_path": "val_irrelevant_forget_path",
-                "val_multi_slot_retention_path": "val_multi_slot_retention_path",
+                "val_sets": "val_sets",
             },
             "logging": {
                 "use_wandb": "use_wandb",

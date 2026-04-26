@@ -149,7 +149,7 @@ RAG 检索原文 chunk，每次回忆要重新"理解"。心核的 W 存的是 (
 
 **选 C 的原因**：DeepSeek V3 在 Chinese benchmark 上接近 GPT-4 水平，价格便宜一个数量级，off-peak 时段（UTC 16:30-00:30）有 50% 折扣。实测 15 条 world_qa 人工审 15/15 正确。
 
-**关键警告**：用**大于等于自己**的 teacher，不要用小于自己的。持久化采样到 `data/cache/`，一次建成永久复用，不是运行时 API 调用。
+**关键警告**：用**大于等于自己**的 teacher，不要用小于自己的。持久化采样到 `xinhe/data/dicts/files/*.jsonl`，一次建成永久复用，不是运行时 API 调用（v8）。
 
 ---
 

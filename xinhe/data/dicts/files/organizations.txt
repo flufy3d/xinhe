@@ -1,0 +1,211 @@
+AMD
+Airbus
+Amazon
+Anthropic
+Apple
+BP
+Bank of America
+Barclays
+Boeing
+CBA
+Cisco
+Citigroup
+Cohere
+Columbia University
+DeepMind
+Deutsche Bank
+Goldman Sachs
+Google
+HSBC
+Huawei
+Hugging Face
+IBM
+Intel
+International Monetary Fund
+JD.com
+JPMorgan Chase
+Johns Hopkins University
+KCL
+Lenovo
+Meta
+Microsoft
+Midjourney
+Mistral
+Moderna
+Morgan Stanley
+NBA
+NVIDIA
+NetEase
+Netflix
+Novartis
+OpenAI
+Oracle
+Peking University
+Pfizer
+Runway
+SAP
+Samsung
+Seoul National University
+Shell
+Siemens
+Sony
+Stability AI
+Tencent
+Tesla
+Toyota
+Tsinghua University
+UBS
+UCL
+UCLA
+United Nations
+University of Cambridge
+University of Chicago
+University of Michigan
+University of Oxford
+University of Tokyo
+Volkswagen
+World Health Organization
+Xiaomi
+Yale University
+xAI
+三星电子
+上外
+上海交大
+上海合作组织
+世卫组织
+世界卫生组织
+世界银行
+世贸组织
+东盟
+中交建
+中信
+中冶集团
+中国中铁
+中国工商银行
+中国广电
+中国电信
+中国石油天然气集团公司
+中国移动
+中国联通
+中国证券监督管理委员会
+中国邮政
+中国铁建
+中国银行保险监督管理委员会
+中山大学
+中建集团
+中投
+中投公司
+中核
+中海油
+中石化
+中石油
+中科院
+中粮
+中粮集团
+中超
+丰田汽车
+二十国集团
+五矿
+亚足联
+京东
+人社部
+伦敦政经
+伯克利
+住建部
+保利
+光大
+公安部
+兵器
+兵装
+剑桥
+加州理工
+北京大学
+北外
+北师大
+北约
+北航
+北邮
+华中科大
+华为
+华威
+华润
+南京大学
+南方电网
+卡内基梅隆
+卫健委
+厦门大学
+发改委
+台积电
+同济大学
+哈佛
+哈佛大学
+哈工大
+哥伦比亚大学
+商务部
+国务院
+国家电网
+国家自然基金委
+国投
+国资委
+国际刑警
+国际奥委会
+国际红十字会
+国际货币基金组织
+国际足联
+复旦大学
+外交部
+外汇局
+大众汽车
+央行
+奥林匹克委员会
+字节跳动
+宝马集团
+审计署
+对外经贸
+小米
+工业和信息化部
+工信部
+布里斯托
+帝国理工
+康奈尔
+德甲
+快手
+意甲
+招商局
+拼多多
+教育部
+斯坦福
+斯坦福大学
+无国界医生
+普林斯顿
+曼彻斯特
+欧佩克
+欧盟
+欧足联
+武汉大学
+浙江大学
+海关总署
+清华大学
+滴滴
+爱丁堡
+牛津
+百度
+科技部
+税务总局
+美团
+耶鲁
+联合国
+联合国教科文组织
+腾讯
+英超
+西交大
+西甲
+证监会
+财政部
+金砖国家
+银保监会
+阿盟
+阿里巴巴
+非盟
+麻省理工
+麻省理工学院

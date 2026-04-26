@@ -1,0 +1,13 @@
+# Persona unified v8 (4B backbone) —— 引用 curriculum_v8.yaml
+base: qwen3.5-4b.yaml
+
+curriculum_file: curriculum_v8.yaml
+
+training:
+  batch_size: 2
+  grad_accum_steps: 2
+  dtype: bfloat16
+
+stage_overrides:
+  default:
+    batch_size: 2

@@ -325,39 +325,41 @@ class Trainer:
                 self.model.train()
                 return
 
-            # 联合早停（v7.1: 11 指标，threshold=0 跳过）
-            from xinhe.evaluation.persona_joint import eval_persona_joint
-            joint = eval_persona_joint(
-                self.model, tokenizer, self.config, self.device,
+            # 联合早停 (v8): 通用循环，从 config.early_stop dict 或 early_stop_<key> 字段读阈值
+            from xinhe.evaluation.event_eval import eval_joint_v8
+            joint = eval_joint_v8(
+                self.model, tokenizer, self.config, device=self.device,
                 max_episodes=50,
             )
-            # 打印所有非零指标
+            joint["VALUE"] = value_acc  # 内置 VALUE 指标始终参与
+
             def _fmt(x): return f"{x:.2%}"
-            line = " ".join(
-                f"{k}={_fmt(v)}" for k, v in joint.items() if v > 0
-            )
+            line = " ".join(f"{k}={_fmt(v)}" for k, v in joint.items() if v > 0)
             print(f"  [joint] {line}")
 
-            checks = [
-                ("VALUE",            value_acc,                         getattr(self.config, "early_stop_value", 0.0)),
-                ("WorldQA",          joint.get("world_qa", 0.0),        getattr(self.config, "early_stop_world_qa", 0.0)),
-                ("Refusal",          joint.get("refusal", 0.0),         getattr(self.config, "early_stop_refusal", 0.0)),
-                ("Compositional",    joint.get("compositional", 0.0),   getattr(self.config, "early_stop_compositional", 0.0)),
-                ("RapidOW",          joint.get("rapid_overwrite", 0.0), getattr(self.config, "early_stop_rapid_overwrite", 0.0)),
-                ("Verbatim",         joint.get("verbatim", 0.0),        getattr(self.config, "early_stop_verbatim", 0.0)),
-                ("RefBack",          joint.get("reference_back", 0.0),  getattr(self.config, "early_stop_reference_back", 0.0)),
-                ("CtxFollowup",      joint.get("context_followup", 0.0), getattr(self.config, "early_stop_context_followup", 0.0)),
-                ("TopicCont",        joint.get("topic_continuation", 0.0), getattr(self.config, "early_stop_topic_continuation", 0.0)),
-                ("EntityTrack",      joint.get("entity_tracking", 0.0), getattr(self.config, "early_stop_entity_tracking", 0.0)),
-                ("IrrelevantForget", joint.get("irrelevant_forget", 0.0), getattr(self.config, "early_stop_irrelevant_forget", 0.0)),
-                ("MultiSlot",        joint.get("multi_slot_retention", 0.0), getattr(self.config, "early_stop_multi_slot_retention", 0.0)),
-            ]
-            active = [(name, val, thr) for name, val, thr in checks if thr > 0]
+            # 阈值来源优先级: config.early_stop dict > early_stop_<key> 字段
+            thresholds: dict[str, float] = {}
+            es_dict = getattr(self.config, "early_stop", None)
+            if isinstance(es_dict, dict):
+                for k, v in es_dict.items():
+                    if isinstance(v, (int, float)) and v > 0:
+                        thresholds[k] = float(v)
+            for attr in dir(self.config):
+                if attr.startswith("early_stop_") and attr != "early_stop_value":
+                    val = getattr(self.config, attr, 0.0)
+                    if isinstance(val, (int, float)) and val > 0:
+                        thresholds[attr[len("early_stop_"):]] = float(val)
+            es_value = getattr(self.config, "early_stop_value", 0.0)
+            if es_value and es_value > 0:
+                thresholds["VALUE"] = float(es_value)
+
+            checks = [(k, joint.get(k, 0.0), thr) for k, thr in thresholds.items()]
+            active = [c for c in checks if c[2] > 0]
             if not active:
                 self.model.train()
                 return
 
-            missed = [(name, val, thr) for name, val, thr in active if val < thr]
+            missed = [c for c in active if c[1] < c[2]]
             if not missed:
                 self._early_stopped = True
                 passed = " ".join(f"{name}≥{thr:.0%}" for name, _, thr in active)

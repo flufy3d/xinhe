@@ -1,13 +1,12 @@
 """
-DeepSeek V3 batch sampler — 用于生成 general_chat / world_qa turn 的 teacher cache。
+DeepSeek V3 sampler — Stage 1 5-Beat 对话生成 + 词典/语料扩充。
 
 关键设计:
-- 单次 call 让模型输出一个 JSON array，包含 N 对 (user, assistant)，均摊 API 开销
 - 强制 response_format={"type": "json_object"} 降低解析失败率
 - DeepSeek API 是 OpenAI 兼容的，使用 urllib 调用（零新依赖）
 - Key 只从 os.environ["DEEPSEEK_API_KEY"] 读取，不接受参数传入
-- 断点续传、rate limit 重试由调用方（build_chat_cache.py）负责
-- 质量过滤在采样完后本地做（长度、n-gram 重复、持久槽 leak 检测）
+- 断点续传、rate limit 重试由调用方（build_dicts.py / stage1.driver）负责
+- 质量过滤在采样完后本地做（schema validator + n-gram 重复 + tier 分类）
 
 DeepSeek API 参考: https://api-docs.deepseek.com/
 """

@@ -1,0 +1,106 @@
+{
+  "dict_version": "v1.0",
+  "split_seed": 20260425,
+  "categories": {
+    "brands": {
+      "total": 201,
+      "train": 165,
+      "val": 18,
+      "test": 18,
+      "sha1_12": "0c7c1493f799"
+    },
+    "cities": {
+      "total": 400,
+      "train": 320,
+      "val": 32,
+      "test": 48,
+      "sha1_12": "69274da923bc"
+    },
+    "colors": {
+      "total": 241,
+      "train": 190,
+      "val": 19,
+      "test": 32,
+      "sha1_12": "d992ff0e3dc7"
+    },
+    "foods": {
+      "total": 296,
+      "train": 242,
+      "val": 25,
+      "test": 29,
+      "sha1_12": "8b1053ece94a"
+    },
+    "given_names": {
+      "total": 609,
+      "train": 498,
+      "val": 58,
+      "test": 53,
+      "sha1_12": "ee65e6a1314d"
+    },
+    "hobbies": {
+      "total": 213,
+      "train": 163,
+      "val": 23,
+      "test": 27,
+      "sha1_12": "ea6713b4aaed"
+    },
+    "jobs": {
+      "total": 208,
+      "train": 178,
+      "val": 12,
+      "test": 18,
+      "sha1_12": "fbe8dabaf1fd"
+    },
+    "organizations": {
+      "total": 211,
+      "train": 176,
+      "val": 19,
+      "test": 16,
+      "sha1_12": "5bf4b0963ece"
+    },
+    "passwords": {
+      "total": 1050,
+      "train": 847,
+      "val": 100,
+      "test": 103,
+      "sha1_12": "f76f1a51f7e9"
+    },
+    "pets": {
+      "total": 220,
+      "train": 178,
+      "val": 20,
+      "test": 22,
+      "sha1_12": "d6a7be38f7e2"
+    },
+    "project_codes": {
+      "total": 1100,
+      "train": 893,
+      "val": 113,
+      "test": 94,
+      "sha1_12": "3e387a6a4d58"
+    },
+    "surnames": {
+      "total": 240,
+      "train": 185,
+      "val": 28,
+      "test": 27,
+      "sha1_12": "83d01c31810f"
+    }
+  },
+  "corpora": {
+    "distract_chat": {
+      "total": 5787,
+      "train": 4613,
+      "val": 581,
+      "test": 593,
+      "sha1_12": "c5f5dcfd1744"
+    },
+    "world_qa": {
+      "total": 4015,
+      "train": 3253,
+      "val": 398,
+      "test": 364,
+      "sha1_12": "25c80eb9fb20"
+    }
+  }
+}

@@ -46,14 +46,17 @@ SLOT_ACTIVE_THRESHOLD = 0.5
 
 
 def tokenize_turn_with_class(tokenizer, user_content, assistant_content, segment_length,
-                             compute_loss=True, value_str=None):
+                             *, train_loss="true", value_spans=None):
     """tokenize 一轮并返回 (input_ids, labels, token_class)。
 
+    v8 接口：value_spans 是 list[[start_char, end_char]]（assistant_content 坐标系），
+    train_loss 三态: "true" / "lm_only" / "false" (兼容 bool)。
+
     token_class:
-        CLS_IGNORE (0): user / template / padding (label=-100)
-        CLS_VALUE  (1): recall 轮 value 对齐 token
-        CLS_FRAME  (2): recall 轮 value 以外 assistant token
-        CLS_TELL   (3): tell 轮 assistant token
+        CLS_IGNORE (0): user / template / padding / lm_only / false
+        CLS_VALUE  (1): recall 轮 value span 内 token
+        CLS_FRAME  (2): recall 轮 value span 外 assistant token
+        CLS_TELL   (3): tell 轮 assistant token（无 value，但 train_loss=true）
     """
     prefix_text = tokenizer.apply_chat_template(
         [{"role": "user", "content": user_content}],
@@ -70,40 +73,50 @@ def tokenize_turn_with_class(tokenizer, user_content, assistant_content, segment
     full_ids = tokenizer.encode(full_text, add_special_tokens=False)
     prefix_len = len(prefix_ids)
 
+    # 解析 train_loss 三态
+    if train_loss is True or train_loss == "true":
+        compute_loss = True
+        is_lm_only = False
+    elif train_loss == "lm_only":
+        compute_loss = True
+        is_lm_only = True
+    else:
+        compute_loss = False
+        is_lm_only = False
+
     if compute_loss:
         labels = [-100] * prefix_len + full_ids[prefix_len:]
     else:
         labels = [-100] * len(full_ids)
 
-    # 统一 value_str 为 list[str]（向后兼容 str / None / 空列表）
-    if value_str is None:
-        values = []
-    elif isinstance(value_str, str):
-        values = [value_str]
+    spans = list(value_spans or [])
+    is_recall = bool(spans) and not is_lm_only
+    # lm_only 段不参与 VALUE/FRAME/TELL 分类（token_class 全 IGNORE）
+    if is_lm_only:
+        token_class = [CLS_IGNORE] * len(labels)
     else:
-        values = [v for v in value_str if v]
+        default_asst_class = CLS_FRAME if is_recall else CLS_TELL
+        token_class = [CLS_IGNORE if lab == -100 else default_asst_class for lab in labels]
 
-    is_recall = bool(values)
-    default_asst_class = CLS_FRAME if is_recall else CLS_TELL
-    token_class = [CLS_IGNORE if lab == -100 else default_asst_class for lab in labels]
-
-    # recall 轮: 用 offset_mapping 把每个 value 子串区间内的 token 标为 VALUE
+    # recall 轮: 用 offset_mapping 把 value span 区间内 token 标为 VALUE
     if is_recall:
-        encoded = tokenizer(full_text, add_special_tokens=False,
-                            return_offsets_mapping=True)
-        offsets = encoded["offset_mapping"]
-        for v in values:
-            v_start = full_text.find(v, len(prefix_text))
-            if v_start < 0:
-                v_start = full_text.find(v)
-            if v_start < 0:
-                continue
-            v_end = v_start + len(v)
-            for i, (cs, ce) in enumerate(offsets):
-                if i >= len(token_class):
-                    break
-                if token_class[i] != CLS_IGNORE and cs < v_end and ce > v_start:
-                    token_class[i] = CLS_VALUE
+        # 需要把 char_span (相对 assistant_content) 偏移到 full_text
+        asst_offset = full_text.find(assistant_content, len(prefix_text))
+        if asst_offset < 0:
+            asst_offset = full_text.find(assistant_content)
+
+        if asst_offset >= 0:
+            encoded = tokenizer(full_text, add_special_tokens=False,
+                                return_offsets_mapping=True)
+            offsets = encoded["offset_mapping"]
+            for s, e in spans:
+                s_full = asst_offset + int(s)
+                e_full = asst_offset + int(e)
+                for i, (cs, ce) in enumerate(offsets):
+                    if i >= len(token_class):
+                        break
+                    if token_class[i] != CLS_IGNORE and cs < e_full and ce > s_full:
+                        token_class[i] = CLS_VALUE
 
     if len(full_ids) > segment_length:
         full_ids = full_ids[:segment_length]
@@ -173,15 +186,20 @@ def eval_episode(model, tokenizer, episode, device, segment_length=256,
         user_msg = conversations[i].get("content", "")
         asst_entry = conversations[i + 1] if i + 1 < len(conversations) else {}
         assistant_msg = asst_entry.get("content", "")
-        compute_loss = asst_entry.get("train_loss", True)
-        value_str = asst_entry.get("value")
+        train_loss = asst_entry.get("train_loss", "true")
+        value_str = asst_entry.get("value")  # 仅用于 confusion 跟踪
+        value_spans = asst_entry.get("value_span") or []
 
         ids, labels, token_class = tokenize_turn_with_class(
             tokenizer, user_msg, assistant_msg, segment_length,
-            compute_loss=compute_loss, value_str=value_str,
+            train_loss=train_loss, value_spans=value_spans,
         )
 
-        if not compute_loss:
+        # 三态: false 整段 -100, lm_only 仅跑 forward 不算分类, true 正常评估
+        no_loss = (train_loss is False or train_loss == "false")
+        no_breakdown = no_loss or train_loss == "lm_only"
+
+        if no_breakdown:
             ids = ids.unsqueeze(0).to(device)
             labels = labels.unsqueeze(0).to(device)
             if blank_state:

@@ -1,23 +1,28 @@
 """
-多轮对话数据集
+多轮对话数据集 (v8)。
 
-将对话按轮次切分为 segment，同一对话的多轮组成 episode。
-state 跨轮次传递，训练模型利用持久状态记忆对话上下文。
+v8 schema:
+  每个 assistant turn 自带:
+    - train_loss: "true" / "lm_only" / "false"（也兼容历史 bool True/False）
+    - value: list[str] | None
+    - value_span: list[[start_char, end_char]]  (char 坐标系，相对 assistant content)
+    - value_tier: "hard" / "soft" / null
+    - weight_per_span: float
 
-每个 segment 返回 (input_ids, labels, weights) 三元组:
-- input_ids: 完整 token 序列
-- labels: user/template token 位置为 -100，只在 assistant token 上计算 loss
-- weights: 每 token 的 loss 权重 (VALUE token=VALUE_WEIGHT，其他 assistant=1.0，-100=0.0)
+DataLoader 工作:
+  - 把 char span 通过 tokenizer offset_mapping 映射为 token span
+  - 按 weight_per_span 给 value token 加权
+  - tri-state train_loss:
+      "true"     → lm_weight=1.0, value tokens 用 weight_per_span
+      "lm_only"  → lm_weight=0.3, value tokens 也用 0.3（无 value 加权）
+      "false"    → labels 全 -100, 不算 loss
 """
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 from torch.utils.data import Dataset
-
-# 加权 loss: VALUE token 相对其他 assistant token 的梯度权重
-VALUE_WEIGHT = 5.0
 
 
 # ── ChatML fallback template (用于没有 chat_template 的 tokenizer) ──
@@ -38,24 +43,41 @@ def ensure_chat_template(tokenizer):
     tokenizer.chat_template = CHATML_FALLBACK_TEMPLATE
 
 
+def _resolve_lm_weight(train_loss: Union[bool, str]) -> tuple[float, bool]:
+    """tri-state → (lm_weight, value_active)。
+
+    - "true" / True   → (1.0, True)
+    - "lm_only"       → (0.3, False)
+    - "false" / False → (0.0, False)
+    """
+    if train_loss is True:
+        return 1.0, True
+    if train_loss is False:
+        return 0.0, False
+    if isinstance(train_loss, str):
+        if train_loss == "true":
+            return 1.0, True
+        if train_loss == "lm_only":
+            return 0.3, False
+        if train_loss == "false":
+            return 0.0, False
+    raise ValueError(f"非法 train_loss: {train_loss!r}")
+
+
 def tokenize_turn(
     tokenizer,
     user_content: str,
     assistant_content: str,
     segment_length: int,
-    compute_loss: bool = True,
-    value_str=None,
+    *,
+    train_loss: Union[bool, str] = "true",
+    value_spans: Optional[list[list[int]]] = None,
+    weight_per_span: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    将一轮 user+assistant 对话 tokenize 为 (input_ids, labels, weights)。
+    """将一轮 user+assistant 对话 tokenize 为 (input_ids, labels, weights)。
 
-    - labels: user/template 部分 = -100, assistant 部分 = 实际 token id, padding = -100
-    - compute_loss=False 时，整个 segment 的 labels 全为 -100
-    - weights: VALUE token=VALUE_WEIGHT, 其他 assistant token=1.0, -100 位置=0.0
-    - value_str:
-        - None: 所有 assistant token 权重=1.0
-        - str: 单一 value 子串 (如 "他是高级木匠")
-        - list[str]: 多 value 场景（多 fact 一句话）, 每个子串独立打 VALUE_WEIGHT
+    value_spans: list of [start_char, end_char] in **assistant_content** 坐标系。
+                 函数内部会偏移到 full_text 坐标，再映射 token。
     """
     prefix_text = tokenizer.apply_chat_template(
         [{"role": "user", "content": user_content}],
@@ -75,40 +97,52 @@ def tokenize_turn(
     full_ids = tokenizer.encode(full_text, add_special_tokens=False)
     prefix_len = len(prefix_ids)
 
-    # 构建 labels
-    if compute_loss:
-        labels = [-100] * prefix_len + full_ids[prefix_len:]
-    else:
+    # tri-state lm_weight
+    lm_weight, value_active = _resolve_lm_weight(train_loss)
+
+    # labels: prefix → -100；assistant → full_ids 对应位置；lm_weight=0 → 全 -100
+    if lm_weight == 0.0:
         labels = [-100] * len(full_ids)
+    else:
+        labels = [-100] * prefix_len + full_ids[prefix_len:]
 
-    # 构建 weights: 默认 assistant token 权重 1.0, -100 位置 0.0
-    weights = [1.0 if lab != -100 else 0.0 for lab in labels]
+    # weights: 默认 assistant token = lm_weight, -100 = 0
+    weights = [lm_weight if lab != -100 else 0.0 for lab in labels]
 
-    # VALUE token 加权: 用 offset_mapping 定位每个 value 子串
-    if compute_loss and value_str:
-        # 统一成 list 处理（向后兼容 str）
-        if isinstance(value_str, str):
-            values = [value_str]
-        else:
-            values = [v for v in value_str if v]
+    # value token 加权（仅 value_active=True 时）
+    if value_active and value_spans and weight_per_span > 0 and assistant_content:
+        # 计算 assistant_content 在 full_text 中的偏移
+        # apply_chat_template 会在 prefix 后面添加 assistant content（含 ChatML 包裹）
+        # 找 assistant_content 在 full_text 中的起始字符位置
+        assistant_offset = full_text.find(assistant_content, len(prefix_text))
+        if assistant_offset < 0:
+            # fallback：全文搜
+            assistant_offset = full_text.find(assistant_content)
 
-        if values:
-            encoded = tokenizer(full_text, add_special_tokens=False,
-                                return_offsets_mapping=True)
+        if assistant_offset >= 0:
+            # 抗自身重复保护：assistant_content 必须在 full_text 中只出现一次（否则 offset 不可信）
+            count = full_text.count(assistant_content)
+            if count != 1:
+                # 多次出现：取第一个 prefix 之后的位置（已用 search_from prefix_text）
+                # 一般来说极罕见；不抛错以避免训练打断
+                pass
+
+            encoded = tokenizer(full_text, add_special_tokens=False, return_offsets_mapping=True)
             offsets = encoded["offset_mapping"]
-            for v in values:
-                v_start = full_text.find(v, len(prefix_text))
-                if v_start < 0:
-                    v_start = full_text.find(v)  # fallback: 全文搜索
-                if v_start < 0:
+
+            for span in value_spans:
+                if not isinstance(span, (list, tuple)) or len(span) != 2:
                     continue
-                v_end = v_start + len(v)
+                s_local, e_local = int(span[0]), int(span[1])
+                if s_local < 0 or e_local <= s_local:
+                    continue
+                s_full = assistant_offset + s_local
+                e_full = assistant_offset + e_local
                 for i, (c_start, c_end) in enumerate(offsets):
                     if i >= len(weights):
                         break
-                    # token 与 value 区间有重叠 → VALUE token
-                    if weights[i] > 0 and c_start < v_end and c_end > v_start:
-                        weights[i] = VALUE_WEIGHT
+                    if weights[i] > 0 and c_start < e_full and c_end > s_full:
+                        weights[i] = weight_per_span
 
     # 截断
     if len(full_ids) > segment_length:
@@ -135,11 +169,14 @@ class ConversationDataset(Dataset):
     """
     多轮对话数据集。
 
-    数据格式 (JSONL):
-    {"conversations": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}
-
-    每个对话被切分为多个 segment (轮次)，组成一个 episode。
-    每个 segment 是 (input_ids, labels) tuple。
+    数据格式 (v8 JSONL):
+    {
+      "conversations": [
+        {"role": "user", "content": "..."},
+        {"role": "assistant", "content": "...", "train_loss": "true", "value": [...],
+         "value_span": [[s,e], ...], "value_tier": "hard", "weight_per_span": 5.0}
+      ]
+    }
     """
 
     def __init__(
@@ -183,23 +220,24 @@ class ConversationDataset(Dataset):
             user_msg = conversations[i].get("content", "")
             asst_entry = conversations[i + 1] if i + 1 < len(conversations) else {}
             assistant_msg = asst_entry.get("content", "")
-            compute_loss = asst_entry.get("train_loss", True)
-            value_str = asst_entry.get("value")
+            train_loss = asst_entry.get("train_loss", "true")
+            value_spans = asst_entry.get("value_span") or []
+            weight_per_span = float(asst_entry.get("weight_per_span", 0.0) or 0.0)
 
             segment = tokenize_turn(
                 self.tokenizer, user_msg, assistant_msg, self.segment_length,
-                compute_loss=compute_loss,
-                value_str=value_str,
+                train_loss=train_loss,
+                value_spans=value_spans,
+                weight_per_span=weight_per_span,
             )
             segments.append(segment)
 
         if len(segments) > self.episode_length:
-            # 截断时保留首 setup 和末 recall（否则丢 value-bearing turn → train 不到 phrase/recall）
-            # 策略: 保留前 (episode_length - 1) 个 + 末尾那个
+            # 截断：保留前 (episode_length - 1) 个 + 末尾那个
+            # （避免 0b episode_length 截断 recall bug —— 末轮 recall 不能丢）
             segments = segments[: self.episode_length - 1] + [segments[-1]]
 
         # Pad 到 episode_length：避免 collate_episodes 用 min_len 截断整个 batch
-        # dummy segment: 全 pad ids + labels=-100 + weights=0 → forward 跑但不算 loss
         pad_id = (
             self.tokenizer.pad_token_id
             if self.tokenizer.pad_token_id is not None
@@ -217,27 +255,18 @@ class ConversationDataset(Dataset):
         return len(self.episodes)
 
     def __getitem__(self, idx: int) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
-        """返回一个 episode (segment 列表)，每个 segment 是 (input_ids, labels, weights)"""
         return self.episodes[idx]
 
 
 def collate_episodes(
     batch: list[list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]],
 ) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
-    """
-    将多个 episode 整理为 batch。
-
-    取最短的 episode 长度，截断较长的。
-
-    返回: segment 列表，每个 segment 是 (input_ids_batch, labels_batch, weights_batch)
-    """
+    """将多个 episode 整理为 batch（取最短的 episode 长度）。"""
     min_len = min(len(episode) for episode in batch)
     segments = []
-
     for seg_idx in range(min_len):
         ids_batch = torch.stack([episode[seg_idx][0] for episode in batch])
         labels_batch = torch.stack([episode[seg_idx][1] for episode in batch])
         weights_batch = torch.stack([episode[seg_idx][2] for episode in batch])
         segments.append((ids_batch, labels_batch, weights_batch))
-
     return segments

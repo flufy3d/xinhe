@@ -108,12 +108,10 @@ scripts/
   train.py                        # 训练入口
   chat.py                         # 交互式聊天
   chat_smoke.py                   # 批量人工验收脚本
-  generate_data.py                # 统一数据分发（memory / persona）
-  build_chat_cache.py             # DeepSeek teacher cache 构建
-  build_val_sets.py               # 4 val 集生成
+  generate_data.py                # v8 数据分发（Stage 0 / Stage 1）
+  build_dicts.py                  # 词典 + 对话语料 (DeepSeek 扩充)
+  evaluate.py                     # event_eval 多维聚合评估
   eval_value_breakdown.py         # VALUE/FRAME/TELL 分解评估
-  probe_beta.py                   # β 分布诊断
-  shift_beta_bias.py              # 可选 bias 平移工具
   remote.py                       # 远端 VM deploy/start/logs 管理
 ```
 
@@ -133,17 +131,20 @@ uv sync
 # 把 model.safetensors 放到 ./models/qwen3.5-0.8b/ 或 ./models/qwen3.5-4b/
 ```
 
-### 准备 teacher cache + val 集（一次性）
+### 准备词典 + 对话语料（一次性）
 
 ```bash
 # 1. DEEPSEEK_API_KEY 加到 .env 或 export
 echo "DEEPSEEK_API_KEY=sk-..." >> .env
 
-# 2. 采 teacher cache（~10 min, off-peak 更便宜，约 ¥10-15）
-python scripts/build_chat_cache.py --n-chat 6000 --n-qa 4000
+# 2. seed 写入种子（零 API，仅用于调试 pipeline）
+python scripts/build_dicts.py --seed
 
-# 3. 建 4 val 集
-python scripts/build_val_sets.py
+# 3. expand 用 DeepSeek 扩充到 1000+ 实体 / 5000+ 对话（off-peak 约 ¥10-15）
+python scripts/build_dicts.py --expand --target 1000 --target-pairs 5000
+
+# 4. 生成 Stage 0 + Stage 1 训练 / val 集（按 yaml 配置）
+python scripts/generate_data.py --config configs/persona_unified_v8_0.8b.yaml --all
 ```
 
 ### 训练
