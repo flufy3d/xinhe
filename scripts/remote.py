@@ -90,8 +90,8 @@ def cmd_deploy(args):
     print("=" * 54)
 
     # 1. 同步代码 + 词典/语料（xinhe/data/dicts/files/*.txt + *.jsonl 随 xinhe 一起带上）。
-    #    训练集 data/v8/ 不在这里同步（自行 upload 或在远端 generate_data.py 生成）。
-    print("\n[1/3] 同步代码...")
+    #    训练集 data/v8/ 通过步骤 [4/4] 从 HuggingFace 拉取（见 scripts/download_from_hf.py）。
+    print("\n[1/4] 同步代码...")
     run(ssh_base(host, port) + [f"mkdir -p {remote_dir}"])
     tar_paths = [
         "xinhe", "scripts", "configs", "tests", "pyproject.toml", "uv.lock",
@@ -112,7 +112,7 @@ def cmd_deploy(args):
     tar_proc.wait()
 
     # 2. 模型软链接 + 指纹校验
-    print("\n[2/3] 模型链接...")
+    print("\n[2/4] 模型链接...")
     if models:
         fp_dir = f"{remote_dir}/models/.fingerprints"
         link_cmds = [f"mkdir -p {remote_dir}/models {fp_dir}"]
@@ -144,18 +144,22 @@ def cmd_deploy(args):
         print("  无模型配置，跳过")
 
     # 3. 远端初始化（幂等）
-    print("\n[3/3] 远端依赖...")
+    print("\n[3/4] 远端依赖...")
     init_script = f"""set -e
 cd {remote_dir}
 export PATH="/usr/local/cuda/bin:/opt/conda/bin:$HOME/.local/bin:$PATH"
 export CUDA_HOME="/usr/local/cuda"
 export UV_CACHE_DIR="/root/shared-storage/.uv-cache"
+export HF_ENDPOINT="https://hf-mirror.com"
 # 持久化环境变量到 bashrc (SSH 登录也生效)
 grep -q UV_CACHE_DIR ~/.bashrc 2>/dev/null || cat >> ~/.bashrc << 'ENVEOF'
 export PATH="/usr/local/cuda/bin:$PATH"
 export CUDA_HOME="/usr/local/cuda"
 export UV_CACHE_DIR="/root/shared-storage/.uv-cache"
+export HF_ENDPOINT="https://hf-mirror.com"
 ENVEOF
+# 已有 bashrc 块但缺 HF_ENDPOINT 时补一行（兼容旧机器）
+grep -q HF_ENDPOINT ~/.bashrc 2>/dev/null || echo 'export HF_ENDPOINT="https://hf-mirror.com"' >> ~/.bashrc
 if command -v uv >/dev/null 2>&1; then
   echo '  uv 已安装，跳过'
 else
@@ -172,6 +176,16 @@ if ! uv pip show causal-conv1d >/dev/null 2>&1; then
 fi
 """
     run(ssh_base(host, port) + [init_script])
+
+    # 4. 同步训练数据（从 HuggingFace 经 hf-mirror 镜像拉取）
+    print("\n[4/4] 同步训练数据...")
+    sync_script = f"""set -e
+cd {remote_dir}
+export PATH="$HOME/.local/bin:$PATH"
+export HF_ENDPOINT="https://hf-mirror.com"
+uv run python scripts/download_from_hf.py
+"""
+    run(ssh_base(host, port) + [sync_script])
 
     print("\n" + "=" * 54)
     print("  部署完成！")

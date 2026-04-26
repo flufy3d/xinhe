@@ -15,6 +15,7 @@ dependencies = [
     "transformers>=5.4.0",
     "accelerate",
     "flash-linear-attention ; sys_platform == 'linux'",
+    "huggingface-hub>=0.24",
 ]
 
 [[tool.uv.index]]
