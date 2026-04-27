@@ -8,6 +8,7 @@ import os
 import time
 import urllib.error
 import urllib.request
+from typing import Optional
 
 
 OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
@@ -48,9 +49,9 @@ def _load_api_key() -> str:
 
 
 def call_openrouter(
-    system_prompt: str,
-    user_prompt: str,
-    model: str,
+    system_prompt: str = "",
+    user_prompt: str = "",
+    model: str = "",
     temperature: float = 0.8,
     top_p: float = 0.9,
     max_tokens: int = 4000,
@@ -59,16 +60,22 @@ def call_openrouter(
     reasoning_effort: str | None = None,
     frequency_penalty: float | None = None,
     presence_penalty: float | None = None,
+    messages: Optional[list[dict]] = None,
 ) -> dict:
-    """reasoning_effort: "low"/"medium"/"high" 仅对 reasoning model（gpt-oss 等）生效,
+    """messages 优先于 system_prompt + user_prompt,支持多轮 conditional retry。
+    主流 provider(Anthropic/DeepSeek/OpenAI/Google) 自动 prefix cache,免费 provider 不一定。
+
+    reasoning_effort: "low"/"medium"/"high" 仅对 reasoning model(gpt-oss 等)生效,
     None 表示不传(模型默认全力 reasoning)。低 effort 显著减少 token 消耗。"""
     key = _load_api_key()
-    body = {
-        "model": model,
-        "messages": [
+    if messages is None:
+        messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
-        ],
+        ]
+    body = {
+        "model": model,
+        "messages": messages,
         "temperature": temperature,
         "top_p": top_p,
         "max_tokens": max_tokens,
@@ -118,9 +125,9 @@ def call_openrouter(
 
 
 def call_with_retry(
-    system_prompt: str,
-    user_prompt: str,
-    model: str,
+    system_prompt: str = "",
+    user_prompt: str = "",
+    model: str = "",
     max_retries: int = 4,
     initial_backoff: float = 10.0,
     **kwargs,

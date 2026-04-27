@@ -69,28 +69,35 @@ def _load_api_key() -> str:
 
 
 def call_deepseek(
-    system_prompt: str,
-    user_prompt: str,
+    system_prompt: str = "",
+    user_prompt: str = "",
     model: str = DEFAULT_MODEL,
     temperature: float = 0.8,
     top_p: float = 0.9,
     max_tokens: int = 4000,
     json_mode: bool = True,
     timeout: int = 120,
+    messages: Optional[list[dict]] = None,
 ) -> dict:
     """调一次 DeepSeek Chat API，返回解析后的 response dict。
+
+    messages 优先于 system_prompt + user_prompt。传 messages 时走多轮模式，
+    DeepSeek prefix cache 自动命中相同前缀部分（降至 ~10% 价格）。
 
     Raises:
         DeepSeekError: 网络/认证/rate limit/JSON 解析失败
     """
     key = _load_api_key()
 
-    body = {
-        "model": model,
-        "messages": [
+    if messages is None:
+        messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
-        ],
+        ]
+
+    body = {
+        "model": model,
+        "messages": messages,
         "temperature": temperature,
         "top_p": top_p,
         "max_tokens": max_tokens,
@@ -208,8 +215,8 @@ def quality_filter(turn: dict, category: str) -> bool:
 
 
 def call_with_retry(
-    system_prompt: str,
-    user_prompt: str,
+    system_prompt: str = "",
+    user_prompt: str = "",
     model: str = DEFAULT_MODEL,
     max_retries: int = 4,
     initial_backoff: float = 10.0,

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -20,10 +21,113 @@ from typing import Optional
 from xinhe.data.schema import Sample, SchemaError, validate_sample
 
 
-def _resolve_sampler(model: str):
-    """按 model 名 dispatch：含 '/' 视为 OpenRouter（minimax/...、qwen/...、google/... 等），
-    否则走 DeepSeek。返回 (call_with_retry, ApiError)，两个 sampler 接口已对齐。
+def _supports_conditional_retry(model: str) -> bool:
+    """走 conditional retry(多轮 messages + 主流 provider prefix cache 命中):
+      - deepseek-* / 不带 / 的 OpenAI 兼容 model
+      - openrouter (含 /,主流 provider 都支持 multi-turn,免费 provider 也能用,只是不享 cache)
+    不支持:codex-cli / gemini-cli (subprocess 单次调用,不方便追加上下文)。"""
+    head = model.split(":", 1)[0].lower()
+    if head in ("codex-cli", "codex", "gemini-cli", "gemini"):
+        return False
+    return True
+
+
+def _build_fix_message(reason: str, plan) -> str:
+    """把 validator/parser reject reason 翻译成给 LLM 的修补 prompt。
+    fix prompt 短促、具体、不发散——告诉模型哪里错了 + 怎么改 + 保留其他段。
     """
+    if "beat3 struct" in reason and "zh_chars" in reason:
+        m = re.search(r"zh_chars=(\d+)", reason)
+        actual = m.group(1) if m else "?"
+        target = plan.prompt_min_chars
+        return (
+            f"刚才输出的 Beat 3（干扰段）assistant 中文累计只写了 {actual} 字，目标 ≥{target} 字。\n"
+            f"请重新输出**完整 JSON**，把 Beat 3 段在保持原话题种子和禁词约束的前提下扩写到 ≥{target} 字。\n"
+            f"具体方法：增加 1-3 对 user/assistant，围绕原 Beat 3 主题种子继续展开吐槽/细节/举例/共鸣，"
+            f"不要换主题、不要拉回 Beat 1 的 fact 话题。\n"
+            f"其他段（植入/跟随/召回/收尾）尽量保持原内容，总轮数仍 = {plan.n_turns}。"
+        )
+    if "beat3 purity" in reason or "泄漏" in reason:
+        m = re.search(r"泄漏=\[(.*?)\]", reason)
+        leaked = m.group(1) if m else "(列表见上)"
+        return (
+            f"刚才输出的 Beat 3 段出现了禁词：{leaked}。\n"
+            f"请重新输出**完整 JSON**，Beat 3 段绝对不要出现 canonical/alias 列表中的任意词及其变体、"
+            f"同义改写、隐式延伸（哪怕是负面提及也不行）。其他段保持原样，总轮数仍 = {plan.n_turns}。"
+        )
+    if "beat3 repetition" in reason:
+        return (
+            f"刚才 Beat 3 段 assistant 出现了短句重复（degenerate）。\n"
+            f"请重新输出**完整 JSON**，Beat 3 段每句话都要不同，自然展开话题，避免回环复读。"
+            f"总轮数仍 = {plan.n_turns}。"
+        )
+    if "beat4 scope" in reason:
+        return (
+            f"刚才输出的 Beat 4（召回段）user 句的人称代词与召回的 fact 归属（self/third_party）不匹配。\n"
+            f"硬约束：\n"
+            f"  - scope=self 的 fact，user 句必须用'我/我的'自指（不能用'你/你的'）；\n"
+            f"  - scope=third_party 的 fact，user 句必须显式提该人物名字（或'朋友/同事/他/她'等第三方代词）。\n"
+            f"请重新输出**完整 JSON**，修正 Beat 4 user 提问的人称指代，其他段保持原样。"
+        )
+    if "beat4 pronoun" in reason:
+        return (
+            "刚才输出的 Beat 4 中，user 句把 self-scope 的 fact 写成了'你的+fact'（指 assistant），"
+            "这是把 user 的属性错配给了 assistant。\n"
+            "请重新输出**完整 JSON**，user 句中 fact 的所有格必须用'我/我的'。其他段保持原样。"
+        )
+    if "fact drift" in reason:
+        m = re.search(r"\[(.*?)\]", reason)
+        drift = m.group(1) if m else ""
+        return (
+            f"刚才输出的 Beat 4 召回 value（{drift}）无法映射到 canonical/alias 表。\n"
+            f"请重新输出**完整 JSON**，Beat 4 assistant 召回时 content 必须**逐字**包含 canonical 字面值或允许的别名，"
+            f"value 字段填实际写进 content 的那个串。"
+        )
+    if "user_injection" in reason:
+        return (
+            "刚才输出的对话中，某些 canonical fact 没有被 user 自己说出来（assistant 自己'翻译'编造了）。\n"
+            "请重新输出**完整 JSON**：Beat 1（植入段）里每个 canonical value 必须由 user content 自己**直接、显式**逐字说出，"
+            "assistant 只能复述 user 已经说过的字面值，不许从暗示性描述里推断翻译。"
+        )
+    if "canonical_order" in reason:
+        return (
+            "刚才输出的对话中，assistant 在 user 还没说之前就先提到了某个 canonical value，顺序错了。\n"
+            "请重新输出**完整 JSON**：每个 canonical value 必须由 user 先说，assistant 后复述/召回。"
+        )
+    if "echo" in reason:
+        return (
+            "刚才 assistant 整段复读了上一轮 user 的话（degenerate）。\n"
+            "请重新输出**完整 JSON**，assistant 应自然回应 user，不许复读 user 原句。"
+        )
+    if "schema:" in reason or "ParseError" in reason:
+        return (
+            f"刚才输出的 JSON 不符合 schema 或字段缺失：{reason[:300]}\n"
+            f"请重新输出**严格符合 schema** 的完整 JSON：\n"
+            f"  - conversations: [{{role, content, ...}}]\n"
+            f"  - assistant 必须有 train_loss/value/beat 字段\n"
+            f"  - value（非 null 时）必须**逐字出现**在同 turn 的 content 中"
+        )
+    return (
+        f"刚才输出的对话不符合校验：{reason[:300]}\n"
+        f"请重新输出**完整 JSON** 修正该问题，其他符合的部分保持原样。"
+    )
+
+
+def _resolve_sampler(model: str):
+    """按 model 名 dispatch,返回 (call_with_retry, ApiError),四家 sampler 接口已对齐。
+
+      codex-cli[:backing]  → codex_cli_sampler   (subprocess, ChatGPT Plus 配额)
+      gemini-cli[:backing] → gemini_cli_sampler  (subprocess, Google 账号配额)
+      含 "/"               → openrouter_sampler  (HTTP, minimax/google/qwen 等)
+      其他                  → deepseek_sampler    (HTTP, deepseek-v4-flash 等)
+    """
+    head = model.split(":", 1)[0].lower()
+    if head in ("codex-cli", "codex"):
+        from xinhe.data.codex_cli_sampler import call_with_retry as fn, CodexCliError as Err
+        return fn, Err
+    if head in ("gemini-cli", "gemini"):
+        from xinhe.data.gemini_cli_sampler import call_with_retry as fn, GeminiCliError as Err
+        return fn, Err
     if "/" in model:
         from xinhe.data.openrouter_sampler import call_with_retry as fn, OpenRouterError as Err
         return fn, Err
@@ -93,13 +197,29 @@ def _generate_one_5beat(
         extra_kwargs["frequency_penalty"] = 0.5
         extra_kwargs["presence_penalty"] = 0.3
     max_tokens = 20000 if is_reasoning_model else 12000
+
+    cond_retry = _supports_conditional_retry(model)
+    plan = planner.plan(rng)   # plan 在整个 retry 链路中复用,保持 prefix cache 命中
+    sys_p, user_p = build_messages(plan)
+    base_messages = [
+        {"role": "system", "content": sys_p},
+        {"role": "user", "content": user_p},
+    ]
+    last_response_str: Optional[str] = None
+    last_reason: Optional[str] = None
+
     for attempt in range(max_retries):
         ts_attempt = time.time()
-        try:
-            plan = planner.plan(rng)
-            sys_p, user_p = build_messages(plan)
-            resp = call_with_retry(
-                sys_p, user_p,
+        # 构造本次调用的 messages / 参数
+        if cond_retry and last_response_str is not None and last_reason is not None:
+            # conditional retry: 拼上轮失败响应 + fix 指令,DeepSeek prefix cache 命中前 ~90% input
+            fix_msg = _build_fix_message(last_reason, plan)
+            messages = base_messages + [
+                {"role": "assistant", "content": last_response_str},
+                {"role": "user", "content": fix_msg},
+            ]
+            call_kwargs = dict(
+                messages=messages,
                 model=model,
                 temperature=0.85,
                 top_p=0.92,
@@ -107,12 +227,35 @@ def _generate_one_5beat(
                 json_mode=True,
                 **extra_kwargs,
             )
+        else:
+            # 首次或 transport 错误后 → blind 调用(同 plan,自动命中 cache)
+            call_kwargs = dict(
+                model=model,
+                temperature=0.85,
+                top_p=0.92,
+                max_tokens=max_tokens,
+                json_mode=True,
+                **extra_kwargs,
+            )
+        try:
+            if cond_retry and "messages" in call_kwargs:
+                resp = call_with_retry(**call_kwargs)
+            else:
+                resp = call_with_retry(sys_p, user_p, **call_kwargs)
             content = resp["choices"][0]["message"]["content"]
-            sample = parse_response(content, plan, weight_table=weight_table, generator_model=model)
+            try:
+                sample = parse_response(content, plan, weight_table=weight_table, generator_model=model)
+            except ParseError as pe:
+                last_response_str = content
+                last_reason = f"ParseError: {str(pe)[:200]}"
+                print(f"  [stage1] retryable fail (attempt {attempt + 1}): ParseError: {str(pe)[:120]}", flush=True)
+                continue
             result = validate(
                 sample.to_dict(), stage="1", plan=plan.to_validator_plan()
             )
             if not result.ok:
+                last_response_str = content
+                last_reason = result.errors[0] if result.errors else "unknown reject"
                 print(f"  [stage1] validator reject (attempt {attempt + 1}): {result.errors[:1]}", flush=True)
                 continue
             # validator 通过后注入 warmup（不影响 5-Beat 主体）
@@ -132,11 +275,16 @@ def _generate_one_5beat(
                 flush=True,
             )
             return sample
-        except (ApiError, ParseError) as e:
-            print(f"  [stage1] retryable fail (attempt {attempt + 1}): {type(e).__name__}: {str(e)[:120]}", flush=True)
+        except ApiError as e:
+            # 网络/认证/HTTP error → 跟模型输出无关,清掉 last_response 走 blind retry
+            last_response_str = None
+            last_reason = None
+            print(f"  [stage1] api fail (attempt {attempt + 1}): {type(e).__name__}: {str(e)[:120]}", flush=True)
             continue
         except Exception as e:
-            # JSON decode / KeyError / 任意意外 → 当作 retryable
+            # JSON decode / KeyError / 任意意外 → 当作 retryable,清状态
+            last_response_str = None
+            last_reason = None
             print(f"  [stage1] unexpected fail (attempt {attempt + 1}): {type(e).__name__}: {str(e)[:120]}", flush=True)
             continue
     return None
