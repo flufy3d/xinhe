@@ -200,8 +200,8 @@ def main():
     t0 = time.time()
     for i in range(n_remaining):
         ts = time.time()
-        plan = planner.plan(rng)
         try:
+            plan = planner.plan(rng)
             raw = call_codex_via_files(plan, model=args.model)
             sample = parse_response(raw, plan, generator_model="codex-cli")
             result = validate(sample.to_dict(), stage="1", plan=plan.to_validator_plan())
@@ -230,6 +230,9 @@ def main():
             if consec_fail >= MAX_CONSEC_FAIL:
                 print(f"!! 连续 {MAX_CONSEC_FAIL} 次失败,break(可能配额满 / API 挂)", flush=True)
                 break
+        except ValueError as e:
+            # BeatPlanner 偶发采样失败(canonical 池空), seed 推进即可恢复, 不计 consec_fail
+            print(f"[skip {i+1}/{n_remaining}] PLAN_FAIL: {str(e)[:120]}", flush=True)
 
     fp.close()
     total = time.time() - t0
