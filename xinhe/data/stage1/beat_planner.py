@@ -85,6 +85,7 @@ class BeatPlan:
             "beat3_min_turns": self.beat3_min_turns,
             "beat3_min_chars": self.beat3_min_chars,    # validator 卡训练目标
             "n_turns": self.n_turns,
+            "recall_form": self.recall_form,
         }
 
     @property

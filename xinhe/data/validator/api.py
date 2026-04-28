@@ -21,6 +21,7 @@ from xinhe.data.validator.beat3_structure import check_beat3_structure, Beat3Str
 from xinhe.data.validator.beat4_pronoun import check_beat4_pronoun, PronounResult
 from xinhe.data.validator.beat4_scope import check_beat4_scope, ScopeResult
 from xinhe.data.validator.canonical_order import check_canonical_order, CanonicalOrderResult
+from xinhe.data.validator.counter_anti_echo import check_counter_anti_echo, CounterAntiEchoResult
 from xinhe.data.validator.echo_check import check_echo, EchoResult
 from xinhe.data.validator.fact_drift import check_fact_drift, FactDriftResult
 from xinhe.data.validator.tier import TierVerdict, classify_tier
@@ -39,6 +40,7 @@ class ValidationResult:
     scope: Optional[ScopeResult] = None
     repetition: Optional[RepetitionResult] = None
     canonical_order: Optional[CanonicalOrderResult] = None
+    counter_anti_echo: Optional[CounterAntiEchoResult] = None
 
 
 def _validate_tier_consistency(sample: dict) -> list[str]:
@@ -92,6 +94,7 @@ def validate(
     scope: Optional[ScopeResult] = None
     repetition: Optional[RepetitionResult] = None
     canonical_order: Optional[CanonicalOrderResult] = None
+    counter_anti_echo: Optional[CounterAntiEchoResult] = None
     if stage == "1" and plan:
         # user_injection: 每个 canonical_value(或 alias) 必须由某个 user turn 逐字说出
         # 防止 ling 把 user 暗示翻译成 canonical 让 assistant 凭空编造
@@ -191,9 +194,32 @@ def validate(
             if not canonical_order.ok:
                 errors.append(f"canonical_order: {canonical_order.reason}")
 
+        # Counter form 反问纠错：asst 不能 echo user 故意提及但 plan 外的实体
+        if plan.get("recall_form") == "counter" and beat4_turn_indices and canonical_facts:
+            canonical_set: set[str] = set(canonical_facts.keys())
+            alias_set: set[str] = set()
+            for c, alist in canonical_facts.items():
+                for a in (alist or []):
+                    if a:
+                        alias_set.add(a)
+            subject_set: set[str] = set()
+            for fm in (plan.get("facts_meta") or []):
+                subj = fm.get("subject", "")
+                if subj and subj != "user":
+                    subject_set.add(subj)
+            counter_anti_echo = check_counter_anti_echo(
+                sample.get("conversations", []),
+                beat4_turn_indices,
+                canonical_set,
+                alias_set,
+                subjects=subject_set,
+            )
+            if not counter_anti_echo.ok:
+                errors.append(f"counter_anti_echo: {counter_anti_echo.reason}")
+
     ok = len(errors) == 0
     return ValidationResult(
         ok=ok, sample=sample, errors=errors, purity=purity, drift=drift, echo=echo,
         beat3_struct=beat3_struct, pronoun=pronoun, scope=scope, repetition=repetition,
-        canonical_order=canonical_order,
+        canonical_order=canonical_order, counter_anti_echo=counter_anti_echo,
     )

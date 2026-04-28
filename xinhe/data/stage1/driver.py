@@ -149,6 +149,16 @@ def _build_fix_message(reason: str, plan) -> str:
             f"请重新输出**完整 JSON**，Beat 4 assistant 召回时 content 必须**逐字**包含 canonical 字面值或允许的别名，"
             f"value 字段填实际写进 content 的那个串。"
         )
+    if "counter_anti_echo" in reason:
+        m = re.search(r"\[(.*?)\]", reason)
+        leaked = m.group(1) if m else "(列表见上)"
+        return (
+            f"刚才 Beat 4（反问纠错段）assistant 顺着 user 故意说错的实体回应了：{leaked}。\n"
+            f"counter form 的语义是 user 故意把 fact 说错（如把颜色/食物/城市等张冠李戴），"
+            f"assistant **必须明确否认**该错误（'我没记得你提过 X'/'你说的 X 我不记得'），"
+            f"只确认 plan 内 canonical 的真实 fact，**绝不许 echo** {leaked} 这种 plan 外的实体（哪怕是修饰语/铺垫语）。\n"
+            f"请重新输出**完整 JSON**，修正 Beat 4 assistant 内容，其他段保持原样。"
+        )
     if "user_injection" in reason:
         return (
             "刚才输出的对话中，某些 canonical fact 没有被 user 自己说出来（assistant 自己'翻译'编造了）。\n"
