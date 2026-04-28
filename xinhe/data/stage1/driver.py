@@ -527,7 +527,10 @@ def _generate_locked(
         # 1A: 多线程跑 DeepSeek，每条出炉立刻写盘
         if n_1a > 0:
             print(f"[stage1] 1A 5-Beat: {n_1a} 条 (workers={workers}, model={model})", flush=True)
-            with ThreadPoolExecutor(max_workers=workers) as ex:
+            # 手动 try/finally + cancel_futures=True：worker 卡死(OR ssl.read 假死)时
+            # 避免 with-block.__exit__ 卡在 shutdown(wait=True) 拖垮整个进程。
+            ex = ThreadPoolExecutor(max_workers=workers)
+            try:
                 futures = []
                 for _ in range(n_1a):
                     worker_seed = rng.randint(0, 2**31 - 1)
@@ -539,15 +542,26 @@ def _generate_locked(
                     ))
                 done_1a = 0
                 for fut in as_completed(futures):
-                    s = fut.result()
-                    if s is None:
+                    # 单条 result/write/print 失败 skip 而非 break,否则 loop 退出后
+                    # shutdown 等卡死 worker 整个假死。
+                    try:
+                        s = fut.result()
+                        if s is None:
+                            continue
+                        ok_inc, rej_inc = _write_sample(fp_out, _ensure_rej, s)
+                        n_ok += ok_inc
+                        n_rej += rej_inc
+                        done_1a += ok_inc
+                        if done_1a > 0 and done_1a % 25 == 0:
+                            print(f"  [stage1] 1A 完成 {done_1a}/{n_1a}（落盘 {n_ok}/{n_samples}）", flush=True)
+                    except Exception as e:
+                        print(
+                            f"  [stage1] write_loop 单条失败 (skip): {type(e).__name__}: {str(e)[:160]}",
+                            flush=True,
+                        )
                         continue
-                    ok_inc, rej_inc = _write_sample(fp_out, _ensure_rej, s)
-                    n_ok += ok_inc
-                    n_rej += rej_inc
-                    done_1a += ok_inc
-                    if done_1a > 0 and done_1a % 25 == 0:
-                        print(f"  [stage1] 1A 完成 {done_1a}/{n_1a}（落盘 {n_ok}/{n_samples}）", flush=True)
+            finally:
+                ex.shutdown(wait=True, cancel_futures=True)
 
         # 1B: world_qa 语料包装，流式写
         if n_1b > 0:
