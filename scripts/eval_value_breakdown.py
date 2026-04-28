@@ -45,7 +45,7 @@ CLASS_NAMES = {CLS_VALUE: "VALUE", CLS_FRAME: "FRAME", CLS_TELL: "TELL"}
 SLOT_ACTIVE_THRESHOLD = 0.5
 
 
-def tokenize_turn_with_class(tokenizer, user_content, assistant_content, segment_length,
+def tokenize_turn_with_class(tokenizer, user_content, assistant_content, turn_max_tokens,
                              *, train_loss="true", value_spans=None):
     """tokenize 一轮并返回 (input_ids, labels, token_class)。
 
@@ -118,12 +118,12 @@ def tokenize_turn_with_class(tokenizer, user_content, assistant_content, segment
                     if token_class[i] != CLS_IGNORE and cs < e_full and ce > s_full:
                         token_class[i] = CLS_VALUE
 
-    if len(full_ids) > segment_length:
-        full_ids = full_ids[:segment_length]
-        labels = labels[:segment_length]
-        token_class = token_class[:segment_length]
+    if len(full_ids) > turn_max_tokens:
+        full_ids = full_ids[:turn_max_tokens]
+        labels = labels[:turn_max_tokens]
+        token_class = token_class[:turn_max_tokens]
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
-    pad_len = segment_length - len(full_ids)
+    pad_len = turn_max_tokens - len(full_ids)
     if pad_len > 0:
         full_ids += [pad_id] * pad_len
         labels += [-100] * pad_len
@@ -153,7 +153,7 @@ def _collect_episode_value_tokens(tokenizer, episode) -> set:
 
 
 @torch.no_grad()
-def eval_episode(model, tokenizer, episode, device, segment_length=256,
+def eval_episode(model, tokenizer, episode, device, turn_max_tokens=256,
                  blank_state=False, track_slot_norms=False, track_confusion=False):
     """评估一个 episode。
 
@@ -191,7 +191,7 @@ def eval_episode(model, tokenizer, episode, device, segment_length=256,
         value_spans = asst_entry.get("value_span") or []
 
         ids, labels, token_class = tokenize_turn_with_class(
-            tokenizer, user_msg, assistant_msg, segment_length,
+            tokenizer, user_msg, assistant_msg, turn_max_tokens,
             train_loss=train_loss, value_spans=value_spans,
         )
 
@@ -386,7 +386,7 @@ def main():
     parser.add_argument("--data", type=str, default=None,
                         help="val jsonl 路径, 默认用 config 里的 val_path (sweep 模式下忽略)")
     parser.add_argument("--max-episodes", type=int, default=100)
-    parser.add_argument("--segment-length", type=int, default=None)
+    parser.add_argument("--turn-max-tokens", type=int, default=None)
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--sweep-same-cat", type=str, default=None,
                         help="逗号分隔同类值, 对每个值生成 val 跑 eval, 画 VALUE 曲线。例: 0,0.3,0.5,0.7,1.0")
@@ -404,7 +404,7 @@ def main():
     del checkpoint
 
     device = torch.device(config.device if torch.cuda.is_available() else "cpu")
-    seg_len = args.segment_length or config.segment_length
+    seg_len = args.turn_max_tokens or config.turn_max_tokens
 
     print(f"=== VALUE/FRAME/TELL 分类评估 ===")
     print(f"  checkpoint: {args.checkpoint}")

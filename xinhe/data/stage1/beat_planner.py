@@ -169,6 +169,17 @@ class BeatPlanner:
         beat3_min_chars: int = 500,
         beat3_chars_tolerance: float = 0.8,
     ) -> None:
+        # 自身合法性校验（与 max_turns 关联校验由 xinhe.config.validate 唯一入口处理）
+        lo, hi = int(n_turns_range[0]), int(n_turns_range[1])
+        if lo < 1 or hi < lo:
+            raise ValueError(
+                f"BeatPlanner n_turns_range={n_turns_range!r} invalid; require 1 <= lo <= hi."
+            )
+        n_canon_lo, n_canon_hi = int(n_canonical_range[0]), int(n_canonical_range[1])
+        if n_canon_lo < 1 or n_canon_hi < n_canon_lo:
+            raise ValueError(
+                f"BeatPlanner n_canonical_range={n_canonical_range!r} invalid; require 1 <= lo <= hi."
+            )
         self.dict_split = dict_split
         self.n_canonical_range = n_canonical_range
         self.aliases_per_fact_range = aliases_per_fact_range

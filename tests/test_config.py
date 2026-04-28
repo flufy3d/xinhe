@@ -15,8 +15,8 @@ def test_from_yaml_qwen():
     assert config.hidden_size == 1024
     assert config.n_heads == 16
     assert config.head_dim == 128        # v5c Phase A 第二轮扩容量
-    # 继承自 base.yaml
-    assert config.tbptt_steps == 8
+    # 继承自 base.yaml: turn_max_tokens / max_turns_per_episode / tbptt_turns 已删，
+    # 改为 per-stage 显式写（validate_stage_config 校验），dataclass 默认值仍存在
     assert config.learning_rate == 3e-4
 
 

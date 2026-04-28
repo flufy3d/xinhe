@@ -266,7 +266,7 @@ def eval_joint_v8(
       }
     """
     val_sets = getattr(config, "val_sets", None) or _default_val_sets()
-    seg_len = getattr(config, "segment_length", 256)
+    seg_len = getattr(config, "turn_max_tokens", 256)
 
     flat: dict[str, float] = {}
     for vset in val_sets:

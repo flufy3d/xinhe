@@ -23,6 +23,7 @@ from torch.utils.data import DataLoader
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
+from xinhe.config import validate_stage_config
 from xinhe.model.config import XinheConfig
 from xinhe.model.xinhe_model import XinheModel
 from xinhe.data.conversation import (
@@ -49,14 +50,14 @@ def make_dataloaders(config, tokenizer):
     train_dataset = ConversationDataset(
         data_path=config.train_path,
         tokenizer=tokenizer,
-        segment_length=config.segment_length,
-        episode_length=config.episode_length,
+        turn_max_tokens=config.turn_max_tokens,
+        max_turns_per_episode=config.max_turns_per_episode,
     )
     val_dataset = ConversationDataset(
         data_path=config.val_path,
         tokenizer=tokenizer,
-        segment_length=config.segment_length,
-        episode_length=config.episode_length,
+        turn_max_tokens=config.turn_max_tokens,
+        max_turns_per_episode=config.max_turns_per_episode,
     ) if Path(config.val_path).exists() else None
 
     train_loader = DataLoader(
@@ -72,15 +73,18 @@ def make_dataloaders(config, tokenizer):
 
 
 def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
-    """将课程阶段的 training 参数覆盖到 base config 上"""
+    """将课程阶段的 training 参数覆盖到 base config 上。
+
+    依赖前置：caller 已对 stage 调用 validate_stage_config，保证 training 含
+    turn_max_tokens / max_turns_per_episode / tbptt_turns（tbptt_turns 可能派生）。"""
     overrides = {}
     training = stage.get("training", {})
 
     # training 段的字段直接映射到 config
     field_map = {
-        "segment_length": "segment_length",
-        "episode_length": "episode_length",
-        "tbptt_steps": "tbptt_steps",
+        "turn_max_tokens": "turn_max_tokens",
+        "max_turns_per_episode": "max_turns_per_episode",
+        "tbptt_turns": "tbptt_turns",
         "batch_size": "batch_size",
         "grad_accum_steps": "grad_accum_steps",
         "gradient_checkpointing": "gradient_checkpointing",
@@ -242,6 +246,10 @@ def train_curriculum(base_config, stages, args):
         print(f"  课程阶段 [{i+1}/{len(stages)}]: {stage_name}")
         print(f"{'='*60}")
 
+        # 启动期校验 + 派生 tbptt_turns（写回 stage["training"]）
+        # 配错在这里立刻抛 ConfigError 带 Hint，不让训练静默跑被截断的数据
+        validate_stage_config(stage_name, stage)
+
         # 准备数据 (统一分发: memory/persona 自动识别)
         print(f"[数据生成] type={data_cfg.get('type', 'memory')}")
         train_path, val_path = generate_stage_data(stage, stage_name)
@@ -254,7 +262,7 @@ def train_curriculum(base_config, stages, args):
         train_loader, val_loader, n_train, n_val = make_dataloaders(stage_config, tokenizer)
         print(f"[数据] 训练集: {n_train} | 验证集: {n_val}")
         print(f"[参数] lr={stage_config.learning_rate} batch={stage_config.batch_size} "
-              f"ep_len={stage_config.episode_length} max_steps={stage_config.max_steps}")
+              f"max_turns={stage_config.max_turns_per_episode} max_steps={stage_config.max_steps}")
 
         # 训练
         if trainer is None:

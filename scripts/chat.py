@@ -227,7 +227,7 @@ def main():
                 else:
                     print(f"  Burn-in: '{cmd_arg}'")
                     token_ids = tokenizer.encode(cmd_arg, add_special_tokens=False)
-                    seg_len = config.segment_length
+                    seg_len = config.turn_max_tokens
                     segments = []
                     for i in range(0, len(token_ids), seg_len):
                         seg = token_ids[i:i+seg_len]

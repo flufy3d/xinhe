@@ -2,8 +2,8 @@
 Trainer (v7) — 训练循环
 
 核心特性:
-- state 跨 segment (对话轮次) 传递，state 是单张量 W: (B, H, d_v, d_k)
-- 截断 BPTT: 每 tbptt_steps 轮做 detach + backward + step
+- state 跨 turn (对话轮次) 传递，state 是单张量 W: (B, H, d_v, d_k)
+- 截断 BPTT: 每 tbptt_turns 轮做 detach + backward + step
 - 只训练 Hippocampus + LoRA 参数
 """
 import math
@@ -33,10 +33,10 @@ class Trainer:
     episode 循环:
         for each episode (多轮对话):
             state = model.init_state()
-            for seg_idx, segment in enumerate(episode):
-                1. forward(segment, state) → logits, state_next
+            for turn_idx, turn_tensor in enumerate(episode):
+                1. forward(turn_tensor, state) → logits, state_next
                 2. 累积 loss
-                3. 每 tbptt_steps 做一次 backward + optimizer step + state.detach()
+                3. 每 tbptt_turns 做一次 backward + optimizer step + state.detach()
                 state = state_next
     """
 
@@ -219,62 +219,64 @@ class Trainer:
         total_loss = 0
         num_episodes = 0
 
-        for episode_segments in self.train_dataloader:
+        for episode_turns in self.train_dataloader:
             if self.global_step >= self.config.max_steps or self._early_stopped:
                 break
 
-            loss = self._train_episode(episode_segments)
+            loss = self._train_episode(episode_turns)
             total_loss += loss
             num_episodes += 1
 
         return total_loss / max(num_episodes, 1)
 
-    def _train_episode(self, episode_segments) -> float:
+    def _train_episode(self, episode_turns) -> float:
         """训练一个 episode (多轮对话)。
 
-        episode_segments: segment 列表，每个是 (input_ids, labels, weights) tuple，shape (B, T)
+        episode_turns: turn tensor 列表，每个是 (input_ids, labels, weights) tuple，shape (B, T)
+                       其中 T = turn_max_tokens
         """
-        B = episode_segments[0][0].shape[0]
+        B = episode_turns[0][0].shape[0]
         state = self.model.init_state(B).to(self.device)
         accumulated_loss = torch.tensor(0.0, device=self.device)
         episode_total_loss = 0.0
         episode_correct = 0
         episode_total = 0
-        loss_segments = 0
+        loss_turns = 0
 
-        for seg_idx, batch in enumerate(episode_segments):
-            segment, labels, weights = batch
-            segment = segment.to(self.device)
+        for turn_idx, batch in enumerate(episode_turns):
+            turn_ids, labels, weights = batch
+            turn_ids = turn_ids.to(self.device)
             labels = labels.to(self.device)
             weights = weights.to(self.device)
 
-            if seg_idx > 0 and seg_idx % self.config.tbptt_steps == 0:
-                if loss_segments > 0:
-                    avg_loss = accumulated_loss / loss_segments
+            if turn_idx > 0 and turn_idx % self.config.tbptt_turns == 0:
+                if loss_turns > 0:
+                    avg_loss = accumulated_loss / loss_turns
                     (avg_loss / self.config.grad_accum_steps).backward()
                     episode_total_loss += avg_loss.item()
                     self._maybe_optimizer_step(avg_loss.item())
 
                 state = state.detach()
                 accumulated_loss = torch.tensor(0.0, device=self.device)
-                loss_segments = 0
+                loss_turns = 0
 
             with torch.amp.autocast("cuda", dtype=self.dtype):
-                result = self.model(segment, state, labels=labels, pad_token_id=self.pad_token_id, weights=weights)
+                # model.forward 内部仍叫 segment（纯实现细节，与业务 turn 解耦）
+                result = self.model(turn_ids, state, labels=labels, pad_token_id=self.pad_token_id, weights=weights)
 
             state = result["state_next"]
-            seg_loss = result["loss"]
-            accumulated_loss = accumulated_loss + seg_loss
+            turn_loss = result["loss"]
+            accumulated_loss = accumulated_loss + turn_loss
             correct = result.get("correct", 0)
             total = result.get("total", 0)
             episode_correct += correct.item() if hasattr(correct, 'item') else correct
             episode_total += total.item() if hasattr(total, 'item') else total
             has_valid_labels = (labels != -100).any()
             if has_valid_labels:
-                loss_segments += 1
+                loss_turns += 1
 
-        if loss_segments > 0:
-            avg_loss = accumulated_loss / loss_segments
+        if loss_turns > 0:
+            avg_loss = accumulated_loss / loss_turns
             (avg_loss / self.config.grad_accum_steps).backward()
             episode_total_loss += avg_loss.item()
             acc = episode_correct / max(episode_total, 1)
@@ -309,7 +311,7 @@ class Trainer:
 
             breakdown = eval_value_breakdown_fast(
                 self.model, tokenizer, self.config.val_path, self.device,
-                seg_len=self.config.segment_length, max_episodes=50,
+                seg_len=self.config.turn_max_tokens, max_episodes=50,
             )
             value_acc = breakdown["VALUE"]
             print(f"  [val breakdown] VALUE={value_acc:.2%} "

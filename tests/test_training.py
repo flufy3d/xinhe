@@ -73,7 +73,7 @@ def test_training_loop_runs():
         read_scale_init=-5.0,
         lora_rank=0,
         freeze_backbone=False,
-        tbptt_steps=2,
+        tbptt_turns=2,
         batch_size=2,
         learning_rate=1e-3,
         grad_clip=1.0,
@@ -101,7 +101,7 @@ def test_state_detach_in_tbptt():
     config = XinheConfig(
         hidden_size=32, n_heads=4, head_dim=8,
         read_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
-        tbptt_steps=2, device="cpu", dtype="float32",
+        tbptt_turns=2, device="cpu", dtype="float32",
     )
     backbone = TinyBackbone()
     model = XinheModel(config, backbone=backbone)
@@ -109,8 +109,8 @@ def test_state_detach_in_tbptt():
     B, T = 2, 8
     state = model.init_state(B)
 
-    for seg_idx in range(4):
-        if seg_idx > 0 and seg_idx % config.tbptt_steps == 0:
+    for turn_idx in range(4):
+        if turn_idx > 0 and turn_idx % config.tbptt_turns == 0:
             state = state.detach()
             assert not state.requires_grad
 
@@ -119,7 +119,7 @@ def test_state_detach_in_tbptt():
         result = model(input_ids, state, labels=labels)
         state = result["state_next"]
 
-        if seg_idx % config.tbptt_steps > 0:
+        if turn_idx % config.tbptt_turns > 0:
             assert state.requires_grad or result["loss"].requires_grad
 
 
@@ -128,7 +128,7 @@ def test_v7_single_param_group():
     config = XinheConfig(
         hidden_size=32, n_heads=4, head_dim=8,
         read_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
-        tbptt_steps=2, device="cpu", dtype="float32",
+        tbptt_turns=2, device="cpu", dtype="float32",
     )
     backbone = TinyBackbone()
     model = XinheModel(config, backbone=backbone)
@@ -149,7 +149,7 @@ def test_v5a_plugin_lr_multiplier():
         hidden_size=32, n_heads=4, head_dim=8,
         read_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
         learning_rate=1e-3, plugin_lr_multiplier=2.0,
-        tbptt_steps=2, device="cpu", dtype="float32",
+        tbptt_turns=2, device="cpu", dtype="float32",
     )
     backbone = TinyBackbone()
     model = XinheModel(config, backbone=backbone)
@@ -169,7 +169,7 @@ def test_weighted_loss_equals_unweighted_when_uniform():
     config = XinheConfig(
         hidden_size=32, n_heads=4, head_dim=8,
         read_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
-        tbptt_steps=2, device="cpu", dtype="float32",
+        tbptt_turns=2, device="cpu", dtype="float32",
     )
     backbone = TinyBackbone()
     model = XinheModel(config, backbone=backbone)
@@ -195,7 +195,7 @@ def test_weighted_loss_value_token_5x():
     config = XinheConfig(
         hidden_size=32, n_heads=4, head_dim=8,
         read_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
-        tbptt_steps=2, device="cpu", dtype="float32",
+        tbptt_turns=2, device="cpu", dtype="float32",
     )
     backbone = TinyBackbone()
     model = XinheModel(config, backbone=backbone)
@@ -223,7 +223,7 @@ def test_weighted_loss_ignores_minus_100():
     config = XinheConfig(
         hidden_size=32, n_heads=4, head_dim=8,
         read_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
-        tbptt_steps=2, device="cpu", dtype="float32",
+        tbptt_turns=2, device="cpu", dtype="float32",
     )
     backbone = TinyBackbone()
     model = XinheModel(config, backbone=backbone)

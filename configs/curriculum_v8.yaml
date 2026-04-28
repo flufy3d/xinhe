@@ -1,24 +1,14 @@
-# ============================================================
-# v8 课程：2 大 stage（Stage 0 全骨架混跑 → Stage 1 5-Beat + world_qa）
-#
-#   Stage 0  原子事件 + 11 骨架混合分布。仅训 Hippocampus（freeze_lora）。
-#            14 事件 + per-skeleton weight + 距离桶 + 截断高斯轮数。
-#
-#   Stage 1  DeepSeek 5-Beat 自然对话 (1A) 90% + world_qa cache (1B) 10%。
-#            解冻 LoRA + plugin 0.3x 学习率。
-# ============================================================
+# v8 课程：Stage 0 骨架混合 → Stage 1 5-Beat → Stage 2 联合巩固
 
 training_defaults:
   learning_rate: 3.0e-4
   grad_clip: 1.0
   gradient_checkpointing: true
-  log_every: 50
+  log_every: 10
   eval_every: 1000
   save_every: 1000
-  segment_length: 256
 
 stages:
-  # ── Stage 0: 原子事件 + 骨架混合 ──
   - name: "0_atomic_skeletons"
     data:
       stage_kind: "stage0"
@@ -45,15 +35,14 @@ stages:
       seed: 42
       out_dir: "data/v8/stage0"
     training:
-      episode_length: 12          # ≥ skeleton 最大事件数 + 距离桶上限，避免末轮 recall 截断
-      tbptt_steps: 12
-      freeze_lora: false          # Stage 0 LoRA 也参与训练；只训 W 信号不足
+      max_turns_per_episode: 12
+      turn_max_tokens: 256
+      freeze_lora: false
       plugin_lr_multiplier: 1.0
       max_steps: 6000
       warmup_steps: 200
       use_joint_early_stop: true
       early_stop:
-        # 综合命中率 + 关键骨架阈值（指标名由 event_eval.eval_joint_v8 输出）
         stage0_seen_entity_overall: 0.90
         stage0_seen_entity_S1: 0.95
         stage0_seen_entity_S5: 0.85
@@ -63,67 +52,61 @@ stages:
       - {name: "stage0_seen_entity",   path: "data/v8/val/stage0/seen_entity.jsonl"}
       - {name: "stage0_unseen_entity", path: "data/v8/val/stage0/unseen_entity.jsonl"}
 
-  # ── Stage 1: 5-Beat + world_qa ──
   - name: "1_5beat_natural"
     data:
       stage_kind: "stage1"
       mix:
-        "1A": 1.00         # v7+: 砍独立 1B,world_qa 通过 1A 内嵌 warmup 注入(打散 fact 位置 + 消除 padding 浪费)
+        "1A": 1.00
       n_canonical_range: [1, 3]
       n_turns_range: [10, 14]
-      beat3_min_turns: 1          # 实测 LLM 通常 1-3 pair；min_chars 才是真正的训练压力指标
-      beat3_min_chars: 450        # validator 门槛（450 zh ≈ 675 token ≈ 2.6 segments，仍跨 ≥2 seg）
-      beat3_chars_tolerance: 0.56 # prompt 显示 = round_to_50(450/0.56) = 800，LLM 朝 800 写
-                                  # validator 放到 450 救回压线样本，训练数据 beat3 长度分布更广
+      beat3_min_turns: 1
+      beat3_min_chars: 450
+      beat3_chars_tolerance: 0.56
       num_train: 30000
       num_val: 500
       seed: 43
-      workers: 4                  # 1A 并发线程数（OpenRouter 免费层 free-models-per-min 限流，4 较稳）
+      workers: 4
       model: "deepseek-v4-flash"
       out_dir: "data/v8/stage1"
     training:
       freeze_lora: false
       plugin_lr_multiplier: 0.3
-      episode_length: 16
-      tbptt_steps: 16
+      max_turns_per_episode: 16
+      turn_max_tokens: 256
       max_steps: 10000
       warmup_steps: 200
       use_joint_early_stop: true
       early_stop:
         stage1_seen_entity_overall: 0.88
         stage1_seen_entity_substream_1A: 0.90
-        stage1_seen_entity_substream_1B: 0.78    # world_qa 保住基础能力
+        stage1_seen_entity_substream_1B: 0.78
         stage1_seen_entity_tier_hard: 0.92
         stage1_seen_entity_tier_soft: 0.85
     val_sets:
       - {name: "stage1_seen_entity",   path: "data/v8/val/stage1/seen_entity.jsonl"}
       - {name: "stage1_unseen_entity", path: "data/v8/val/stage1/unseen_entity.jsonl"}
 
-  # ── Stage 2: 联合巩固 (anti-forgetting) ──
-  # 从 stage0/stage1 已生成的 train.jsonl 按比例抽样合并,无 LLM 调用,纯本地 mix。
-  # 防止 stage 1 训完后 D 覆盖/C 拒答/L erase 等"少数派语义"被冲掉。
   - name: "2_joint_consolidation"
     data:
       stage_kind: "stage2"
       sources:
-        - {path: "data/v8/stage0/train.jsonl", ratio: 0.15, tag: "stage0"}    # 经典 replay 比例;D/C/L/J 等少数派能力后续靠扩 stage 1 prompt 模板补
-        - {path: "data/v8/stage1/train.jsonl", ratio: 0.85, tag: "stage1"}    # 部署语境主导
+        - {path: "data/v8/stage0/train.jsonl", ratio: 0.15, tag: "stage0"}
+        - {path: "data/v8/stage1/train.jsonl", ratio: 0.85, tag: "stage1"}
       num_train: 20000
       num_val: 500
       seed: 44
       out_dir: "data/v8/stage2"
     training:
       freeze_lora: false
-      plugin_lr_multiplier: 0.5    # 介于 stage0(1.0) / stage1(0.3) 之间
-      episode_length: 16
-      tbptt_steps: 16
+      plugin_lr_multiplier: 0.5
+      max_turns_per_episode: 16
+      turn_max_tokens: 256
       max_steps: 4000
       warmup_steps: 100
       use_joint_early_stop: true
       early_stop:
-        # stage 2 同时跑 stage0 + stage1 的 val,两边都要不掉
-        stage0_seen_entity_overall: 0.85    # 比 stage 0 训完的 0.90 略松,允许 5% 退化
-        stage1_seen_entity_overall: 0.85    # 与 stage 1 训完同等水平
+        stage0_seen_entity_overall: 0.85
+        stage1_seen_entity_overall: 0.85
     val_sets:
       - {name: "stage0_seen_entity",   path: "data/v8/val/stage0/seen_entity.jsonl"}
       - {name: "stage0_unseen_entity", path: "data/v8/val/stage0/unseen_entity.jsonl"}

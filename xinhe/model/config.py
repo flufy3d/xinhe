@@ -47,9 +47,11 @@ class XinheConfig:
     lora_target_modules: list = field(default_factory=lambda: ["q_proj", "v_proj"])
 
     # --- 训练 ---
-    segment_length: int = 256
-    episode_length: int = 16
-    tbptt_steps: int = 4
+    # 单一术语：turn = 一个 user-asst pair（在 conversation.py 内编为 1 个 tensor）
+    # 不再用 segment / episode_length / tbptt_steps —— 历史踩坑过 segment 单位混淆。
+    turn_max_tokens: int = 256       # 单 turn token 上限（旧 segment_length）
+    max_turns_per_episode: int = 16  # 单 episode 最多几个 turn（旧 episode_length）
+    tbptt_turns: int = 4             # 每多少个 turn backward 一次（旧 tbptt_steps）
     batch_size: int = 4
     learning_rate: float = 3e-4
     plugin_lr_multiplier: float = 1.0   # plugin 学习率 = learning_rate × multiplier
@@ -200,9 +202,9 @@ class XinheConfig:
                 "target_modules": "lora_target_modules",
             },
             "training": {
-                "segment_length": "segment_length",
-                "episode_length": "episode_length",
-                "tbptt_steps": "tbptt_steps",
+                "turn_max_tokens": "turn_max_tokens",
+                "max_turns_per_episode": "max_turns_per_episode",
+                "tbptt_turns": "tbptt_turns",
                 "batch_size": "batch_size",
                 "learning_rate": "learning_rate",
                 "plugin_lr_multiplier": "plugin_lr_multiplier",

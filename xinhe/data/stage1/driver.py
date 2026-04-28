@@ -221,35 +221,22 @@ from xinhe.data.validator.api import validate
 # v7+: 1A 在 Beat 1 之前概率插入 K 个 world_qa pair 当"开场闲聊",
 # 同时解决 (1) fact 位置偏置 user[0] 93.8% (2) 1B 独立 episode padding 浪费。
 # K 概率分布: 0=40% / 1=30% / 2=30% → fact 首次出现位置散到 user[0/1/2]。
+# K_max 与 xinhe.config.validate._STAGE1_WARMUP_K_MAX 同步（启动校验）。
 _WARMUP_K_DIST = ([0, 1, 2], [0.4, 0.3, 0.3])
 
 
 def _inject_warmup(sample, rng: random.Random, dict_split: str) -> None:
     """在 sample.conversations 前面插 K 对 world_qa 闲聊（标 lm_only）。
-    原地修改 sample；同步更新 meta.n_turns / meta.warmup_pairs。"""
-    k = rng.choices(_WARMUP_K_DIST[0], weights=_WARMUP_K_DIST[1], k=1)[0]
-    if k <= 0:
-        sample.meta["warmup_pairs"] = 0
-        return
-    pairs = sample_world_qa_pairs(k=k, rng=rng, dict_split=dict_split)
-    if not pairs:
-        sample.meta["warmup_pairs"] = 0
-        return
-    warmup = []
-    for p in pairs:
-        warmup.append({"role": "user", "content": p["user"]})
-        warmup.append({
-            "role": "assistant",
-            "content": p["assistant"],
-            "train_loss": "lm_only",
-            "value": None,
-            "value_span": [],
-            "value_tier": None,
-            "weight_per_span": 0.0,
-        })
-    sample.conversations = warmup + list(sample.conversations)
-    sample.meta["n_turns"] = sample.meta.get("n_turns", 0) + len(pairs)
-    sample.meta["warmup_pairs"] = len(pairs)
+    薄 wrapper —— 实现复用 xinhe.data.warmup.inject_world_qa_warmup。
+    K 分布与 train_loss 保持原 v7+ 行为不变。"""
+    from xinhe.data.warmup import inject_world_qa_warmup
+    inject_world_qa_warmup(
+        sample,
+        rng,
+        dict_split=dict_split,
+        k_sampler=lambda r, _s: r.choices(_WARMUP_K_DIST[0], weights=_WARMUP_K_DIST[1], k=1)[0],
+        train_loss="lm_only",
+    )
 
 
 def _generate_one_5beat(

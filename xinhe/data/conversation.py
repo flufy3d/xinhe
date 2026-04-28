@@ -68,16 +68,20 @@ def tokenize_turn(
     tokenizer,
     user_content: str,
     assistant_content: str,
-    segment_length: int,
+    turn_max_tokens: int,
     *,
     train_loss: Union[bool, str] = "true",
     value_spans: Optional[list[list[int]]] = None,
     weight_per_span: float = 0.0,
+    stats: Optional[dict] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """将一轮 user+assistant 对话 tokenize 为 (input_ids, labels, weights)。
 
     value_spans: list of [start_char, end_char] in **assistant_content** 坐标系。
                  函数内部会偏移到 full_text 坐标，再映射 token。
+
+    stats: 可选 mutable dict，用于累计截断计数（key: "turns_truncated"）。
+           调用方传入后能在 dataset 加载完后报"turn 截断率"。
     """
     prefix_text = tokenizer.apply_chat_template(
         [{"role": "user", "content": user_content}],
@@ -145,14 +149,17 @@ def tokenize_turn(
                         weights[i] = weight_per_span
 
     # 截断
-    if len(full_ids) > segment_length:
-        full_ids = full_ids[:segment_length]
-        labels = labels[:segment_length]
-        weights = weights[:segment_length]
+    if len(full_ids) > turn_max_tokens:
+        if stats is not None:
+            stats["turns_truncated"] = stats.get("turns_truncated", 0) + 1
+            stats["max_turn_tokens_seen"] = max(stats.get("max_turn_tokens_seen", 0), len(full_ids))
+        full_ids = full_ids[:turn_max_tokens]
+        labels = labels[:turn_max_tokens]
+        weights = weights[:turn_max_tokens]
 
     # Padding
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
-    pad_len = segment_length - len(full_ids)
+    pad_len = turn_max_tokens - len(full_ids)
     if pad_len > 0:
         full_ids = full_ids + [pad_id] * pad_len
         labels = labels + [-100] * pad_len
@@ -183,14 +190,26 @@ class ConversationDataset(Dataset):
         self,
         data_path: str,
         tokenizer,
-        segment_length: int = 256,
-        episode_length: int = 16,
+        turn_max_tokens: int = 256,
+        max_turns_per_episode: int = 16,
     ):
         self.tokenizer = tokenizer
-        self.segment_length = segment_length
-        self.episode_length = episode_length
+        self.turn_max_tokens = turn_max_tokens
+        self.max_turns_per_episode = max_turns_per_episode
 
         ensure_chat_template(tokenizer)
+
+        # 截断统计：dataloader 加载完后输出，用户能看到配置/数据是否对齐
+        # turn 层面：tokenize_turn 截断（turn_max_tokens 偏小）
+        # episode 层面：_process_conversation 截断（max_turns_per_episode 偏小）
+        self._stats = {
+            "turns_total": 0,
+            "turns_truncated": 0,
+            "episodes_total": 0,
+            "episodes_truncated": 0,
+            "max_turn_tokens_seen": 0,
+            "max_turns_in_episode_seen": 0,
+        }
 
         self.episodes = []
         data_path = Path(data_path)
@@ -206,15 +225,53 @@ class ConversationDataset(Dataset):
                     if episode and len(episode) >= 2:
                         self.episodes.append(episode)
 
+        self._report_truncation_stats(str(data_path))
+
+    def _report_truncation_stats(self, data_path: str) -> None:
+        """加载完后输出截断率；任一 > 5% 触发 warning（含可操作 Hint）。"""
+        import logging
+        logger = logging.getLogger(__name__)
+
+        s = self._stats
+        if s["turns_total"] == 0:
+            return
+
+        turn_rate = s["turns_truncated"] / s["turns_total"]
+        ep_rate = s["episodes_truncated"] / max(s["episodes_total"], 1)
+
+        msg = (
+            f"[ConversationDataset] {data_path}: "
+            f"episodes={s['episodes_total']} turns={s['turns_total']} | "
+            f"turn_truncation_rate={turn_rate:.2%} (max_turn_tokens_seen={s['max_turn_tokens_seen']}, turn_max_tokens={self.turn_max_tokens}) | "
+            f"episode_truncation_rate={ep_rate:.2%} (max_turns_in_episode_seen={s['max_turns_in_episode_seen']}, max_turns_per_episode={self.max_turns_per_episode})"
+        )
+        print(msg)
+
+        if turn_rate > 0.05:
+            logger.warning(
+                f"turn_truncation_rate={turn_rate:.2%} > 5% in {data_path}. "
+                f"max_turn_tokens_seen={s['max_turn_tokens_seen']} > turn_max_tokens={self.turn_max_tokens}. "
+                f"Hint: raise turn_max_tokens to ≥{((s['max_turn_tokens_seen'] + 127) // 128) * 128} "
+                f"or shorten turn content (e.g. lower beat3_min_chars in stage1)."
+            )
+        if ep_rate > 0.05:
+            logger.warning(
+                f"episode_truncation_rate={ep_rate:.2%} > 5% in {data_path}. "
+                f"max_turns_in_episode_seen={s['max_turns_in_episode_seen']} > max_turns_per_episode={self.max_turns_per_episode}. "
+                f"Hint: raise max_turns_per_episode (yaml) to ≥{s['max_turns_in_episode_seen']} "
+                f"so dataloader covers all turns without truncation."
+            )
+
     def _process_conversation(
         self, item: dict
     ) -> Optional[list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]]:
-        """将一个对话转为 (input_ids, labels, weights) segment 列表。"""
+        """将一个对话转为 (input_ids, labels, weights) turn tensor 列表。
+        每个 turn = 1 个 user-asst pair → 1 个 (B,T) 三元组。"""
         conversations = item.get("conversations", [])
         if not conversations:
             return None
 
-        segments = []
+        turn_tensors = []
 
         for i in range(0, len(conversations) - 1, 2):
             user_msg = conversations[i].get("content", "")
@@ -224,32 +281,40 @@ class ConversationDataset(Dataset):
             value_spans = asst_entry.get("value_span") or []
             weight_per_span = float(asst_entry.get("weight_per_span", 0.0) or 0.0)
 
-            segment = tokenize_turn(
-                self.tokenizer, user_msg, assistant_msg, self.segment_length,
+            turn_tensor = tokenize_turn(
+                self.tokenizer, user_msg, assistant_msg, self.turn_max_tokens,
                 train_loss=train_loss,
                 value_spans=value_spans,
                 weight_per_span=weight_per_span,
+                stats=self._stats,
             )
-            segments.append(segment)
+            turn_tensors.append(turn_tensor)
+            self._stats["turns_total"] += 1
 
-        if len(segments) > self.episode_length:
-            # 截断：保留前 (episode_length - 1) 个 + 末尾那个
-            # （避免 0b episode_length 截断 recall bug —— 末轮 recall 不能丢）
-            segments = segments[: self.episode_length - 1] + [segments[-1]]
+        self._stats["episodes_total"] += 1
+        self._stats["max_turns_in_episode_seen"] = max(
+            self._stats["max_turns_in_episode_seen"], len(turn_tensors)
+        )
 
-        # Pad 到 episode_length：避免 collate_episodes 用 min_len 截断整个 batch
+        if len(turn_tensors) > self.max_turns_per_episode:
+            # 截断：保留前 (max_turns_per_episode - 1) 个 + 末尾那个
+            # （避免 episode 末轮 recall 被丢；中间被砍是因为 max_turns_per_episode 配小了）
+            self._stats["episodes_truncated"] += 1
+            turn_tensors = turn_tensors[: self.max_turns_per_episode - 1] + [turn_tensors[-1]]
+
+        # Pad 到 max_turns_per_episode：避免 collate_episodes 用 min_len 截断整个 batch
         pad_id = (
             self.tokenizer.pad_token_id
             if self.tokenizer.pad_token_id is not None
             else 0
         )
-        while len(segments) < self.episode_length:
-            dummy_ids = torch.full((self.segment_length,), pad_id, dtype=torch.long)
-            dummy_labels = torch.full((self.segment_length,), -100, dtype=torch.long)
-            dummy_weights = torch.zeros(self.segment_length, dtype=torch.float)
-            segments.append((dummy_ids, dummy_labels, dummy_weights))
+        while len(turn_tensors) < self.max_turns_per_episode:
+            dummy_ids = torch.full((self.turn_max_tokens,), pad_id, dtype=torch.long)
+            dummy_labels = torch.full((self.turn_max_tokens,), -100, dtype=torch.long)
+            dummy_weights = torch.zeros(self.turn_max_tokens, dtype=torch.float)
+            turn_tensors.append((dummy_ids, dummy_labels, dummy_weights))
 
-        return segments
+        return turn_tensors
 
     def __len__(self):
         return len(self.episodes)
@@ -261,12 +326,12 @@ class ConversationDataset(Dataset):
 def collate_episodes(
     batch: list[list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]],
 ) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
-    """将多个 episode 整理为 batch（取最短的 episode 长度）。"""
+    """将多个 episode 整理为 batch（取最短的 episode turn 数）。"""
     min_len = min(len(episode) for episode in batch)
-    segments = []
-    for seg_idx in range(min_len):
-        ids_batch = torch.stack([episode[seg_idx][0] for episode in batch])
-        labels_batch = torch.stack([episode[seg_idx][1] for episode in batch])
-        weights_batch = torch.stack([episode[seg_idx][2] for episode in batch])
-        segments.append((ids_batch, labels_batch, weights_batch))
-    return segments
+    turn_batches = []
+    for turn_idx in range(min_len):
+        ids_batch = torch.stack([episode[turn_idx][0] for episode in batch])
+        labels_batch = torch.stack([episode[turn_idx][1] for episode in batch])
+        weights_batch = torch.stack([episode[turn_idx][2] for episode in batch])
+        turn_batches.append((ids_batch, labels_batch, weights_batch))
+    return turn_batches

@@ -2,7 +2,7 @@
 
 - wrap_world_qa_episodes: 老 1B 独立流（已废弃但保留供 caller fallback）
 - sample_world_qa_pairs: v7+ 新接口，抽 K 个 (user, assistant) pair 给 1A driver 当
-  warmup 闲聊插入到 Beat 1 之前，用于打散 fact 位置偏置 + 利用 episode_length。
+  warmup 闲聊插入到 Beat 1 之前，用于打散 fact 位置偏置 + 利用 max_turns_per_episode 余量。
 
 按 dict_split 切分（与字符串字典共享 SHA1 切分逻辑）。
 """

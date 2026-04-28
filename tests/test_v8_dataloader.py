@@ -32,7 +32,7 @@ def test_tokenize_turn_value_span_basic(tokenizer):
     asst = "你喜欢苹果。"
     # value_span: 苹果 在 asst 中是 char [3, 5]
     ids, labels, weights = tokenize_turn(
-        tokenizer, user, asst, segment_length=64,
+        tokenizer, user, asst, turn_max_tokens=64,
         train_loss="true",
         value_spans=[[3, 5]],
         weight_per_span=5.0,
@@ -48,7 +48,7 @@ def test_tokenize_turn_lm_only(tokenizer):
     user = "今天怎么样？"
     asst = "还行,看着挺舒服。"
     ids, labels, weights = tokenize_turn(
-        tokenizer, user, asst, segment_length=64,
+        tokenizer, user, asst, turn_max_tokens=64,
         train_loss="lm_only",
         value_spans=[],
         weight_per_span=0.0,
@@ -63,7 +63,7 @@ def test_tokenize_turn_false_no_loss(tokenizer):
     user = "你好"
     asst = "你好"
     ids, labels, weights = tokenize_turn(
-        tokenizer, user, asst, segment_length=64,
+        tokenizer, user, asst, turn_max_tokens=64,
         train_loss="false",
     )
     assert (labels == -100).all()
@@ -76,7 +76,7 @@ def test_tokenize_turn_multi_value_budget(tokenizer):
     asst = "你家猫叫Leo,狗叫Max。"
     # 假设 weight=5.0/2 = 2.5 per span
     ids, labels, weights = tokenize_turn(
-        tokenizer, user, asst, segment_length=64,
+        tokenizer, user, asst, turn_max_tokens=64,
         train_loss="true",
         value_spans=[[3, 6], [9, 12]],   # Leo, Max
         weight_per_span=2.5,
@@ -112,14 +112,14 @@ def test_dataset_loads_v8_jsonl(tmp_path, tokenizer):
     path = tmp_path / "test.jsonl"
     path.write_text(json.dumps(sample, ensure_ascii=False) + "\n", encoding="utf-8")
 
-    ds = ConversationDataset(str(path), tokenizer, segment_length=64, episode_length=4)
+    ds = ConversationDataset(str(path), tokenizer, turn_max_tokens=64, max_turns_per_episode=4)
     assert len(ds) == 1
     ep = ds[0]
-    assert len(ep) == 4   # padded to episode_length
-    # 第 1 个 segment: hard value，应有 5.0 weight
+    assert len(ep) == 4   # padded to max_turns_per_episode
+    # 第 1 个 turn: hard value，应有 5.0 weight
     _, _, w0 = ep[0]
     assert (w0 >= 4.9).any()
-    # 第 2 个 segment: lm_only，只有 0.3 weight
+    # 第 2 个 turn: lm_only，只有 0.3 weight
     _, _, w1 = ep[1]
     nonzero = w1[w1 > 0]
     if len(nonzero) > 0:

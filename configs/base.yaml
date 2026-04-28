@@ -1,9 +1,5 @@
-# ============================================================
-# Xinhe (心核) 共用默认配置
-# 默认使用 Qwen3.5-0.8B，切换 backbone 用 --config 指定
-# ============================================================
+# Xinhe 默认配置；切换 backbone 用 --config
 
-# --- 默认 backbone (可被 backbone yaml 覆盖) ---
 backbone:
   type: "qwen"
   model_path: "./models/qwen3.5-0.8b"
@@ -11,30 +7,23 @@ backbone:
   hidden_size: 1024
   freeze: true
 
-# --- Hippocampus (v7: Delta Rule + per-head γ 联想记忆 W: (B,H,d_v,d_k)) ---
-# read_scale_init=-3 (初始 scale≈0.047): 温和读强度
-# beta_bias_init=-2 (初始 β=0.12): 写入温和，让 W 稳定建立
-# head_dim=128: 扩 key/value 维度，单样本 W ≈ 256K floats
+# Hippocampus: Delta Rule + per-head γ, W=(B,H,d_v,d_k)
 state:
   n_heads: 16
   head_dim: 128
-  read_scale_init: -3.0          # σ(-3)=0.047 初始，训练中可调
+  read_scale_init: -3.0
   beta_bias_init: -2.0
-  gamma_head_init_low: 0.8       # per-head 时间尺度多样性，linspace(0.8, 0.999)
+  gamma_head_init_low: 0.8
   gamma_head_init_high: 0.999
 
-# --- LoRA ---
 lora:
   rank: 4
   alpha: 8
   dropout: 0.0
   target_modules: ["q_proj", "v_proj", "o_proj"]
 
-# --- 训练 ---
+# turn_max_tokens / max_turns_per_episode / tbptt_turns 必须 per-stage 显式给
 training:
-  segment_length: 256
-  episode_length: 8
-  tbptt_steps: 8
   batch_size: 1
   learning_rate: 3.0e-4
   weight_decay: 0.01
@@ -43,18 +32,16 @@ training:
   gradient_checkpointing: false
   warmup_steps: 100
   max_steps: 10000
-  eval_every: 1000       # v5c: val 每 1000 步（附带触发 VALUE 早停检查）
+  eval_every: 1000
   save_every: 1000
   log_every: 50
   device: "cuda"
   dtype: "bfloat16"
 
-# --- 数据 ---
 data:
   train_path: "./data/train.jsonl"
   val_path: "./data/val.jsonl"
 
-# --- 日志 ---
 logging:
   use_wandb: false
   project: "xinhe"

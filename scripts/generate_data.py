@@ -23,6 +23,7 @@ from pathlib import Path
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
+from xinhe.config import validate_stage_config
 from xinhe.data.stage0.runner import generate_stage0_dataset
 from xinhe.data.stage1.driver import generate_stage1_dataset
 from xinhe.data.stage2.mixer import generate_stage2_dataset
@@ -30,6 +31,7 @@ from xinhe.data.stage2.mixer import generate_stage2_dataset
 
 def _generate_stage0(stage_cfg: dict, *, split: str, n_override: int | None = None) -> tuple[int, int]:
     data_cfg = stage_cfg.get("data", {})
+    training_cfg = stage_cfg.get("training", {})
     out_dir = Path(data_cfg.get("out_dir", "data/v8/stage0"))
     out_dir.mkdir(parents=True, exist_ok=True)
     n = n_override if n_override is not None else data_cfg.get(f"num_{split}", data_cfg.get("num_train", 1000))
@@ -37,7 +39,8 @@ def _generate_stage0(stage_cfg: dict, *, split: str, n_override: int | None = No
     seed = seed_base + (0 if split == "train" else 1)
     out_path = out_dir / f"{split}.jsonl"
     rejected = out_dir / f"{split}.rejected.jsonl"
-    print(f"  [stage0/{split}] 生成 {n} 条 → {out_path}")
+    max_turns = int(training_cfg["max_turns_per_episode"])  # validate_stage_config 已确保存在
+    print(f"  [stage0/{split}] 生成 {n} 条 → {out_path} (max_turns={max_turns})")
     return generate_stage0_dataset(
         out_path,
         n_samples=n,
@@ -47,6 +50,7 @@ def _generate_stage0(stage_cfg: dict, *, split: str, n_override: int | None = No
         distance_distribution=data_cfg.get("distance_bucket"),
         rejected_path=rejected,
         progress_every=max(1, n // 10),
+        max_turns=max_turns,
     )
 
 
@@ -90,6 +94,9 @@ def generate_stage(stage_cfg: dict, force: bool = False,
                    seed_offset: int = 0,
                    workers_override: int | None = None) -> None:
     name = stage_cfg.get("name", "?")
+    # 启动期校验 + 派生：配错在这里立刻报，不让生成器跑出会被 dataloader 截的数据
+    validate_stage_config(name, stage_cfg)
+
     data_cfg = stage_cfg.get("data", {})
     kind = data_cfg.get("stage_kind", "stage0")
     out_dir = Path(data_cfg.get("out_dir", f"data/v8/{kind}"))

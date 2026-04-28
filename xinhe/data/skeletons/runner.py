@@ -5,10 +5,14 @@
   2. 按 skeleton.sequence 顺序执行：
      - 字符串 → get_event(...).run(...) 追加 conv pair
      - DistractGroup → 按桶采 N 轮，每轮跑一次 E
-  3. 总轮数受 (mu=8, sigma=2, lo=4, hi=12) 软约束：实际轮数会因事件 emit 数变化，
+  3. 总轮数受 (mu=8, sigma=2, lo=4, hi=max_turns) 软约束：实际轮数会因事件 emit 数变化，
      SkeletonRunner 不强行截断（事件返回的 ConvPair 列表是原子的）；
      若某些 skeleton 的最低事件需求 > target_turns，仍执行（保完整性）。
   4. 把 distract 桶记到 meta["distance_bucket"]。
+
+  max_turns 必须 = dataloader max_turns_per_episode（1 turn → 1 tensor，1:1 对齐），
+  否则 dataloader 会静默截断。caller 由 stage 配置 (max_turns_per_episode) 显式传入；
+  validate_stage_config 会拦截不一致。
 """
 from __future__ import annotations
 
@@ -34,11 +38,13 @@ class SkeletonRunner:
         stage: str = "0",
         distance_distribution: Optional[dict[str, float]] = None,
         weight_table: Optional[dict] = None,
+        max_turns: int = 12,
     ) -> None:
         self.dict_split = dict_split
         self.stage = stage
         self.distance_distribution = distance_distribution
         self.weight_table = weight_table
+        self.max_turns = max_turns
 
     def run(
         self,
@@ -58,7 +64,7 @@ class SkeletonRunner:
         )
         state = MemoryState()
 
-        target_turns = sample_target_turns(rng)
+        target_turns = sample_target_turns(rng, hi=self.max_turns)
         conversations: list[dict] = []
         bucket_record: dict = {}
         bucket_main: Optional[str] = None
@@ -73,11 +79,11 @@ class SkeletonRunner:
                 )
                 if slot.max_turns is not None:
                     n_distract = min(n_distract, slot.max_turns)
-                # 软约束：若已有事件 + n_distract 会让总轮数超 12，缩减
+                # 软约束：若已有事件 + n_distract 会让总轮数超 max_turns，缩减
                 events_remaining = sum(
                     1 for s in skeleton.sequence[i + 1:] if isinstance(s, str)
                 )
-                budget = max(0, 12 - len(conversations) // 2 - events_remaining)
+                budget = max(0, self.max_turns - len(conversations) // 2 - events_remaining)
                 if n_distract > budget:
                     n_distract = budget
                 if n_distract < 0:

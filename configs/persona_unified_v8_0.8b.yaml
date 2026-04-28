@@ -9,9 +9,9 @@ training:
 
 stage_overrides:
   default:
-    batch_size: 4
-  0_atomic_skeletons:
     batch_size: 12
+  0_atomic_skeletons:
+    batch_size: 16
   1_5beat_natural:
     batch_size: 12
   2_joint_consolidation:
