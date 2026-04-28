@@ -10,15 +10,81 @@
 """
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
+import os
 import random
 import re
+import sys
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
 from xinhe.data.schema import Sample, SchemaError, validate_sample
+
+
+def _lock_path_for(out_path: Path) -> Path:
+    """按 out_path 绝对路径 hash 在系统 temp 目录派生锁文件,保持数据目录干净。
+    不同 out_path 派生不同 hash → 不同 jsonl 不会互相干扰。"""
+    key = hashlib.md5(str(out_path.resolve()).encode("utf-8")).hexdigest()[:16]
+    return Path(tempfile.gettempdir()) / f"xinhe_genlock_{key}.lock"
+
+
+@contextlib.contextmanager
+def _single_instance_lock(out_path: Path):
+    """OS 级文件锁,同一 out_path 同时只允许一个 generator 进程。
+    阻止"重启时漏杀 orphan python.exe → 双写同一 jsonl"的血案。
+
+    锁文件放系统 temp 目录(数据目录不留垃圾),OS 自动管理:进程崩/被杀也会立刻释放。
+    Windows: msvcrt.locking;Linux/macOS: fcntl.flock。两者都用 NB(非阻塞),
+    抢不到立刻 raise(明确告诉用户已有进程在跑,不傻等)。
+    """
+    lock_path = _lock_path_for(out_path)
+    fp = open(lock_path, "w", encoding="utf-8")
+    try:
+        msg = (
+            f"!!! 已有 generator 进程在写 {out_path}\n"
+            f"  锁文件: {lock_path}\n"
+            f"  本进程立刻 abort,避免双写损失 token。\n"
+            f"  确认对方真死了的话(Get-CimInstance Win32_Process | grep generate_data 确认无 python.exe 残留):\n"
+            f"    Remove-Item '{lock_path}'  # 然后重试"
+        )
+        if sys.platform == "win32":
+            import msvcrt
+            try:
+                msvcrt.locking(fp.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                fp.close()
+                # from None 抑制 PermissionError 原始链,用户只看到友好提示
+                raise RuntimeError(msg) from None
+        else:
+            import fcntl
+            try:
+                fcntl.flock(fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                fp.close()
+                raise RuntimeError(msg) from None
+        fp.write(f"pid={os.getpid()}\nout={out_path}\n")
+        fp.flush()
+        yield
+    finally:
+        try:
+            fp.close()
+        except Exception:
+            pass
+        try:
+            lock_path.unlink()
+        except Exception:
+            pass
+
+
+def _is_quota_exhausted(e: BaseException) -> bool:
+    """识别 sampler 抛出的 quota 耗尽错误。约定:类名以 QuotaExhaustedError 结尾的子类视为 quota 信号。
+    用名字匹配避免在 driver 里跨家 import 各 sampler 的 Error 类。"""
+    return type(e).__name__.endswith("QuotaExhaustedError")
 
 
 def _supports_conditional_retry(model: str) -> bool:
@@ -276,6 +342,17 @@ def _generate_one_5beat(
             )
             return sample
         except ApiError as e:
+            # quota 耗尽 → 立刻 abort 整个进程,不再 retry(继续打会触发账号风控)
+            if _is_quota_exhausted(e):
+                print(
+                    f"\n[stage1] !!! {type(e).__name__}: quota exhausted, aborting process to avoid ban\n"
+                    f"  detail: {str(e)[:300]}\n"
+                    f"  下次跑用 resume 续上即可,已落盘的样本不会丢。",
+                    flush=True,
+                )
+                # os._exit 立刻终止所有 worker 线程,避免 ThreadPoolExecutor 排队中的任务继续触发 quota 调用
+                import os
+                os._exit(2)
             # 网络/认证/HTTP error → 跟模型输出无关,清掉 last_response 走 blind retry
             last_response_str = None
             last_reason = None
@@ -357,6 +434,37 @@ def generate_stage1_dataset(
     if rej is not None:
         rej.parent.mkdir(parents=True, exist_ok=True)
 
+    # 单实例守护：阻止"重启时漏杀 orphan python.exe → 双写"。
+    with _single_instance_lock(out):
+        return _generate_locked(
+            out=out, rej=rej, n_samples=n_samples, mix=mix, rng=rng,
+            dict_split=dict_split,
+            n_canonical_range=n_canonical_range, n_turns_range=n_turns_range,
+            beat3_min_turns=beat3_min_turns, beat3_min_chars=beat3_min_chars,
+            beat3_chars_tolerance=beat3_chars_tolerance,
+            workers=workers, model=model, weight_table=weight_table, resume=resume,
+        )
+
+
+def _generate_locked(
+    *,
+    out: Path,
+    rej: Optional[Path],
+    n_samples: int,
+    mix: dict[str, float],
+    rng: random.Random,
+    dict_split: str,
+    n_canonical_range: tuple[int, int],
+    n_turns_range: tuple[int, int],
+    beat3_min_turns: int,
+    beat3_min_chars: int,
+    beat3_chars_tolerance: float,
+    workers: int,
+    model: str,
+    weight_table: dict | None,
+    resume: bool,
+) -> tuple[int, int]:
+    """已持锁后真正干活;拆出来纯粹是为了让 with 块代码读得顺。"""
     # ── resume 检测 ──
     if resume:
         existing = _count_existing(out)

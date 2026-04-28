@@ -16,8 +16,22 @@ from typing import Optional
 
 
 class CodexCliError(Exception):
-    """codex CLI 调用错误(找不到 binary、超时、rc!=0、quota 耗尽等)。"""
+    """codex CLI 调用错误(找不到 binary、超时、rc!=0 等)。"""
     pass
+
+
+class CodexQuotaExhaustedError(CodexCliError):
+    """codex 配额耗尽(5h rolling 或 weekly Plus cap)。
+    driver 看到要立刻 sys.exit,不要再重试——继续打会触发账号风控。"""
+    pass
+
+
+# stderr 内出现这些片段 = quota 耗尽,立即 abort 不再 retry
+_CODEX_QUOTA_SIGS = (
+    "send a request to your admin or try again at",   # 主要信号
+    "rate limit",
+    "exhausted",
+)
 
 
 _OUTPUT_SCHEMA_JSON = """{
@@ -129,6 +143,11 @@ def call_with_retry(
             raise CodexCliError(f"codex timeout ({timeout}s)") from e
 
         if not out_file.exists():
+            err_tail = (r.stderr or "")[-500:]
+            if any(sig in err_tail for sig in _CODEX_QUOTA_SIGS):
+                raise CodexQuotaExhaustedError(
+                    f"codex quota exhausted; stderr tail: {err_tail[-200:]!r}"
+                )
             raise CodexCliError(
                 f"codex 没写出文件; rc={r.returncode}; "
                 f"stdout tail: {r.stdout[-200:]!r}; stderr tail: {r.stderr[-200:]!r}"

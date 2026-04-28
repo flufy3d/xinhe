@@ -30,6 +30,22 @@ class GeminiCliError(Exception):
     pass
 
 
+class GeminiQuotaExhaustedError(GeminiCliError):
+    """gemini 配额耗尽(per-day 或 per-account quota)。
+    driver 看到要立刻 sys.exit,不要再重试——继续打会触发账号风控。"""
+    pass
+
+
+# stderr/envelope 内出现这些片段 = quota 耗尽,立即 abort
+_GEMINI_QUOTA_SIGS = (
+    "exhausted your capacity",          # gemini-3.1-pro 主要信号
+    "quota will reset",
+    "RESOURCE_EXHAUSTED",
+    "rate limit",
+    "429",
+)
+
+
 _GEMINI_BIN: Optional[str] = None
 
 
@@ -115,6 +131,11 @@ def call_with_retry(
             raise GeminiCliError(f"gemini timeout ({timeout}s)") from e
 
         if r.returncode != 0:
+            blob = (r.stderr or "") + (r.stdout or "")
+            if any(sig in blob for sig in _GEMINI_QUOTA_SIGS):
+                raise GeminiQuotaExhaustedError(
+                    f"gemini quota exhausted; stderr tail: {(r.stderr or '')[-200:]!r}"
+                )
             raise GeminiCliError(
                 f"gemini rc={r.returncode}; "
                 f"stdout: {r.stdout[-200:]!r}; stderr: {r.stderr[-200:]!r}"
@@ -123,6 +144,11 @@ def call_with_retry(
         try:
             envelope = json.loads(r.stdout or "{}")
         except json.JSONDecodeError as e:
+            # 容错: rc=0 但 stdout 非 JSON,可能是 quota warning 文本
+            if any(sig in (r.stdout or "") + (r.stderr or "") for sig in _GEMINI_QUOTA_SIGS):
+                raise GeminiQuotaExhaustedError(
+                    f"gemini quota exhausted in stdout; head: {r.stdout[:200]!r}"
+                )
             raise GeminiCliError(
                 f"gemini -o json 包络解析失败: {e}; stdout head: {r.stdout[:200]!r}"
             ) from e
