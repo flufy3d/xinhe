@@ -129,11 +129,13 @@ def _build_fix_message(reason: str, plan) -> str:
         )
     if "beat4 scope" in reason:
         return (
-            f"刚才输出的 Beat 4（召回段）user 句的人称代词与召回的 fact 归属（self/third_party）不匹配。\n"
-            f"硬约束：\n"
-            f"  - scope=self 的 fact，user 句必须用'我/我的'自指（不能用'你/你的'）；\n"
+            f"刚才输出的 Beat 4（召回段）user 句不是真正的召回提问，或人称代词与 fact 归属错配。\n"
+            f"硬约束（Beat 4 必须由 user 发起召回提问，asst 才召回）：\n"
+            f"  - **必须是 user 提问 / 反问 / 求确认的句式**（不许 user 自己讲出答案让 asst echo）；\n"
+            f"  - scope=self 的 fact，user 句必须用'我/我的'自指（如'我之前说过 X 是什么'/'我家是哪'/'我是不是说过 X'）；\n"
             f"  - scope=third_party 的 fact，user 句必须显式提该人物名字（或'朋友/同事/他/她'等第三方代词）。\n"
-            f"请重新输出**完整 JSON**，修正 Beat 4 user 提问的人称指代，其他段保持原样。"
+            f"反模式：user 在 Beat 4 直接说出 canonical（如'回去得去无极看看'）→ asst 召回成了纯 echo，无训练价值。\n"
+            f"请重新输出**完整 JSON**，修正 Beat 4 user 提问的句式 + 人称指代，其他段保持原样。"
         )
     if "beat4 pronoun" in reason:
         return (
