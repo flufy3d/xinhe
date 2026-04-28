@@ -18,6 +18,23 @@ class OpenRouterError(Exception):
     pass
 
 
+class OpenRouterQuotaExhaustedError(OpenRouterError):
+    """额度耗尽（免费模型 per-day / 账户欠费）—— 立即退出，避免空转招封。"""
+    pass
+
+
+# OR 免费层每日配额耗尽 / 账户欠费的关键词；429 + 这些串才算 quota，不要把 per-minute 限流误判
+_OR_QUOTA_SIGS = (
+    "free-models-per-day",
+    "free models can only be used",
+    "exceeded your daily limit",
+    "Insufficient credits",
+    "insufficient credits",
+    "credit limit",
+    "out of credits",
+)
+
+
 def _load_api_key() -> str:
     key = os.environ.get("OPENROUTER_API_KEY", "").strip()
     if key:
@@ -117,6 +134,10 @@ def call_openrouter(
         return obj
     except urllib.error.HTTPError as e:
         err_body = e.read().decode("utf-8", errors="replace")[:500]
+        if e.code == 429 and any(sig in err_body for sig in _OR_QUOTA_SIGS):
+            raise OpenRouterQuotaExhaustedError(f"HTTP 429 quota exhausted: {err_body}") from None
+        if e.code == 402:  # OR 余额不足
+            raise OpenRouterQuotaExhaustedError(f"HTTP 402 insufficient credits: {err_body}") from None
         raise OpenRouterError(f"HTTP {e.code}: {err_body}") from e
     except urllib.error.URLError as e:
         raise OpenRouterError(f"网络错误: {e}") from e
@@ -137,6 +158,9 @@ def call_with_retry(
     for attempt in range(max_retries + 1):
         try:
             return call_openrouter(system_prompt, user_prompt, model=model, **kwargs)
+        except OpenRouterQuotaExhaustedError:
+            # 配额/余额耗尽,绝不重试,交给 driver 立即退出进程
+            raise
         except OpenRouterError as e:
             msg = str(e)
             if "HTTP 401" in msg or "HTTP 400" in msg or "HTTP 403" in msg:
