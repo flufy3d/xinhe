@@ -46,20 +46,14 @@ def load_tokenizer(config: XinheConfig):
 
 
 def print_stats(model: XinheModel, state: torch.Tensor):
-    """打印 Hippocampus 状态分析 (v7: 单 W + γ 分布)"""
+    """打印 Hippocampus 状态分析 (v8: 单 W,纯 Delta Rule)"""
     stats = model.state_stats(state)
     print(f"\n{'='*50}")
     print(f"  Hippocampus 状态分析 (W: {tuple(state.shape)})")
     print(f"{'='*50}")
-    print(f"  read_scale:           {stats['read_scale']:.4f}")
-    print(f"  W_norm:               {stats['W_norm']:.4f}")
-    print(f"  W_effective_rank:     {stats['W_effective_rank']:.2f}")
-    print(f"  γ_prior (head 寿命):  [{stats['gamma_prior_min']:.3f}, {stats['gamma_prior_max']:.3f}]")
-    print(f"  γ_prior_mean:         {stats['gamma_prior_mean']:.3f}")
-    diag = model.hippocampus.get_gamma_diagnostics()
-    if diag is not None:
-        print(f"  γ_token (最近 batch): {diag['gamma_token_mean']:.3f} ± {diag['gamma_token_std']:.3f}")
-        print(f"  γ_token_min:          {diag['gamma_token_min']:.3f}")
+    print(f"  read_scale:        {stats['read_scale']:.4f}")
+    print(f"  W_norm:            {stats['W_norm']:.4f}")
+    print(f"  W_effective_rank:  {stats['W_effective_rank']:.2f}")
     print(f"{'='*50}\n")
 
 

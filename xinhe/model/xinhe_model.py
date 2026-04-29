@@ -63,8 +63,6 @@ class XinheModel(nn.Module):
             n_layers=n_hook_layers,
             read_scale_init=config.read_scale_init,
             beta_bias_init=config.beta_bias_init,
-            gamma_head_init_low=getattr(config, "gamma_head_init_low", 0.8),
-            gamma_head_init_high=getattr(config, "gamma_head_init_high", 0.999),
             delta_backend=getattr(config, "delta_backend", "auto"),
         )
 
@@ -345,7 +343,7 @@ class XinheModel(nn.Module):
         return generated, state_next
 
     def get_trainable_params(self) -> list[nn.Parameter]:
-        """收集所有可训练参数 (Hippocampus + LoRA)"""
+        """收集所有可训练参数 (Hippocampus + LoRA, 仅 requires_grad=True 的)"""
         params = []
 
         # Hippocampus 参数
@@ -353,9 +351,10 @@ class XinheModel(nn.Module):
             if param.requires_grad:
                 params.append(param)
 
-        # LoRA 参数
-        lora_params = get_lora_params(self.backbone)
-        params.extend(lora_params)
+        # LoRA 参数(尊重 freeze_lora 设置)
+        for param in get_lora_params(self.backbone):
+            if param.requires_grad:
+                params.append(param)
 
         return params
 

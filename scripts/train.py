@@ -91,7 +91,6 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
         "learning_rate": "learning_rate",
         "plugin_lr_multiplier": "plugin_lr_multiplier",
         "freeze_lora": "freeze_lora",
-        "freeze_time_shift": "freeze_time_shift",
         "freeze_beta_weight": "freeze_beta_weight",
         "freeze_read_scale_at": "freeze_read_scale_at",
         "lora_reset": "lora_reset",
@@ -113,8 +112,6 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
         "head_dim": "head_dim",
         "read_scale_init": "read_scale_init",
         "beta_bias_init": "beta_bias_init",
-        "gamma_head_init_low": "gamma_head_init_low",
-        "gamma_head_init_high": "gamma_head_init_high",
     }
     for yaml_key, field_name in field_map.items():
         if yaml_key in training:

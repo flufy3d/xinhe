@@ -1,9 +1,7 @@
 """
-XinheConfig — 心核配置 (v7)
+XinheConfig — 心核配置 (v8)
 
-v7: Hippocampus 大一统短期记忆
-  删 v6 遗产：W_turn / dual stream / freeze_fact / suppress_*_read / early_stop_pronoun-disentangle
-  加 γ 机制：gamma_head_init_low/high, freeze_time_shift
+v8 Hippocampus:大一统单 W,纯 Delta Rule(无 γ 衰减)。
 """
 from dataclasses import dataclass, field
 from typing import Optional
@@ -25,14 +23,8 @@ class XinheConfig:
     read_scale_init: float = -5.0   # sigmoid(-5) ≈ 0.007，空态几乎无影响
     beta_bias_init: float = 0.0     # sigmoid(0)=0.5，初始 Delta Rule 学习率
 
-    # v7 per-head γ 先验：σ(head_decay_logits) = linspace(low, high, H)
-    gamma_head_init_low: float = 0.8
-    gamma_head_init_high: float = 0.999
     # v8 写 kernel 后端: auto (Linux+FLA → fla, 否则 torch) / fla / torch
     delta_backend: str = "auto"
-    # 是否冻结 time_shift（Linear(hidden, H)，内容驱动的 Δγ）
-    # Stage 0a 无 distractor 信号时 time_shift 自然不动，无需显式冻结
-    freeze_time_shift: bool = False
     # 是否冻结 beta_proj.weight（保留 bias 可训，β 回归 per-head 静态先验）
     # 用于防止 β 在 W 空态死锁中被梯度压到 0
     freeze_beta_weight: bool = False
@@ -44,7 +36,7 @@ class XinheConfig:
     lora_rank: int = 16
     lora_alpha: int = 32
     lora_dropout: float = 0.0
-    lora_target_modules: list = field(default_factory=lambda: ["q_proj", "v_proj"])
+    lora_target_modules: list = field(default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj"])
 
     # --- 训练 ---
     # 单一术语：turn = 一个 user-asst pair（在 conversation.py 内编为 1 个 tensor）
@@ -191,8 +183,6 @@ class XinheConfig:
                 "head_dim": "head_dim",
                 "read_scale_init": "read_scale_init",
                 "beta_bias_init": "beta_bias_init",
-                "gamma_head_init_low": "gamma_head_init_low",
-                "gamma_head_init_high": "gamma_head_init_high",
                 "delta_backend": "delta_backend",
             },
             "lora": {
@@ -209,7 +199,6 @@ class XinheConfig:
                 "learning_rate": "learning_rate",
                 "plugin_lr_multiplier": "plugin_lr_multiplier",
                 "freeze_lora": "freeze_lora",
-                "freeze_time_shift": "freeze_time_shift",
                 "freeze_beta_weight": "freeze_beta_weight",
                 "freeze_read_scale_at": "freeze_read_scale_at",
                 "lora_reset": "lora_reset",

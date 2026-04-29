@@ -86,9 +86,7 @@ class Trainer:
     def _apply_freezes(self, config: XinheConfig):
         """按配置冻结/解冻 LoRA / Hippocampus 参数。
 
-        v7:
-        - freeze_lora: Stage 0a/0b bootstrap 用，强迫 Hippocampus 独立承担
-        - freeze_time_shift: 实验用，冻结 Linear(hidden, H) 的 γ 偏移层
+        - freeze_lora: bootstrap 用,强迫 Hippocampus 独立承担
         - plugin_lr_multiplier=0 也等效冻结整个 Hippocampus
         """
         freeze_lora = getattr(config, "freeze_lora", False)
@@ -98,16 +96,6 @@ class Trainer:
         freeze_plugin = getattr(config, "plugin_lr_multiplier", 1.0) == 0
         for p in self.model.hippocampus.parameters():
             p.requires_grad = not freeze_plugin
-
-        # 额外：freeze_time_shift 单独冻 Δγ 层 + reset 到零初值
-        # 语义："我不要内容驱动的 γ，只用静态先验"。如果前一阶段学偏了，必须 reset 才符合语义。
-        if getattr(config, "freeze_time_shift", False):
-            import torch.nn as nn
-            nn.init.zeros_(self.model.hippocampus.time_shift.weight)
-            nn.init.zeros_(self.model.hippocampus.time_shift.bias)
-            for p in self.model.hippocampus.time_shift.parameters():
-                p.requires_grad = False
-            print("  [freeze_time_shift] time_shift 已 reset 到零 + 冻结（γ 仅用静态先验 σ(θ_h)）")
 
         # freeze_beta_weight：reset beta_proj.weight 到零 + 冻结，保留 bias 可训
         # 让 β = σ(bias) 纯 per-head 静态先验。防止 β 在 W 空态死锁中被压到 0。
@@ -403,21 +391,10 @@ class Trainer:
             lr = self.scheduler.get_last_lr()[0]
             hippo = self.model.hippocampus
             read_scale = torch.sigmoid(hippo.read_scale).item()
-            # v7 γ 诊断
-            gamma_prior = torch.sigmoid(hippo.head_decay_logits)
-            gp_min = gamma_prior.min().item()
-            gp_max = gamma_prior.max().item()
-            diag = hippo.get_gamma_diagnostics()
-            gamma_str = f"γ_prior=[{gp_min:.3f},{gp_max:.3f}]"
-            if diag is not None:
-                gamma_str += (
-                    f" γ_tok={diag['gamma_token_mean']:.3f}±{diag['gamma_token_std']:.3f}"
-                    f" γ_min={diag['gamma_token_min']:.3f}"
-                )
             print(
                 f"  [Step {self.global_step}] ema_loss={self._ema_loss:.4f} "
                 f"ema_acc={self._ema_acc:.2%} lr={lr:.2e} "
-                f"read_scale={read_scale:.4f} {gamma_str}"
+                f"read_scale={read_scale:.4f}"
             )
 
         if self.global_step % self.config.save_every == 0:

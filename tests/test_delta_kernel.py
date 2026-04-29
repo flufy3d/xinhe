@@ -19,20 +19,26 @@ from xinhe.model.xinhe_model import XinheModel
 from tests.test_model import MockBackbone
 
 
-def test_dispatch_torch_matches_loop_fp64():
-    """torch 后端经 dispatcher 调用，与 _delta_loop fp64 等价（守 wrapper 不引入 dtype/contiguity bug）。"""
+def test_dispatch_torch_matches_sequential_fp64():
+    """torch 后端经 dispatcher 调用,与手写顺序 Delta Rule fp64 等价(无 γ 衰减)。"""
     torch.manual_seed(0)
     B, H, T, d_k, d_v = 2, 4, 16, 8, 8
     W0 = torch.zeros(B, H, d_v, d_k, dtype=torch.float64)
     k = F.normalize(torch.randn(B, H, T, d_k, dtype=torch.float64), dim=-1)
     v = torch.randn(B, H, T, d_v, dtype=torch.float64)
     beta = torch.sigmoid(torch.randn(B, H, T, dtype=torch.float64))
-    gamma = 0.3 + 0.7 * torch.sigmoid(torch.randn(B, H, T, dtype=torch.float64))
 
-    W_loop = Hippocampus._delta_loop(W0.clone(), k, v, beta, gamma, T)
-    W_dispatch = delta_rule_write(W0.clone(), k, v, beta, gamma, backend="torch")
-    diff = (W_loop - W_dispatch).abs().max().item()
-    assert diff < 1e-8, f"dispatch[torch] vs loop 数值不一致: max|diff|={diff}"
+    W_ref = W0.clone()
+    for t in range(T):
+        k_t = k[:, :, t, :]
+        v_t = v[:, :, t, :]
+        b_t = beta[:, :, t, None, None]
+        v_hat = torch.einsum("bhvd,bhd->bhv", W_ref, k_t)
+        W_ref = W_ref + b_t * torch.einsum("bhv,bhd->bhvd", v_t - v_hat, k_t)
+
+    W_dispatch = delta_rule_write(W0.clone(), k, v, beta, backend="torch")
+    diff = (W_ref - W_dispatch).abs().max().item()
+    assert diff < 1e-8, f"dispatch[torch] vs sequential 不一致: max|diff|={diff}"
 
 
 def test_fla_available_flag_matches_platform():
@@ -43,7 +49,7 @@ def test_fla_available_flag_matches_platform():
 
 
 def test_explicit_fla_raises_when_unavailable():
-    """显式 backend='fla' 在 FLA 不可用时应抛 RuntimeError，不静默降级。"""
+    """显式 backend='fla' 在 FLA 不可用时应抛 RuntimeError,不静默降级。"""
     if _FLA_AVAILABLE:
         pytest.skip("FLA 可用时此测试不适用")
     B, H, T, d_k, d_v = 1, 2, 4, 4, 4
@@ -51,19 +57,14 @@ def test_explicit_fla_raises_when_unavailable():
     k = F.normalize(torch.randn(B, H, T, d_k), dim=-1)
     v = torch.randn(B, H, T, d_v)
     beta = torch.sigmoid(torch.randn(B, H, T))
-    gamma = torch.sigmoid(torch.randn(B, H, T))
     with pytest.raises(RuntimeError):
-        delta_rule_write(W, k, v, beta, gamma, backend="fla")
+        delta_rule_write(W, k, v, beta, backend="fla")
 
 
 @pytest.mark.skipif(not _FLA_AVAILABLE, reason="FLA 未装")
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="FLA Triton kernel 需要 CUDA")
 def test_fla_matches_torch_when_available():
-    """Linux + FLA + CUDA 下 fla 与 torch 后端 bf16 输出在 fp32 比对应 max|diff| < 1e-2。
-
-    若失败 > 1e-2，第一嫌犯是 _fla_write 里 `g = log(γ)` 与 FLA 期望约定不符；
-    把那行改成 `g = γ` 重测即可。
-    """
+    """Linux + FLA + CUDA 下 fla 与 torch 后端 bf16 输出 forward 误差 < 1%。"""
     torch.manual_seed(0)
     B, H, T, d_k, d_v = 2, 4, 64, 32, 32
     device = "cuda"
@@ -72,10 +73,9 @@ def test_fla_matches_torch_when_available():
     k = F.normalize(torch.randn(B, H, T, d_k, device=device, dtype=dtype), dim=-1)
     v = torch.randn(B, H, T, d_v, device=device, dtype=dtype)
     beta = torch.sigmoid(torch.randn(B, H, T, device=device, dtype=dtype))
-    gamma = 0.5 + 0.5 * torch.sigmoid(torch.randn(B, H, T, device=device, dtype=dtype))
 
-    W_torch = delta_rule_write(W.clone(), k, v, beta, gamma, backend="torch").float()
-    W_fla = delta_rule_write(W.clone(), k, v, beta, gamma, backend="fla").float()
+    W_torch = delta_rule_write(W.clone(), k, v, beta, backend="torch").float()
+    W_fla = delta_rule_write(W.clone(), k, v, beta, backend="fla").float()
     diff = (W_torch - W_fla).abs().max().item()
     assert diff < 1e-2, f"FLA vs torch bf16 等价误差超阈值: max|diff|={diff:.4f}"
 

@@ -122,9 +122,8 @@ def test_gradient_flow(model):
 
     # Hippocampus 参数应该有梯度
     assert model.hippocampus.k_proj.weight.grad is not None
+    assert model.hippocampus.v_proj.weight.grad is not None
     assert model.hippocampus.beta_proj.weight.grad is not None
-    assert model.hippocampus.head_decay_logits.grad is not None
-    assert model.hippocampus.time_shift.weight.grad is not None
 
 
 def test_generate(model):
