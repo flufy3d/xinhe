@@ -247,14 +247,11 @@ xinhe/data/dicts/files/           # 入 git：素材根（小，可复现根）
 
 data/v8/                          # 不入 git：训练数据（可重生成）
 ├── stage0/
-│   ├── train.jsonl
-│   └── val.jsonl
-├── stage1/
-│   ├── train.jsonl
-│   └── val.jsonl
-└── val/
-    ├── stage0/seen_entity.jsonl 等
-    └── stage1/seen_entity.jsonl 等
+│   ├── train.jsonl              # 训练集（dict_split=train）
+│   └── val.jsonl                # 验证集（dict_split=val，即 OOD entity）
+└── stage1/
+    ├── train.jsonl
+    └── val.jsonl
 ```
 
 v8 起：词典/语料统一在 `xinhe/data/dicts/files/`（入 git，由 `scripts/build_dicts.py` 维护），训练数据在 `data/v8/`（不入 git，由 `scripts/generate_data.py` 按需生成）。

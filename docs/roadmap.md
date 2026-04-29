@@ -12,15 +12,17 @@
   v5b slot+contrastive:    hash 碰撞无解
   v5c Delta Rule (2026-04): (v-Wk) 数学消歧
   v6 dual stream (W_fact + W_turn): phase 搜索失败（见 failure_postmortem.md）
-  v7 Hippocampus (2026-04-24, 当前活跃):
-    单一 W + per-head γ 隐式时序 + content-driven time_shift
-    废除 W_turn 分流、废除 RoPE phase 搜索
-    Phase 2 规划: Neocortex (MLP LoRA 长期固化)
+  v7 Hippocampus (2026-04-24): 单一 W + per-head γ + content-driven time_shift
+    后续实测 γ 训练不稳定 + FLA backward 在 bf16 误差 5–25%, 删除 γ 全部代码
+  v8 Hippocampus (2026-04-29, 当前活跃):
+    单一 W + 纯 Delta Rule (无 γ 衰减), L2 归一 k 自然实现槽位覆写
+    训练强制 torch backend, 推理 auto→FLA (forward 误差 < 0.5%)
+    Phase 2 规划: Neocortex (Memory MLP 全秩并联) 长期固化
 
-阶段 B: 训练范式定型（persona_unified 3-stage bootstrap）✅
-  Stage 0a hippocampus_rw  — Delta Rule 基础读写（freeze_lora）
-  Stage 0b gamma_gating    — time_shift 学"废话 → 减寿"（freeze_lora）
-  Stage 1 persona_unified  — 放开 LoRA + 复杂分布 + 6 指标联合早停
+阶段 B: 训练范式定型 (persona_unified curriculum) ✅
+  Stage 0 atomic_skeletons  — S1–S11 骨架混合 (Delta Rule 基础读写 + 多种覆写/删除模式)
+  Stage 1 5beat_natural     — 自然 5-beat 长对话, 跨 turn retention
+  Stage 2 joint_consolidation — stage0+stage1 混采联合巩固
 
 阶段 C: 未开启（未来）
   Neocortex (Phase 2): Sleep 机制把高 γ 记忆蒸馏到 MLP LoRA 权重
@@ -106,14 +108,14 @@
 
 ### 中期：长期记忆固化（Neocortex + Sleep）
 
-**4. 实现 Neocortex 长期记忆层（Phase 2，v7 架构的未来扩展）**
-- **生物类比**：v7 的 Hippocampus（单 W 张量）是**短期工作记忆**（海马体 / 单次对话内动态演化）。Neocortex（MLP LoRA）是**长期记忆**（皮层 / 跨 session 权重级固化）
-- **架构**：Neocortex = MLP LoRA（作用于 `gate_proj/up_proj/down_proj` 三件套）
-- **Sleep 机制**：冻结 Hippocampus 和 Attention LoRA，开 MLP LoRA，replay buffer 回放对话 + 逐步弱化 W 注入（read_scale → 0）→ 迫使信息从 W 转移到 MLP 权重
-- **Replay 采样策略**：利用 γ 历史挑高 γ（长寿命）记忆，混合 70% 近期 + 30% 历史
-- **效果**：sleep 过的事实 W 清空也能回答；`.pt` 分化更深刻（MLP 权重随用户独立）
-- **拆分**：先做离线 sleep（训练收尾一次性蒸馏），后做在线 sleep（用户使用中后台触发）
-- **代码铺垫**：`xinhe/model/hippocampus.py::get_gamma_diagnostics` 已经给 γ 分布打印，Neocortex 可用来挑 replay 样本
+**4. 实现 Neocortex 长期记忆层(Phase 2,v8 架构的未来扩展)**
+- **生物类比**:v8 的 Hippocampus(单 W 张量)是**短期工作记忆**(海马体 / 单次对话内动态演化)。Neocortex(Memory MLP 全秩并联)是**长期记忆**(皮层 / 跨 session 权重级固化)
+- **架构**:Neocortex = per-layer 全秩并联 SwiGLU(在 Base MLP 旁,参数完全独立),不是 LoRA 低秩扰动
+- **Sleep 机制**:冻结 Hippocampus 和 Attention LoRA,开 Memory MLP,Teacher 重建白天 W 轨迹,Student 强制 W 读为 0,靠 Memory MLP 自身复现 Teacher 通路 → 蒸馏 KL + 隐藏态 MSE
+- **Replay 采样策略**:70% 当日窗口 + 30% 历史窗口(reservoir sampling)
+- **效果**:sleep 过的事实 W 清空也能回答;`.pt` 分化更深刻(Memory MLP 权重随用户独立)
+- **存储**:每窗口归档 W_start CKPT(~512 KB) + 输入 buffer,一天 < 10 MB
+- **详细蓝图**:见 `docs/心核  架构蓝图：大一统快慢交替记忆网络.md` 的"夜晚模式"章节
 
 **5. 在线 fine-tune**
 - 和 #4 配合：Memory MLP 权重在 sleep 时更新
