@@ -59,6 +59,6 @@ class DistractEvent(AtomicEvent):
             asst_text = tmpl.asst_text
 
         u = make_user_turn(user_text)
-        # train_loss="lm_only"：保流畅但不让 W 抢资源
+        # train_loss="lm_only":保流畅但不让 W 抢资源
         a = make_assistant_turn(asst_text, train_loss="lm_only")
         return [(u, a)]

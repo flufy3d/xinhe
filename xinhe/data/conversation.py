@@ -47,7 +47,8 @@ def _resolve_lm_weight(train_loss: Union[bool, str]) -> tuple[float, bool]:
     """tri-state → (lm_weight, value_active)。
 
     - "true" / True   → (1.0, True)
-    - "lm_only"       → (0.3, False)
+    - "lm_only"       → (0.1, False)  v8.1: 0.3 → 0.1, 让 distract 仅微弱影响 backbone,
+                                       LoRA/Hippocampus 容量留给 W 写读通路
     - "false" / False → (0.0, False)
     """
     if train_loss is True:
@@ -58,7 +59,7 @@ def _resolve_lm_weight(train_loss: Union[bool, str]) -> tuple[float, bool]:
         if train_loss == "true":
             return 1.0, True
         if train_loss == "lm_only":
-            return 0.3, False
+            return 0.1, False
         if train_loss == "false":
             return 0.0, False
     raise ValueError(f"非法 train_loss: {train_loss!r}")

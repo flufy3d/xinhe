@@ -8,27 +8,17 @@ import random
 from dataclasses import dataclass, field
 from typing import Optional
 
-from xinhe.data.events._relations import RELATIONS, RelationSpec
+from xinhe.data.events._relations import RELATIONS, RelationSpec, SyntheticNameBank
 from xinhe.data.dicts.bank import load_bank
 from xinhe.data.validator.aliases import ALIAS_MAP
 
 
-def _sample_friend_subject(rng: random.Random, dict_split: str) -> str:
-    """third-party subject:从 surnames + given_names 动态拼名,池足够大避免重复。
-
-    策略:
-      - 抽 given_name(g)
-      - g 全 ASCII(英文名如 Nick/Lily) → 直接用
-      - g 多字中文 → 50% 概率拼姓
-      - g 单字中文 → 必拼姓
-    """
-    g = load_bank("given_names", dict_split).sample_one(rng)
-    if all(c.isascii() for c in g):
-        return g
-    if len(g) >= 2 and rng.random() < 0.5:
-        return g
-    s = load_bank("surnames", dict_split).sample_one(rng)
-    return s + g
+def _bank(category: str, dict_split: str):
+    """与 EventContext.bank() 同形:synthetic_full_name 走合成 bank,其他走文件 bank。
+    全名采样(self_name 关系 / third_party subject)统一从这里走 SyntheticNameBank。"""
+    if category == "synthetic_full_name":
+        return SyntheticNameBank(dict_split)
+    return load_bank(category, dict_split)
 
 
 @dataclass
@@ -202,7 +192,7 @@ class BeatPlanner:
 
         facts: list[CanonicalFact] = []
         for rel in chosen_rels:
-            bank = load_bank(rel.bank, self.dict_split)
+            bank = _bank(rel.bank, self.dict_split)
             # 重采避免 hard value 太短：长度 < 2 的单字 LLM 召回时无法逐字复读
             value = bank.sample_one(rng)
             for _retry in range(8):
@@ -215,7 +205,7 @@ class BeatPlanner:
             if rel.scope == "self":
                 subj = "user"
             elif rel.scope == "third_party":
-                subj = _sample_friend_subject(rng, self.dict_split)
+                subj = _bank("synthetic_full_name", self.dict_split).sample_one(rng)
             else:
                 subj = "项目-" + value[:2]
             # aliases

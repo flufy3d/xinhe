@@ -65,9 +65,14 @@ class EventContext:
     # 内部 lazy bank 缓存
     _banks: dict[str, EntityBank] = field(default_factory=dict)
 
-    def bank(self, category: str) -> EntityBank:
+    def bank(self, category: str):
+        """返回 EntityBank 或 duck-typed 等价物(如 SyntheticNameBank)。"""
         if category not in self._banks:
-            self._banks[category] = load_bank(category, self.dict_split)
+            if category == "synthetic_full_name":
+                from xinhe.data.events._relations import SyntheticNameBank
+                self._banks[category] = SyntheticNameBank(self.dict_split)
+            else:
+                self._banks[category] = load_bank(category, self.dict_split)
         return self._banks[category]
 
     def value_weight(self, tier: str = "hard") -> float:

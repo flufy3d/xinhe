@@ -27,6 +27,19 @@ class DeepSeekError(Exception):
     pass
 
 
+class DeepSeekQuotaExhaustedError(DeepSeekError):
+    """DeepSeek 余额/配额耗尽（HTTP 402 Insufficient Balance）。
+    driver 看到要立刻 sys.exit,不再重试,等用户充值。"""
+    pass
+
+
+_DEEPSEEK_QUOTA_SIGS = (
+    "Insufficient Balance",
+    "insufficient_balance",
+    "insufficient balance",
+)
+
+
 def _load_api_key() -> str:
     """从环境变量加载 API key。找不到时 fallback 读项目根的 .env 文件。
 
@@ -236,6 +249,9 @@ def call_with_retry(
             # 认证错误 / 参数错误 → 不重试
             if "HTTP 401" in msg or "HTTP 400" in msg or "HTTP 403" in msg:
                 raise
+            # 余额耗尽 → 不重试,转 quota 信号让 driver 立刻 abort
+            if "HTTP 402" in msg or any(sig in msg for sig in _DEEPSEEK_QUOTA_SIGS):
+                raise DeepSeekQuotaExhaustedError(f"DeepSeek 余额耗尽: {msg[:200]}") from e
             last_err = e
             if attempt < max_retries:
                 print(f"  [retry {attempt+1}/{max_retries}] {msg[:120]} → 等 {backoff:.0f}s")

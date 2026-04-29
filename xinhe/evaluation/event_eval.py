@@ -293,10 +293,8 @@ def eval_joint_v8(
 def _default_val_sets() -> list[dict]:
     """val_sets 缺失时的 fallback 默认。"""
     candidates = [
-        ("stage0_seen_entity",    "data/val/stage0/seen_entity.jsonl"),
-        ("stage0_unseen_entity",  "data/val/stage0/unseen_entity.jsonl"),
-        ("stage1_seen_entity",    "data/val/stage1/seen_entity.jsonl"),
-        ("stage1_unseen_entity",  "data/val/stage1/unseen_entity.jsonl"),
+        ("stage0_val", "data/v8/stage0/val.jsonl"),
+        ("stage1_val", "data/v8/stage1/val.jsonl"),
     ]
     out = []
     for name, path in candidates:

@@ -75,6 +75,28 @@ POOL = TemplatePool("A", [
              register=RegisterStyle.CASUAL,
              meta={"relation": "pet_kind"}),
 
+    # self_name (用户自己的名字,合成"姓+名")
+    Template(user_text="我叫{value}。",
+             asst_text="好的,你叫{value}。",
+             register=RegisterStyle.CASUAL,
+             meta={"relation": "self_name"}),
+    Template(user_text="自我介绍一下,我是{value}。",
+             asst_text="您好,{value},已记下。",
+             register=RegisterStyle.FORMAL,
+             meta={"relation": "self_name"}),
+    Template(user_text="你好,我的名字叫{value}。",
+             asst_text="你好{value},很高兴认识你。",
+             register=RegisterStyle.CASUAL,
+             meta={"relation": "self_name"}),
+    Template(user_text="顺便介绍下,大家都叫我{value}。",
+             asst_text="嗯,你叫{value},我记住了。",
+             register=RegisterStyle.ORAL,
+             meta={"relation": "self_name"}),
+    Template(user_text="登记姓名:{value}。",
+             asst_text="姓名{value},已登记。",
+             register=RegisterStyle.BUSINESS,
+             meta={"relation": "self_name"}),
+
     # pet_name
     Template(user_text="家里那只猫叫{value}。",
              asst_text="嗯,你家猫叫{value},我记住了。",

@@ -33,6 +33,7 @@ class RelationSpec:
 
 RELATIONS: list[RelationSpec] = [
     # -- 用户自己 (scope=self) --
+    RelationSpec("self_name",  "synthetic_full_name", "self", "scalar", False, "名字"),  # 姓名禁 soft
     RelationSpec("fav_food",   "foods",       "self",  "scalar", True,  "喜欢吃的食物"),
     RelationSpec("fav_color",  "colors",      "self",  "scalar", False, "喜欢的颜色"),  # 颜色禁 soft
     RelationSpec("fav_brand",  "brands",      "self",  "scalar", True,  "常用的品牌"),
@@ -57,12 +58,35 @@ RELATIONS: list[RelationSpec] = [
 ]
 
 
-# ── third-party subject 名字池（可独立采样，不复用 given_names）──
-THIRD_PARTY_NAMES = [
-    "小林", "老李", "小张", "老王", "阿强", "小美",
-    "邻居", "老同学", "前同事", "客户", "房东",
-    "Alex", "Lily", "Tom", "Eric", "Sara",
-]
+class SyntheticNameBank:
+    """虚拟 bank:sample_one 时合成 surname+given_name(空间 ~万级)。
+    EntityBank 的 duck-typed 替身,不读 .txt,不做 entries 非空校验。
+    """
+
+    def __init__(self, split: str = "train") -> None:
+        self.split = split
+
+    def sample_one(self, rng: random.Random) -> str:
+        return sample_third_party_subject(rng, dict_split=self.split)
+
+    def sample(self, rng: random.Random, n: int = 1, *, unique: bool = True) -> list[str]:
+        if n == 1:
+            return [self.sample_one(rng)]
+        seen, out = set(), []
+        for _ in range(n * 5):
+            x = self.sample_one(rng)
+            if unique and x in seen:
+                continue
+            seen.add(x)
+            out.append(x)
+            if len(out) >= n:
+                break
+        if len(out) < n:
+            raise RuntimeError(f"SyntheticNameBank 抽不出 {n} 个 unique")
+        return out
+
+    def __len__(self) -> int:
+        return 100_000  # 表征空间巨大
 
 
 def sample_relation(
@@ -88,9 +112,39 @@ def sample_relation(
     return rng.choice(pool)
 
 
-def sample_third_party_subject(rng: random.Random, *, exclude: Optional[list[str]] = None) -> str:
-    pool = THIRD_PARTY_NAMES if not exclude else [n for n in THIRD_PARTY_NAMES if n not in exclude]
-    return rng.choice(pool or THIRD_PARTY_NAMES)
+def sample_third_party_subject(
+    rng: random.Random,
+    *,
+    dict_split: str = "train",
+    exclude: Optional[list[str]] = None,
+) -> str:
+    """第三方 subject 名字:动态合成 surname + given_name。
+
+    SyntheticNameBank.sample_one 的实际实现;stage0 (EventContext.bank) 与 stage1
+    (BeatPlanner._bank) 都走同一条路径,人物名分布完全一致。空间
+    ~|surnames|×|given_names| ≈ 上万组合,远胜旧 16 个写死列表。
+
+    策略:
+      - given_name g 全 ASCII(英文名)→ 直接用
+      - g 多字中文(已 ≥2 字)→ 50% 概率拼姓,50% 不拼(保留单/双字别名风格)
+      - g 单字中文 → 必拼姓(单字孤立显得突兀)
+
+    exclude 命中时最多 retry 5 次再合成,空间够大不易撞。
+    """
+    from xinhe.data.dicts.bank import load_bank
+    exclude = exclude or []
+    for _ in range(5):
+        g = load_bank("given_names", dict_split).sample_one(rng)
+        if all(c.isascii() for c in g):
+            name = g
+        elif len(g) >= 2 and rng.random() < 0.5:
+            name = g
+        else:
+            s = load_bank("surnames", dict_split).sample_one(rng)
+            name = s + g
+        if name not in exclude:
+            return name
+    return name
 
 
 def sample_object_subject(rng: random.Random) -> str:

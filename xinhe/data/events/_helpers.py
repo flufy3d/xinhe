@@ -39,12 +39,17 @@ def pick_template(
     *,
     relation: Optional[str] = None,
 ) -> Template:
-    """从模板池选模板。若指定 relation，则只在 meta.relation=relation 的子集中选。
-
-    若 ctx.canonical_pool 中有 "__pending_relation"，优先用它（一次性消费）。
+    """从模板池选模板。优先级:
+      1. relation 参数(显式传入)
+      2. ctx.canonical_pool["__pending_relation"](一次性消费,pop)
+      3. ctx.canonical_pool["__force_relation"](skeleton 级常驻,不 pop)
+      4. 从 pool 全集随机
+    若按 relation 过滤为空 → 回退到 pool 全集(避免事件抛错)。
     """
     if relation is None:
         relation = ctx.canonical_pool.pop("__pending_relation", None)
+    if relation is None:
+        relation = ctx.canonical_pool.get("__force_relation")
     pool_list = pool.templates
     if relation:
         cands = [t for t in pool_list if t.meta.get("relation") == relation]
@@ -63,7 +68,9 @@ def get_or_seed_third_party(ctx: EventContext, rng: random.Random) -> str:
             if isinstance(k, str) and k.startswith("__")
         ]
         ctx.canonical_pool["__third_party_subject"] = sample_third_party_subject(
-            rng, exclude=[v for v in existing if isinstance(v, str)]
+            rng,
+            dict_split=ctx.dict_split,
+            exclude=[v for v in existing if isinstance(v, str)],
         )
     return ctx.canonical_pool["__third_party_subject"]
 

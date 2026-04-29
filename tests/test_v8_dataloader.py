@@ -21,7 +21,7 @@ def tokenizer():
 def test_resolve_lm_weight():
     assert _resolve_lm_weight("true") == (1.0, True)
     assert _resolve_lm_weight(True) == (1.0, True)
-    assert _resolve_lm_weight("lm_only") == (0.3, False)
+    assert _resolve_lm_weight("lm_only") == (0.1, False)
     assert _resolve_lm_weight("false") == (0.0, False)
     assert _resolve_lm_weight(False) == (0.0, False)
 
@@ -44,7 +44,7 @@ def test_tokenize_turn_value_span_basic(tokenizer):
 
 
 def test_tokenize_turn_lm_only(tokenizer):
-    """lm_only 段 weight 全 0.3，无 value 加权。"""
+    """lm_only 段 weight 全 0.1，无 value 加权。"""
     user = "今天怎么样？"
     asst = "还行,看着挺舒服。"
     ids, labels, weights = tokenize_turn(
@@ -55,7 +55,7 @@ def test_tokenize_turn_lm_only(tokenizer):
     )
     nonzero = weights[weights > 0]
     assert len(nonzero) > 0
-    assert (nonzero == 0.3).all()
+    assert (nonzero == 0.1).all()
 
 
 def test_tokenize_turn_false_no_loss(tokenizer):
@@ -119,8 +119,8 @@ def test_dataset_loads_v8_jsonl(tmp_path, tokenizer):
     # 第 1 个 turn: hard value，应有 5.0 weight
     _, _, w0 = ep[0]
     assert (w0 >= 4.9).any()
-    # 第 2 个 turn: lm_only，只有 0.3 weight
+    # 第 2 个 turn: lm_only，只有 0.1 weight
     _, _, w1 = ep[1]
     nonzero = w1[w1 > 0]
     if len(nonzero) > 0:
-        assert (nonzero == 0.3).all()
+        assert (nonzero == 0.1).all()
