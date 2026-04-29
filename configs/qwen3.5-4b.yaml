@@ -1,9 +1,5 @@
-# ============================================================
-# Xinhe — Qwen3.5-4B backbone (4B, 混合 attention)
-#
-# 8 层标准 attention + 24 层线性 attention
-# LoRA 覆盖两种 attention 层的投影模块
-# ============================================================
+# Xinhe — Qwen3.5-4B backbone (8 层标准 attention + 24 层线性 attention)
+# LoRA 配置统一在 base.yaml。
 base: base.yaml
 
 backbone:
@@ -12,10 +8,3 @@ backbone:
   weights_path: ""
   hidden_size: 2560
   freeze: true
-
-# state: 继承 base.yaml (n_heads=16, head_dim=64)
-
-lora:
-  rank: 16
-  alpha: 32
-  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "in_proj_qkv", "out_proj"]

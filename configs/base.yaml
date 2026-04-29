@@ -1,4 +1,4 @@
-# Xinhe 默认配置；切换 backbone 用 --config
+# Xinhe 默认配置;切换 backbone 用 --config
 
 backbone:
   type: "qwen"
@@ -7,20 +7,20 @@ backbone:
   hidden_size: 1024
   freeze: true
 
-# Hippocampus: Delta Rule + per-head γ, W=(B,H,d_v,d_k)
+# Hippocampus: 纯 Delta Rule, W=(B,H,d_v,d_k)
 state:
   n_heads: 16
   head_dim: 128
   read_scale_init: -3.0
   beta_bias_init: -2.0
-  gamma_head_init_low: 0.8
-  gamma_head_init_high: 0.999
+  delta_backend: "auto"   # 训练强制 torch;推理 auto→FLA on Linux+CUDA
 
+# 全仓库 LoRA 唯一定义点。子 config 只重写 rank/alpha,target_modules 不再 per-config 覆盖。
 lora:
-  rank: 4
-  alpha: 8
+  rank: 16
+  alpha: 32
   dropout: 0.0
-  target_modules: ["q_proj", "v_proj", "o_proj"]
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
 
 # turn_max_tokens / max_turns_per_episode / tbptt_turns 必须 per-stage 显式给
 training:
