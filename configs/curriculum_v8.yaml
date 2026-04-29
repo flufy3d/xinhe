@@ -17,8 +17,7 @@ stages:
         S2: 0.6
         S3: 0.8
         S4: 0.8
-        S5: 1.0
-        S6: 0.6
+        S5: 1.6   # 合并自原 S5+S6,K 池含陈述/疑问两种句式
         S7: 1.0
         S8: 0.5
         S9: 0.6
@@ -43,14 +42,14 @@ stages:
       warmup_steps: 200
       use_joint_early_stop: true
       early_stop:
-        stage0_seen_entity_overall: 0.90
-        stage0_seen_entity_S1: 0.95
-        stage0_seen_entity_S5: 0.85
-        stage0_seen_entity_S10: 0.85
-        stage0_seen_entity_S11: 0.80
+        stage0_val_overall: 0.90
+        stage0_val_S1: 0.95     # 简单单 fact 写读
+        stage0_val_S5: 0.85     # 覆写后 stale-read 对抗
+        stage0_val_S7: 0.85     # 多写 + 部分覆写 + 走神 + 全读(实战最像)
+        stage0_val_S10: 0.85    # 反向删除
+        stage0_val_S11: 0.80    # 多写部分删除(最难)
     val_sets:
-      - {name: "stage0_seen_entity",   path: "data/v8/val/stage0/seen_entity.jsonl"}
-      - {name: "stage0_unseen_entity", path: "data/v8/val/stage0/unseen_entity.jsonl"}
+      - {name: "stage0_val", path: "data/v8/stage0/val.jsonl"}
 
   - name: "1_5beat_natural"
     data:
@@ -77,14 +76,13 @@ stages:
       warmup_steps: 200
       use_joint_early_stop: true
       early_stop:
-        stage1_seen_entity_overall: 0.88
-        stage1_seen_entity_substream_1A: 0.90
-        stage1_seen_entity_substream_1B: 0.78
-        stage1_seen_entity_tier_hard: 0.92
-        stage1_seen_entity_tier_soft: 0.85
+        stage1_val_overall: 0.88
+        stage1_val_substream_1A: 0.90
+        stage1_val_substream_1B: 0.78
+        stage1_val_tier_hard: 0.92
+        # 注: 数据里没有 tier_soft,从未触发,移除避免误导
     val_sets:
-      - {name: "stage1_seen_entity",   path: "data/v8/val/stage1/seen_entity.jsonl"}
-      - {name: "stage1_unseen_entity", path: "data/v8/val/stage1/unseen_entity.jsonl"}
+      - {name: "stage1_val", path: "data/v8/stage1/val.jsonl"}
 
   - name: "2_joint_consolidation"
     data:
@@ -105,10 +103,8 @@ stages:
       warmup_steps: 100
       use_joint_early_stop: true
       early_stop:
-        stage0_seen_entity_overall: 0.85
-        stage1_seen_entity_overall: 0.85
+        stage0_val_overall: 0.85
+        stage1_val_overall: 0.85
     val_sets:
-      - {name: "stage0_seen_entity",   path: "data/v8/val/stage0/seen_entity.jsonl"}
-      - {name: "stage0_unseen_entity", path: "data/v8/val/stage0/unseen_entity.jsonl"}
-      - {name: "stage1_seen_entity",   path: "data/v8/val/stage1/seen_entity.jsonl"}
-      - {name: "stage1_unseen_entity", path: "data/v8/val/stage1/unseen_entity.jsonl"}
+      - {name: "stage0_val", path: "data/v8/stage0/val.jsonl"}
+      - {name: "stage1_val", path: "data/v8/stage1/val.jsonl"}

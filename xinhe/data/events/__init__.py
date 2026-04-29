@@ -1,13 +1,14 @@
 """
 v8 原子事件注册表。
 
-按文档 §5 定义 14 个事件：A B C D E F G H I J K L L_partial M
+13 个事件: A B C D E F G H I J K L L_partial
+(原 M(stale-miss)已合并入 K(stale-query),陈述句 + 疑问句两种用户句式都在 K 模板池里)
 
-事件接口（events/base.py 定义 AtomicEvent ABC）：
+事件接口(events/base.py 定义 AtomicEvent ABC):
     name: str
     run(rng, state, ctx, turn_idx) -> list[(user_dict, assistant_dict)]
 
-新增事件只需在对应模块里 @register_event 装饰，import 一次即可被骨架 Runner 看到。
+新增事件只需在对应模块里 @register_event 装饰,import 一次即可被骨架 Runner 看到。
 """
 from xinhe.data.events.base import (
     AtomicEvent,
@@ -31,7 +32,6 @@ from xinhe.data.events import (  # noqa: F401
     j_augment,
     k_stale_read,
     l_reverse_erase,
-    m_stale_miss,
 )
 
 

@@ -1,12 +1,11 @@
-"""S1..S11 骨架定义。
+"""S1..S11 骨架定义(注:S6 已合并入 S5,实际有效骨架为 10 个 + S_simple)。
 
-参考文档 §6 骨架池：
+参考文档 §6 骨架池:
   S1  [A, {En}, B]                            — 基础读写 + 长程保持
   S2  [A, C, {En}, B]                         — 拒答不污染后续读
   S3  [F, G, H]                               — 并发写入与局部/全量召回
   S4  [A, D, B]                               — 基础擦写
-  S5  [A, D, {En}, K]                         — 擦写后 Stale-Read 对抗
-  S6  [A, D, {En}, M]                         — 覆盖后旧值查询的"已不再是"信号
+  S5  [A, D, {En}, K]                         — 擦写后 Stale-Query(陈述/疑问两种句式都在 K 池)
   S7  [F, D_partial, {En}, H]                 — 多实体中只覆盖一项,长距后多读全部
   S8  [I, C, G]                               — 第三方实体绑定与拒答
   S9  [A, J, {En}, H]                         — Augment 与 Multi-Read 联用,防止 J 学成 D
@@ -35,10 +34,8 @@ SKELETONS: dict[str, Skeleton] = {
                     description="并发写入与局部/全量召回"),
     "S4":  Skeleton("S4",  ["A", "D", "B"], weight=0.8,
                     description="基础擦写"),
-    "S5":  Skeleton("S5",  ["A", "D", _DG, "K"], weight=1.0,
-                    description="擦写后 Stale-Read 对抗"),
-    "S6":  Skeleton("S6",  ["A", "D", _DG, "M"], weight=0.6,
-                    description="覆盖后旧值查询"),
+    "S5":  Skeleton("S5",  ["A", "D", _DG, "K"], weight=1.6,
+                    description="擦写后 Stale-Query(原 S5+S6 合并;K 池含陈述/疑问两种句式)"),
     "S7":  Skeleton("S7",  ["F", "D_partial", _DG, "H"], weight=1.0,
                     description="多实体中只覆盖一项,长距后多读"),
     "S8":  Skeleton("S8",  ["I", "C", "G"], weight=0.5,
@@ -49,6 +46,10 @@ SKELETONS: dict[str, Skeleton] = {
                     description="Reverse-Erase 后查询应得 Miss"),
     "S11": Skeleton("S11", ["F", "L_partial", _DG, "H", "C_prime"], weight=0.8,
                     description="局部遗忘,防止学成整体拒答"),
+
+    # warmup 专用:纯 reveal+recall,无 distract。课程起点,迫使 W 学到 token 级 verbatim
+    "S_simple": Skeleton("S_simple", ["A", "B"], weight=0.0,
+                         description="warmup-only:纯 2-turn 写读,验证 W 通路基础"),
 }
 
 
