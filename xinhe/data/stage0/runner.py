@@ -33,6 +33,7 @@ def generate_stage0_episode(
     weight_table: Optional[dict] = None,
     max_turns: int = 12,
     inject_warmup: bool = True,
+    force_relation: Optional[str] = None,
 ) -> Sample:
     """生成一条 Stage 0 样本。
 
@@ -52,6 +53,7 @@ def generate_stage0_episode(
         distance_distribution=distance_distribution,
         weight_table=weight_table,
         max_turns=max_turns,
+        force_relation=force_relation,
     )
     sample = runner.run(skeleton, rng)
 
@@ -79,6 +81,7 @@ def generate_stage0_dataset(
     progress_every: int = 1000,
     max_turns: int = 12,
     inject_warmup: bool = True,
+    force_relation: Optional[str] = None,
 ) -> tuple[int, int]:
     """批量生成 Stage 0 数据集到 jsonl。
 
@@ -97,6 +100,7 @@ def generate_stage0_dataset(
                     distance_distribution=distance_distribution,
                     max_turns=max_turns,
                     inject_warmup=inject_warmup,
+                    force_relation=force_relation,
                 )
             except Exception:
                 continue  # 罕见情况：池空或事件 run 抛错；跳过

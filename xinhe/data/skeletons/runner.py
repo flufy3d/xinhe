@@ -39,12 +39,14 @@ class SkeletonRunner:
         distance_distribution: Optional[dict[str, float]] = None,
         weight_table: Optional[dict] = None,
         max_turns: int = 12,
+        force_relation: Optional[str] = None,
     ) -> None:
         self.dict_split = dict_split
         self.stage = stage
         self.distance_distribution = distance_distribution
         self.weight_table = weight_table
         self.max_turns = max_turns
+        self.force_relation = force_relation
 
     def run(
         self,
@@ -62,6 +64,8 @@ class SkeletonRunner:
                 ("1", "soft"): 1.5,
             },
         )
+        if self.force_relation:
+            ctx.canonical_pool["__force_relation"] = self.force_relation
         state = MemoryState()
 
         target_turns = sample_target_turns(rng, hi=self.max_turns)

@@ -1,0 +1,15 @@
+# Warmup baseline (debug 用):S_simple + force_relation=self_name 的 2-turn 写读
+# LoRA 沿用 base.yaml 默认 (q/k/v/o, rank=16, alpha=32)
+base: qwen3.5-0.8b.yaml
+
+curriculum_file: curriculum_v8_warmup_only.yaml
+
+training:
+  grad_accum_steps: 1
+  dtype: bfloat16
+
+stage_overrides:
+  default:
+    batch_size: 32
+  0_warmup_name:
+    batch_size: 32

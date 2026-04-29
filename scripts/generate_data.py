@@ -46,6 +46,7 @@ def _generate_stage0(stage_cfg: dict, *, split: str, n_override: int | None = No
         n_samples=n,
         seed=seed,
         skeleton_weights=data_cfg.get("skeleton_weights"),
+        force_relation=data_cfg.get("force_relation"),
         dict_split=split,
         distance_distribution=data_cfg.get("distance_bucket"),
         rejected_path=rejected,
