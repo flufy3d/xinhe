@@ -108,6 +108,6 @@ def generate_stage0_dataset(
                 continue
             yield sample
             if progress_every and (i + 1) % progress_every == 0:
-                print(f"  [stage0] {i + 1}/{n_samples}")
+                print(f"  [skeleton] {i + 1}/{n_samples}")
 
     return write_jsonl(_gen(), out_path, rejected_path=rejected_path)

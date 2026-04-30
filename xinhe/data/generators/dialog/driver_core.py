@@ -294,7 +294,7 @@ def _generate_one_5beat(
             except ParseError as pe:
                 last_response_str = content
                 last_reason = f"ParseError: {str(pe)[:200]}"
-                print(f"  [stage1] retryable fail (attempt {attempt + 1}): ParseError: {str(pe)[:120]}", flush=True)
+                print(f"  [dialog] retryable fail (attempt {attempt + 1}): ParseError: {str(pe)[:120]}", flush=True)
                 continue
             result = validate(
                 sample.to_dict(), stage="1", plan=plan.to_validator_plan()
@@ -302,7 +302,7 @@ def _generate_one_5beat(
             if not result.ok:
                 last_response_str = content
                 last_reason = result.errors[0] if result.errors else "unknown reject"
-                print(f"  [stage1] validator reject (attempt {attempt + 1}): {result.errors[:1]}", flush=True)
+                print(f"  [dialog] validator reject (attempt {attempt + 1}): {result.errors[:1]}", flush=True)
                 continue
             # validator 通过后注入 warmup（不影响 5-Beat 主体）
             _inject_warmup(sample, rng, dict_split)
@@ -316,7 +316,7 @@ def _generate_one_5beat(
             facts = [(f["canonical_value"], f["scope"]) for f in d["meta"]["canonical_facts"]]
             dt = time.time() - ts_attempt
             print(
-                f"  [stage1] OK ({dt:.1f}s a{attempt + 1}) n_turns={d['meta']['n_turns']} "
+                f"  [dialog] OK ({dt:.1f}s a{attempt + 1}) n_turns={d['meta']['n_turns']} "
                 f"beat3_zh={b3_zh} recall={d['meta']['recall_form']} facts={facts}",
                 flush=True,
             )
@@ -325,7 +325,7 @@ def _generate_one_5beat(
             # quota 耗尽 → 立刻 abort 整个进程,不再 retry(继续打会触发账号风控)
             if _is_quota_exhausted(e):
                 print(
-                    f"\n[stage1] !!! {type(e).__name__}: quota exhausted, aborting process to avoid ban\n"
+                    f"\n[dialog] !!! {type(e).__name__}: quota exhausted, aborting process to avoid ban\n"
                     f"  detail: {str(e)[:300]}\n"
                     f"  下次跑用 resume 续上即可,已落盘的样本不会丢。",
                     flush=True,
@@ -336,13 +336,13 @@ def _generate_one_5beat(
             # 网络/认证/HTTP error → 跟模型输出无关,清掉 last_response 走 blind retry
             last_response_str = None
             last_reason = None
-            print(f"  [stage1] api fail (attempt {attempt + 1}): {type(e).__name__}: {str(e)[:120]}", flush=True)
+            print(f"  [dialog] api fail (attempt {attempt + 1}): {type(e).__name__}: {str(e)[:120]}", flush=True)
             continue
         except Exception as e:
             # JSON decode / KeyError / 任意意外 → 当作 retryable,清状态
             last_response_str = None
             last_reason = None
-            print(f"  [stage1] unexpected fail (attempt {attempt + 1}): {type(e).__name__}: {str(e)[:120]}", flush=True)
+            print(f"  [dialog] unexpected fail (attempt {attempt + 1}): {type(e).__name__}: {str(e)[:120]}", flush=True)
             continue
     return None
 
@@ -456,12 +456,12 @@ def _generate_locked(
             rej.unlink()
 
     if existing >= n_samples:
-        print(f"[stage1] 已满 ({existing} ≥ {n_samples})，跳过 {out}")
+        print(f"[dialog] 已满 ({existing} ≥ {n_samples})，跳过 {out}")
         return existing, 0
 
     n_remaining = n_samples - existing
     if existing > 0:
-        print(f"[stage1] resume: 已有 {existing} 条，补 {n_remaining} 条到 {n_samples}")
+        print(f"[dialog] resume: 已有 {existing} 条，补 {n_remaining} 条到 {n_samples}")
 
     # 切分 1A / 1B（仅对待补足部分）；v7+ 默认 1A=1.0,1B=0
     n_1a = int(n_remaining * mix.get("1A", 1.0))
@@ -494,7 +494,7 @@ def _generate_locked(
     try:
         # 1A: 多线程跑 DeepSeek，每条出炉立刻写盘
         if n_1a > 0:
-            print(f"[stage1] 1A 5-Beat: {n_1a} 条 (workers={workers}, model={model})", flush=True)
+            print(f"[dialog] 1A 5-Beat: {n_1a} 条 (workers={workers}, model={model})", flush=True)
             # 手动 try/finally + cancel_futures=True：worker 卡死(OR ssl.read 假死)时
             # 避免 with-block.__exit__ 卡在 shutdown(wait=True) 拖垮整个进程。
             ex = ThreadPoolExecutor(max_workers=workers)
@@ -521,10 +521,10 @@ def _generate_locked(
                         n_rej += rej_inc
                         done_1a += ok_inc
                         if done_1a > 0 and done_1a % 25 == 0:
-                            print(f"  [stage1] 1A 完成 {done_1a}/{n_1a}（落盘 {n_ok}/{n_samples}）", flush=True)
+                            print(f"  [dialog] 1A 完成 {done_1a}/{n_1a}（落盘 {n_ok}/{n_samples}）", flush=True)
                     except Exception as e:
                         print(
-                            f"  [stage1] write_loop 单条失败 (skip): {type(e).__name__}: {str(e)[:160]}",
+                            f"  [dialog] write_loop 单条失败 (skip): {type(e).__name__}: {str(e)[:160]}",
                             flush=True,
                         )
                         continue
@@ -533,7 +533,7 @@ def _generate_locked(
 
         # 1B: world_qa 语料包装，流式写
         if n_1b > 0:
-            print(f"[stage1] 1B world_qa: {n_1b} 条 (split={dict_split})", flush=True)
+            print(f"[dialog] 1B world_qa: {n_1b} 条 (split={dict_split})", flush=True)
             done_1b = 0
             for s in wrap_world_qa_episodes(n_samples=n_1b, rng=rng, dict_split=dict_split):
                 ok_inc, rej_inc = _write_sample(fp_out, fp_rej, s)
@@ -541,7 +541,7 @@ def _generate_locked(
                 n_rej += rej_inc
                 done_1b += ok_inc
             if done_1b < n_1b:
-                print(f"  [stage1] 1B 语料不足，仅生成 {done_1b}/{n_1b}", flush=True)
+                print(f"  [dialog] 1B 语料不足，仅生成 {done_1b}/{n_1b}", flush=True)
     finally:
         fp_out.close()
         if fp_rej is not None:
