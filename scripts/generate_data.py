@@ -1,20 +1,19 @@
-"""
-v8 数据生成入口 —— Stage 0 / Stage 1 dispatcher。
+"""数据生成入口 —— GENERATORS + mix dispatcher。
 
-读取 curriculum_v8 配置，按 stage.data.stage_kind 分发到 stage0 / stage1 generator。
+读 curriculum 配置,按 stage.data.kind 派发:
+  kind in GENERATORS  → 实例化 Generator,跑 train + val
+  kind == "mix"       → 调 mix_jsonl 按比例从已有 jsonl 抽样合并
+
+加新生成器(如基于小说提取):
+  1. 在 xinhe/data/generators/<kind>/ 写一个 Generator 子类
+  2. 在 xinhe/data/generators/__init__.py 注册到 GENERATORS
+不需要改本文件。
 
 用法:
-    python scripts/generate_data.py --config configs/persona_unified_v8_0.8b.yaml --stage 0_atomic_skeletons
-    python scripts/generate_data.py --config configs/persona_unified_v8_0.8b.yaml --all
-
-    # smoke 量（覆写 yaml 数量，用于快速验证）
-    python scripts/generate_data.py --config ... --stage 1_5beat_natural --n-train 500 --n-val 50
-
-    # 强制重生成（默认 Stage 1 自动 resume；Stage 0 用 --force 覆盖）
-    python scripts/generate_data.py --config ... --stage 1_5beat_natural --force
-
-  缓存感知: 默认若 train.jsonl + val.jsonl 已存在则跳过。--force 强制重生成。
-  Stage 1 内部支持流式写 + 断点续跑（resume=True 是默认），中途崩中断不丢已写。
+    python scripts/generate_data.py --config configs/curriculum.yaml --stage skeleton_pretrain
+    python scripts/generate_data.py --config configs/curriculum.yaml --all
+    python scripts/generate_data.py --config ... --stage dialog_5beat --n-train 500 --n-val 50
+    python scripts/generate_data.py --config ... --stage dialog_5beat --force
 """
 import argparse
 import sys
@@ -24,166 +23,113 @@ project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
 from xinhe.config import validate_stage_config
-from xinhe.data.stage0.runner import generate_stage0_dataset
-from xinhe.data.stage1.driver import generate_stage1_dataset
-from xinhe.data.stage2.mixer import generate_stage2_dataset
+from xinhe.data.generators import GENERATORS, GenerateRequest
+from xinhe.data.mix import mix_jsonl
 
 
-def _generate_stage0(stage_cfg: dict, *, split: str, n_override: int | None = None) -> tuple[int, int]:
-    data_cfg = stage_cfg.get("data", {})
-    training_cfg = stage_cfg.get("training", {})
-    out_dir = Path(data_cfg.get("out_dir", "data/v8/stage0"))
-    out_dir.mkdir(parents=True, exist_ok=True)
-    n = n_override if n_override is not None else data_cfg.get(f"num_{split}", data_cfg.get("num_train", 1000))
-    seed_base = int(data_cfg.get("seed", 42))
-    seed = seed_base + (0 if split == "train" else 1)
-    out_path = out_dir / f"{split}.jsonl"
-    rejected = out_dir / f"{split}.rejected.jsonl"
-    max_turns = int(training_cfg["max_turns_per_episode"])  # validate_stage_config 已确保存在
-    print(f"  [stage0/{split}] 生成 {n} 条 → {out_path} (max_turns={max_turns})")
-    return generate_stage0_dataset(
-        out_path,
-        n_samples=n,
-        seed=seed,
-        skeleton_weights=data_cfg.get("skeleton_weights"),
-        force_relation=data_cfg.get("force_relation"),
-        dict_split=split,
-        distance_distribution=data_cfg.get("distance_bucket"),
-        rejected_path=rejected,
-        progress_every=max(1, n // 10),
-        max_turns=max_turns,
-    )
+# 这些 yaml `data:` 字段是 dispatcher 公共消费,不传入 Generator.__init__
+_DATA_RESERVED = {"kind", "out_dir", "num_train", "num_val", "seed", "sources"}
 
 
-def _generate_stage1(stage_cfg: dict, *, split: str, n_override: int | None = None,
-                     model_override: str | None = None,
-                     out_suffix: str = "",
-                     seed_offset: int = 0,
-                     workers_override: int | None = None) -> tuple[int, int]:
-    data_cfg = stage_cfg.get("data", {})
-    out_dir = Path(data_cfg.get("out_dir", "data/v8/stage1"))
-    out_dir.mkdir(parents=True, exist_ok=True)
-    n = n_override if n_override is not None else data_cfg.get(f"num_{split}", data_cfg.get("num_train", 100))
-    seed_base = int(data_cfg.get("seed", 43))
-    seed = seed_base + (0 if split == "train" else 1) + seed_offset
-    out_path = out_dir / f"{split}{out_suffix}.jsonl"
-    rejected = out_dir / f"{split}{out_suffix}.rejected.jsonl"
-    model = model_override or data_cfg.get("model", "deepseek-v4-flash")
-    print(f"  [stage1/{split}] 生成 {n} 条 → {out_path} (model={model})")
-    return generate_stage1_dataset(
-        out_path,
-        n_samples=n,
-        seed=seed,
-        mix=data_cfg.get("mix"),
-        dict_split=split,
-        n_canonical_range=tuple(data_cfg.get("n_canonical_range", [1, 3])),
-        n_turns_range=tuple(data_cfg.get("n_turns_range", [10, 14])),
-        beat3_min_turns=int(data_cfg.get("beat3_min_turns", 1)),
-        beat3_min_chars=int(data_cfg.get("beat3_min_chars", 500)),
-        beat3_chars_tolerance=float(data_cfg.get("beat3_chars_tolerance", 0.8)),
-        workers=workers_override if workers_override is not None else int(data_cfg.get("workers", 4)),
-        model=model,
-        rejected_path=rejected,
-    )
-
-
-def generate_stage(stage_cfg: dict, force: bool = False,
-                   n_train_override: int | None = None,
-                   n_val_override: int | None = None,
-                   model_override: str | None = None,
-                   out_suffix: str = "",
-                   seed_offset: int = 0,
-                   workers_override: int | None = None) -> None:
+def run_stage(stage_cfg: dict, *,
+              force: bool = False,
+              n_train: int | None = None,
+              n_val: int | None = None,
+              model: str | None = None,
+              out_suffix: str = "",
+              seed_offset: int = 0,
+              workers: int | None = None) -> None:
     name = stage_cfg.get("name", "?")
-    # 启动期校验 + 派生：配错在这里立刻报，不让生成器跑出会被 dataloader 截的数据
     validate_stage_config(name, stage_cfg)
 
-    data_cfg = stage_cfg.get("data", {})
-    kind = data_cfg.get("stage_kind", "stage0")
-    out_dir = Path(data_cfg.get("out_dir", f"data/v8/{kind}"))
+    data = dict(stage_cfg.get("data", {}))           # 拷贝,避免污染原 cfg
+    kind = data.get("kind")
+    if kind is None:
+        raise ValueError(f"stage {name!r}: data.kind 缺失")
 
-    train_path = out_dir / f"train{out_suffix}.jsonl"
-    val_path = out_dir / f"val{out_suffix}.jsonl"
-
-    expected_train = n_train_override if n_train_override is not None else data_cfg.get("num_train", 0)
-    # 副 driver(out_suffix 非空) 不要求 val 文件存在,只检查 train
-    cache_check = train_path.exists() if out_suffix else (train_path.exists() and val_path.exists())
-    if not force and cache_check:
-        with open(train_path, "r", encoding="utf-8") as f:
-            actual = sum(1 for ln in f if ln.strip())
-        if expected_train > 0 and actual >= expected_train * 0.95:
-            print(f"  [缓存] {name} 已生成 ({actual} 条)，跳过。--force 强制重生成。")
-            return
+    out_dir = Path(data.get("out_dir", f"data/{kind}"))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    seed_base = int(data.get("seed", 42))
+    num_train_yaml = int(data.get("num_train", 0))
+    num_val_yaml = int(data.get("num_val", 0))
+    max_turns = int(stage_cfg.get("training", {}).get("max_turns_per_episode", 12))
 
     print(f"\n=== {name} ({kind}) ===")
-    if kind == "stage0":
-        _generate_stage0(stage_cfg, split="train", n_override=n_train_override)
-        _generate_stage0(stage_cfg, split="val", n_override=n_val_override)
-    elif kind == "stage1":
-        _generate_stage1(stage_cfg, split="train", n_override=n_train_override,
-                         model_override=model_override, out_suffix=out_suffix, seed_offset=seed_offset,
-                         workers_override=workers_override)
-        # 副 driver 不生成 val(避免覆盖主 driver 的 val.jsonl)
-        if not out_suffix:
-            _generate_stage1(stage_cfg, split="val", n_override=n_val_override, model_override=model_override,
-                             workers_override=workers_override)
-    elif kind == "stage2":
-        _generate_stage2(stage_cfg, split="train", n_override=n_train_override)
-        _generate_stage2(stage_cfg, split="val", n_override=n_val_override)
+
+    if kind in GENERATORS:
+        # CLI overrides:仅 dialog 真正消化;skeleton 忽略(不传)
+        gen_cfg = {k: v for k, v in data.items() if k not in _DATA_RESERVED}
+        gen_cfg["max_turns"] = max_turns
+        if kind == "dialog":
+            if model is not None:
+                gen_cfg["model"] = model
+            if workers is not None:
+                gen_cfg["workers"] = workers
+
+        gen = GENERATORS[kind](**gen_cfg)
+
+        for split in ("train", "val"):
+            n = (n_train if split == "train" else n_val)
+            if n is None:
+                n = (num_train_yaml if split == "train" else num_val_yaml)
+            if n <= 0:
+                continue
+            suffix = out_suffix if (split == "train" and kind == "dialog") else ""
+            seed = seed_base + (0 if split == "train" else 1) \
+                + (seed_offset if kind == "dialog" else 0)
+            req = GenerateRequest(
+                out_path=out_dir / f"{split}{suffix}.jsonl",
+                rejected_path=out_dir / f"{split}{suffix}.rejected.jsonl",
+                n_samples=n, seed=seed, split=split,
+                max_turns=max_turns, force=force,
+            )
+            print(f"  [{kind}/{split}] 生成 {n} 条 → {req.out_path}")
+            gen.generate(req)
+            # dialog 副 driver(out_suffix 非空)只写 train,避免覆盖主 driver 的 val.jsonl
+            if kind == "dialog" and out_suffix and split == "train":
+                break
+
+    elif kind == "mix":
+        sources = data.get("sources")
+        if not sources:
+            raise ValueError(f"stage {name!r}: kind=mix 需配置 sources(每个含 path/ratio/tag)")
+        for split in ("train", "val"):
+            n = (n_train if split == "train" else n_val)
+            if n is None:
+                n = (num_train_yaml if split == "train" else num_val_yaml)
+            if n <= 0:
+                continue
+            seed = seed_base + (0 if split == "train" else 1)
+            out_path = out_dir / f"{split}.jsonl"
+            print(f"  [mix/{split}] 生成 {n} 条 → {out_path}")
+            mix_jsonl(out_path, sources=sources, n_samples=n, seed=seed,
+                      split=split, resume=not force)
+
     else:
-        raise ValueError(f"未知 stage_kind: {kind}")
-
-
-def _generate_stage2(stage_cfg: dict, *, split: str, n_override: int | None = None) -> tuple[int, int]:
-    """Stage 2 联合巩固：从 stage 0/stage 1 jsonl 按比例抽样合并。
-
-    yaml 例:
-      sources:
-        - {path: "data/v8/stage0/train.jsonl", ratio: 0.30, tag: "stage0"}
-        - {path: "data/v8/stage1/train.jsonl", ratio: 0.70, tag: "stage1"}
-    val 时自动把 path 里的 train → val（每个 source 独立切分,共用比例）。
-    """
-    data_cfg = stage_cfg.get("data", {})
-    out_dir = Path(data_cfg.get("out_dir", "data/v8/stage2"))
-    out_dir.mkdir(parents=True, exist_ok=True)
-    n = n_override if n_override is not None else data_cfg.get(f"num_{split}", data_cfg.get("num_train", 100))
-    seed_base = int(data_cfg.get("seed", 44))
-    seed = seed_base + (0 if split == "train" else 1)
-    out_path = out_dir / f"{split}.jsonl"
-
-    sources_raw = data_cfg.get("sources") or []
-    if not sources_raw:
-        raise ValueError("stage2 需配置 sources（每个含 path/ratio/tag）")
-    # train→val 路径自动替换
-    sources = []
-    for s in sources_raw:
-        p = s["path"]
-        if split == "val":
-            p = p.replace("train.jsonl", "val.jsonl")
-        sources.append({"path": p, "ratio": s.get("ratio", 0), "tag": s.get("tag", "?")})
-
-    print(f"  [stage2/{split}] 生成 {n} 条 → {out_path}")
-    return generate_stage2_dataset(out_path, sources=sources, n_samples=n, seed=seed)
+        raise ValueError(
+            f"stage {name!r}: 未知 kind={kind!r} "
+            f"(generators={list(GENERATORS)},另支持 'mix')"
+        )
 
 
 def main():
-    parser = argparse.ArgumentParser(description="v8 数据生成")
+    parser = argparse.ArgumentParser(description="数据生成 dispatcher")
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--stage", type=str, default=None, help="指定 stage 名")
     parser.add_argument("--all", action="store_true", help="生成所有 stage")
-    parser.add_argument("--force", action="store_true", help="强制重生成（覆盖已有）")
+    parser.add_argument("--force", action="store_true", help="强制重生成(覆盖已有)")
     parser.add_argument("--n-train", type=int, default=None,
-                        help="覆写 yaml 里 num_train（用于 smoke 量）")
+                        help="覆写 yaml 里 num_train(用于 smoke 量)")
     parser.add_argument("--n-val", type=int, default=None,
-                        help="覆写 yaml 里 num_val（用于 smoke 量）")
+                        help="覆写 yaml 里 num_val(用于 smoke 量)")
     parser.add_argument("--model", type=str, default=None,
-                        help="覆写 yaml 里 model（仅 stage1 生效）。含 '/' 走 OpenRouter，否则 DeepSeek。")
+                        help="覆写 yaml 里 model(仅 dialog 生效)。含 '/' 走 OpenRouter,否则 DeepSeek。")
     parser.add_argument("--out-suffix", type=str, default="",
-                        help="输出文件后缀（仅 stage1 train），eg '_or' → train_or.jsonl，副 driver 用以并行写不同文件。")
+                        help="输出文件后缀(仅 dialog train),eg '_or' → train_or.jsonl,副 driver 用以并行写不同文件。")
     parser.add_argument("--seed-offset", type=int, default=0,
-                        help="seed 偏移（避免副 driver 与主 driver 撞种），eg 1000。")
+                        help="seed 偏移(避免副 driver 与主 driver 撞种),eg 1000。")
     parser.add_argument("--workers", type=int, default=None,
-                        help="覆写 yaml 里 workers（仅 stage1 生效）。OR 限流时一键降并发。")
+                        help="覆写 yaml 里 workers(仅 dialog 生效)。OR 限流时一键降并发。")
     args = parser.parse_args()
 
     from xinhe.model.config import XinheConfig
@@ -197,7 +143,7 @@ def main():
         target = [s for s in curriculum if s.get("name") == args.stage]
         if not target:
             names = [s.get("name") for s in curriculum]
-            print(f"未知 stage: {args.stage!r}（可选: {names}）")
+            print(f"未知 stage: {args.stage!r}(可选: {names})")
             sys.exit(1)
         stages_to_gen = target
     elif args.all:
@@ -207,13 +153,16 @@ def main():
         sys.exit(1)
 
     for stage in stages_to_gen:
-        generate_stage(stage, force=args.force,
-                       n_train_override=args.n_train,
-                       n_val_override=args.n_val,
-                       model_override=args.model,
-                       out_suffix=args.out_suffix,
-                       seed_offset=args.seed_offset,
-                       workers_override=args.workers)
+        run_stage(
+            stage,
+            force=args.force,
+            n_train=args.n_train,
+            n_val=args.n_val,
+            model=args.model,
+            out_suffix=args.out_suffix,
+            seed_offset=args.seed_offset,
+            workers=args.workers,
+        )
 
 
 if __name__ == "__main__":

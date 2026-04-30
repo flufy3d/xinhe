@@ -1,7 +1,7 @@
 """
-多轮对话数据集 (v8)。
+多轮对话数据集。
 
-v8 schema:
+schema:
   每个 assistant turn 自带:
     - train_loss: "true" / "lm_only" / "false"（也兼容历史 bool True/False）
     - value: list[str] | None
@@ -47,7 +47,7 @@ def _resolve_lm_weight(train_loss: Union[bool, str]) -> tuple[float, bool]:
     """tri-state → (lm_weight, value_active)。
 
     - "true" / True   → (1.0, True)
-    - "lm_only"       → (0.1, False)  v8.1: 0.3 → 0.1, 让 distract 仅微弱影响 backbone,
+    - "lm_only"       → (0.1, False)  让 distract 仅微弱影响 backbone,
                                        LoRA/Hippocampus 容量留给 W 写读通路
     - "false" / False → (0.0, False)
     """
@@ -177,7 +177,7 @@ class ConversationDataset(Dataset):
     """
     多轮对话数据集。
 
-    数据格式 (v8 JSONL):
+    数据格式 (JSONL):
     {
       "conversations": [
         {"role": "user", "content": "..."},

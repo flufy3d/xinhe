@@ -19,8 +19,8 @@ from xinhe.config.errors import ConfigError
 
 logger = logging.getLogger(__name__)
 
-# 每条 stage1 episode 前置 world_qa warmup 的 K 最大值（与 stage1.driver._WARMUP_K_DIST 一致）
-_STAGE1_WARMUP_K_MAX = 2
+# 每条 dialog episode 前置 world_qa warmup 的 K 最大值(与 generators.dialog.driver_core._WARMUP_K_DIST 一致)
+_DIALOG_WARMUP_K_MAX = 2
 
 # turn_max_tokens 合理区间（防呆，避免 8192 / 64 这种异常值）
 _TURN_MAX_TOKENS_MIN = 128
@@ -37,23 +37,23 @@ def validate_stage_config(stage_name: str, stage_cfg: dict[str, Any]) -> dict[st
     可选字段：
       - tbptt_turns (int)：默认派生 = max_turns_per_episode；显式给小值会 warning
 
-    依据 stage_cfg["data"]["stage_kind"] 触发额外规则：
-      - stage1: n_turns_range[1] + warmup_K_max <= max_turns_per_episode
-      - stage1: beat3_min_chars × 1.5 (zh→token 估算) <= turn_max_tokens
+    依据 stage_cfg["data"]["kind"] 触发额外规则：
+      - dialog: n_turns_range[1] + warmup_K_max <= max_turns_per_episode
+      - dialog: beat3_min_chars × 1.5 (zh→token 估算) <= turn_max_tokens
     """
     errors: list[str] = []
     warns: list[str] = []
 
     training = stage_cfg.get("training", {})
     data = stage_cfg.get("data", {})
-    stage_kind = data.get("stage_kind", "stage0")
+    kind = data.get("kind", "skeleton")
 
     # ── 必填: max_turns_per_episode ──
     max_turns = training.get("max_turns_per_episode")
     if max_turns is None:
         errors.append(
             "'max_turns_per_episode' missing under training:. "
-            "Hint: add 'max_turns_per_episode: 12' (stage0) or 16 (stage1/stage2)."
+            "Hint: add 'max_turns_per_episode: 12' (skeleton) or 16 (dialog/mix)."
         )
     elif not isinstance(max_turns, int) or max_turns < 1:
         errors.append(
@@ -67,7 +67,7 @@ def validate_stage_config(stage_name: str, stage_cfg: dict[str, Any]) -> dict[st
     if turn_max_tokens is None:
         errors.append(
             "'turn_max_tokens' missing under training: (no fallback in base.yaml). "
-            "Hint: add 'turn_max_tokens: 256' (stage0) or 768 (stage1/stage2)."
+            "Hint: add 'turn_max_tokens: 256' (skeleton) or 768 (dialog/mix)."
         )
     elif not isinstance(turn_max_tokens, int):
         errors.append(
@@ -97,35 +97,35 @@ def validate_stage_config(stage_name: str, stage_cfg: dict[str, Any]) -> dict[st
                 f"Hint: set tbptt_turns={max_turns} or remove field for no-truncation default."
             )
 
-    # ── stage0: turn_count_hi（可选 yaml 字段，future-proof）──
-    if stage_kind == "stage0" and max_turns is not None:
+    # ── skeleton: turn_count_hi（可选 yaml 字段，future-proof）──
+    if kind == "skeleton" and max_turns is not None:
         turn_count_hi = data.get("turn_count_hi")
         if turn_count_hi is not None and turn_count_hi > max_turns:
             errors.append(
-                f"stage0 turn_count_hi={turn_count_hi} > max_turns_per_episode={max_turns}. "
+                f"skeleton turn_count_hi={turn_count_hi} > max_turns_per_episode={max_turns}. "
                 f"Generator would emit episodes longer than dataloader can handle, "
                 f"causing silent truncation in conversation.py. "
                 f"Hint: lower turn_count_hi to ≤{max_turns} or raise max_turns_per_episode."
             )
 
-    # ── stage1: n_turns_range + warmup_K_max <= max_turns ──
-    if stage_kind == "stage1":
+    # ── dialog: n_turns_range + warmup_K_max <= max_turns ──
+    if kind == "dialog":
         n_turns_range = data.get("n_turns_range")
         if n_turns_range is not None and max_turns is not None:
             try:
                 n_turns_hi = int(n_turns_range[1])
             except (TypeError, IndexError, ValueError):
                 errors.append(
-                    f"stage1 n_turns_range={n_turns_range!r} not parseable as [lo, hi]. "
+                    f"dialog n_turns_range={n_turns_range!r} not parseable as [lo, hi]. "
                     f"Hint: use 'n_turns_range: [10, 14]'."
                 )
             else:
-                total_max = n_turns_hi + _STAGE1_WARMUP_K_MAX
+                total_max = n_turns_hi + _DIALOG_WARMUP_K_MAX
                 if total_max > max_turns:
                     errors.append(
-                        f"stage1 n_turns_range={tuple(n_turns_range)} + warmup K_max={_STAGE1_WARMUP_K_MAX} "
+                        f"dialog n_turns_range={tuple(n_turns_range)} + warmup K_max={_DIALOG_WARMUP_K_MAX} "
                         f"= {total_max} > max_turns_per_episode={max_turns}. "
-                        f"Hint: reduce n_turns_range upper bound to ≤{max_turns - _STAGE1_WARMUP_K_MAX} "
+                        f"Hint: reduce n_turns_range upper bound to ≤{max_turns - _DIALOG_WARMUP_K_MAX} "
                         f"or raise max_turns_per_episode to ≥{total_max}."
                     )
 

@@ -103,7 +103,7 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
         "early_stop_value": "early_stop_value",
         "early_stop_tell": "early_stop_tell",
         "use_joint_early_stop": "use_joint_early_stop",
-        "early_stop": "early_stop",     # v8 dict-form 通用早停
+        "early_stop": "early_stop",     # dict-form 通用早停
         "log_every": "log_every",
         "save_every": "save_every",
         "eval_every": "eval_every",
@@ -117,7 +117,7 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
         if yaml_key in training:
             overrides[field_name] = training[yaml_key]
 
-    # v8: data.val_sets 也要一起传到 config（event_eval 消费）
+    # data.val_sets 也要一起传到 config(event_eval 消费)
     data_block = stage.get("data", {})
     if "val_sets" in data_block or "val_sets" in stage:
         overrides["val_sets"] = stage.get("val_sets") or data_block.get("val_sets") or []
@@ -128,15 +128,14 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
 
 
 def generate_stage_data(stage: dict, stage_name: str) -> tuple[str, str]:
-    """v8: 通过 generate_data.generate_stage 调用 stage0/stage1 生成器。
+    """通过 generate_data.run_stage 调用对应 kind 的 generator/mix。
 
     Returns: (train_path, val_path) — 由 stage.data.out_dir 推导。
     """
-    from scripts.generate_data import generate_stage as _gen_stage
-    _gen_stage(stage, force=False)
-    out_dir = Path(stage["data"].get(
-        "out_dir", f"data/v8/{stage['data'].get('stage_kind', 'stage0')}"
-    ))
+    from scripts.generate_data import run_stage as _run_stage
+    _run_stage(stage, force=False)
+    kind = stage["data"].get("kind", "skeleton")
+    out_dir = Path(stage["data"].get("out_dir", f"data/{kind}"))
     return str(out_dir / "train.jsonl"), str(out_dir / "val.jsonl")
 
 

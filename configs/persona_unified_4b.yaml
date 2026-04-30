@@ -1,7 +1,7 @@
-# Persona unified v8 (4B backbone) —— 引用 curriculum_v8.yaml
+# Persona unified (4B backbone) —— 引用 curriculum.yaml
 base: qwen3.5-4b.yaml
 
-curriculum_file: curriculum_v8.yaml
+curriculum_file: curriculum.yaml
 
 training:
   grad_accum_steps: 1

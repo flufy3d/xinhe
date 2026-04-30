@@ -1,4 +1,4 @@
-"""距离桶采样：决定 {En} 段插入多少轮 distract。"""
+"""距离桶采样:决定 {En} 段插入多少轮 distract。"""
 from __future__ import annotations
 
 import random
@@ -22,7 +22,7 @@ def sample_distance_bucket(
 ) -> tuple[str, int]:
     """返回 (bucket_name, n_turns)。
 
-    bucket_constraint 强制指定桶；否则按 distribution（默认 BUCKETS 概率）。
+    bucket_constraint 强制指定桶;否则按 distribution(默认 BUCKETS 概率)。
     n_turns 在桶的 turns 区间均匀采样。
     """
     if bucket_constraint:

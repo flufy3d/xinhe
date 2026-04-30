@@ -191,34 +191,11 @@ def _build_fix_message(reason: str, plan) -> str:
     )
 
 
-def _resolve_sampler(model: str):
-    """按 model 名 dispatch,返回 (call_with_retry, ApiError),五家 sampler 接口已对齐。
-
-      codex-cli[:backing]  → codex_cli_sampler   (subprocess, ChatGPT Plus 配额)
-      gemini-cli[:backing] → gemini_cli_sampler  (subprocess, Google 账号配额)
-      claude-cli[:backing] → claude_cli_sampler  (subprocess, Claude Code 订阅配额)
-      含 "/"               → openrouter_sampler  (HTTP, minimax/google/qwen 等)
-      其他                  → deepseek_sampler    (HTTP, deepseek-v4-flash 等)
-    """
-    head = model.split(":", 1)[0].lower()
-    if head in ("codex-cli", "codex"):
-        from xinhe.data.codex_cli_sampler import call_with_retry as fn, CodexCliError as Err
-        return fn, Err
-    if head in ("gemini-cli", "gemini"):
-        from xinhe.data.gemini_cli_sampler import call_with_retry as fn, GeminiCliError as Err
-        return fn, Err
-    if head in ("claude-cli", "claude"):
-        from xinhe.data.claude_cli_sampler import call_with_retry as fn, ClaudeCliError as Err
-        return fn, Err
-    if "/" in model:
-        from xinhe.data.openrouter_sampler import call_with_retry as fn, OpenRouterError as Err
-        return fn, Err
-    from xinhe.data.deepseek_sampler import call_with_retry as fn, DeepSeekError as Err
-    return fn, Err
-from xinhe.data.stage1.beat_planner import BeatPlanner
-from xinhe.data.stage1.mixer import sample_world_qa_pairs, wrap_world_qa_episodes
-from xinhe.data.stage1.parser import parse_response, ParseError
-from xinhe.data.stage1.prompts import build_messages
+from xinhe.data.samplers import resolve as _resolve_sampler
+from xinhe.data.generators.dialog.beat_planner import BeatPlanner
+from xinhe.data.shared.world_qa import sample_world_qa_pairs, wrap_world_qa_episodes
+from xinhe.data.generators.dialog.parser import parse_response, ParseError
+from xinhe.data.generators.dialog.prompts import build_messages
 from xinhe.data.validator.api import validate
 
 

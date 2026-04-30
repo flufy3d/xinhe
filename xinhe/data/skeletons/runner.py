@@ -26,8 +26,8 @@ from xinhe.data.events.base import EventContext
 from xinhe.data.memory_state import MemoryState
 from xinhe.data.schema import Sample
 from xinhe.data.skeletons.spec import Skeleton, DistractGroup
-from xinhe.data.stage0.distance_buckets import sample_distance_bucket
-from xinhe.data.stage0.turn_count import sample_target_turns
+from xinhe.data.shared.distance_buckets import sample_distance_bucket
+from xinhe.data.shared.turn_count import sample_target_turns
 
 
 class SkeletonRunner:

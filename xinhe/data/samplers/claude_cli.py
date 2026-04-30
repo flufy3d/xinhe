@@ -48,6 +48,9 @@ _CLAUDE_QUOTA_SIGS = (
     "Please try again at",
     "Sonnet limit",
     "Opus limit",
+    "out of extra usage",   # "You're out of extra usage · resets ..." (Claude Pro/Max 文案)
+    "extra usage",
+    "out of usage",
 )
 
 
@@ -171,7 +174,12 @@ def call_with_retry(
             result_text = str(envelope.get("result") or "")
             api_status = str(envelope.get("api_error_status") or "")
             blob = result_text + " " + api_status + " " + err_tail
-            if any(sig in blob for sig in _CLAUDE_QUOTA_SIGS):
+            # api_status 429 (Too Many Requests) 直接判 quota,不再依赖 result_text 关键词
+            is_quota = (
+                api_status.startswith("429")
+                or any(sig in blob for sig in _CLAUDE_QUOTA_SIGS)
+            )
+            if is_quota:
                 raise ClaudeQuotaExhaustedError(
                     f"claude quota exhausted; result: {result_text[:200]!r}; api_status: {api_status[:80]!r}"
                 )

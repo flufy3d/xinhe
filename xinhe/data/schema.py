@@ -1,5 +1,5 @@
 """
-v8 统一数据 schema。
+统一数据 schema。
 
 每条样本最终落 JSONL 时形如：
 

@@ -1,5 +1,5 @@
 """
-v8 模板基类。
+模板基类。
 
 每个原子事件（A..M, L_partial）拥有独立的 templates/{event}.py 文件，
 里面定义 ≥8 条 Template，覆盖 8 种 register style。

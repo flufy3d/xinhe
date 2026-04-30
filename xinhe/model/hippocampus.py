@@ -1,5 +1,5 @@
 """
-Hippocampus (v8) — 大一统短期记忆,纯 Delta Rule
+Hippocampus — 大一统短期记忆,纯 Delta Rule
 
 生物类比:单一 W: (B, H, d_v, d_k) 对应海马体短期工作记忆。未来 Phase 2 的
 Neocortex 模块(MLP 长期固化)将从 Hippocampus 蒸馏。

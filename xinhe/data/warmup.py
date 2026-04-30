@@ -17,7 +17,7 @@ import random
 from typing import Callable
 
 from xinhe.data.schema import Sample
-from xinhe.data.stage1.mixer import sample_world_qa_pairs
+from xinhe.data.shared.world_qa import sample_world_qa_pairs
 
 
 def inject_world_qa_warmup(

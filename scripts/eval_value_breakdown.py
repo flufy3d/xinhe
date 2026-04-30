@@ -40,7 +40,7 @@ def tokenize_turn_with_class(tokenizer, user_content, assistant_content, turn_ma
                              *, train_loss="true", value_spans=None):
     """tokenize 一轮并返回 (input_ids, labels, token_class)。
 
-    v8 接口:value_spans 是 list[[start_char, end_char]](assistant_content 坐标系),
+    接口:value_spans 是 list[[start_char, end_char]](assistant_content 坐标系),
     train_loss 三态: "true" / "lm_only" / "false" (兼容 bool)。
 
     token_class:

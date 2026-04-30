@@ -9,11 +9,11 @@ from xinhe.config import validate_stage_config
 from xinhe.config.errors import ConfigError
 
 
-def _stage(stage_kind: str, training: dict | None = None, data: dict | None = None) -> dict:
+def _stage(kind: str, training: dict | None = None, data: dict | None = None) -> dict:
     """构造一个 stage_cfg 骨架。"""
     return {
         "name": "test_stage",
-        "data": {"stage_kind": stage_kind, **(data or {})},
+        "data": {"kind": kind, **(data or {})},
         "training": training or {},
     }
 
@@ -24,14 +24,14 @@ def _stage(stage_kind: str, training: dict | None = None, data: dict | None = No
 
 def test_derived_tbptt_turns_default():
     """tbptt_turns 缺省时派生 = max_turns_per_episode。"""
-    cfg = _stage("stage0", training={"max_turns_per_episode": 12, "turn_max_tokens": 256})
+    cfg = _stage("skeleton", training={"max_turns_per_episode": 12, "turn_max_tokens": 256})
     out = validate_stage_config("s0", cfg)
     assert out["training"]["max_turns_per_episode"] == 12
     assert out["training"]["tbptt_turns"] == 12
 
 
 def test_explicit_tbptt_turns_equal_to_max_turns_no_warning(caplog):
-    cfg = _stage("stage0", training={
+    cfg = _stage("skeleton", training={
         "max_turns_per_episode": 12, "turn_max_tokens": 256, "tbptt_turns": 12,
     })
     with caplog.at_level(logging.WARNING):
@@ -44,7 +44,7 @@ def test_explicit_tbptt_turns_equal_to_max_turns_no_warning(caplog):
 # ────────────────────────────────────────────────────────────
 
 def test_missing_max_turns_per_episode():
-    cfg = _stage("stage0", training={"turn_max_tokens": 256})
+    cfg = _stage("skeleton", training={"turn_max_tokens": 256})
     with pytest.raises(ConfigError) as exc:
         validate_stage_config("s0", cfg)
     assert "'max_turns_per_episode' missing" in str(exc.value)
@@ -52,7 +52,7 @@ def test_missing_max_turns_per_episode():
 
 
 def test_max_turns_must_be_positive_int():
-    cfg = _stage("stage0", training={"max_turns_per_episode": -1, "turn_max_tokens": 256})
+    cfg = _stage("skeleton", training={"max_turns_per_episode": -1, "turn_max_tokens": 256})
     with pytest.raises(ConfigError) as exc:
         validate_stage_config("s0", cfg)
     assert "Hint:" in str(exc.value)
@@ -63,7 +63,7 @@ def test_max_turns_must_be_positive_int():
 # ────────────────────────────────────────────────────────────
 
 def test_missing_turn_max_tokens():
-    cfg = _stage("stage0", training={"max_turns_per_episode": 12})
+    cfg = _stage("skeleton", training={"max_turns_per_episode": 12})
     with pytest.raises(ConfigError) as exc:
         validate_stage_config("s0", cfg)
     assert "'turn_max_tokens' missing" in str(exc.value)
@@ -71,7 +71,7 @@ def test_missing_turn_max_tokens():
 
 
 def test_turn_max_tokens_out_of_range():
-    cfg = _stage("stage0", training={"max_turns_per_episode": 12, "turn_max_tokens": 8192})
+    cfg = _stage("skeleton", training={"max_turns_per_episode": 12, "turn_max_tokens": 8192})
     with pytest.raises(ConfigError) as exc:
         validate_stage_config("s0", cfg)
     assert "outside" in str(exc.value)
@@ -83,7 +83,7 @@ def test_turn_max_tokens_out_of_range():
 # ────────────────────────────────────────────────────────────
 
 def test_tbptt_turns_greater_than_max_turns():
-    cfg = _stage("stage0", training={
+    cfg = _stage("skeleton", training={
         "max_turns_per_episode": 12, "turn_max_tokens": 256, "tbptt_turns": 32,
     })
     with pytest.raises(ConfigError) as exc:
@@ -97,7 +97,7 @@ def test_tbptt_turns_greater_than_max_turns():
 # ────────────────────────────────────────────────────────────
 
 def test_tbptt_turns_less_than_max_turns_warns_no_raise(caplog):
-    cfg = _stage("stage0", training={
+    cfg = _stage("skeleton", training={
         "max_turns_per_episode": 12, "turn_max_tokens": 256, "tbptt_turns": 6,
     })
     with caplog.at_level(logging.WARNING):
@@ -108,12 +108,12 @@ def test_tbptt_turns_less_than_max_turns_warns_no_raise(caplog):
 
 
 # ────────────────────────────────────────────────────────────
-# 规则 5: stage1 n_turns_range + warmup K_max > max_turns
+# 规则 5: dialog n_turns_range + warmup K_max > max_turns
 # ────────────────────────────────────────────────────────────
 
-def test_stage1_n_turns_range_plus_warmup_exceeds_max_turns():
+def test_dialog_n_turns_range_plus_warmup_exceeds_max_turns():
     cfg = _stage(
-        "stage1",
+        "dialog",
         training={"max_turns_per_episode": 12, "turn_max_tokens": 512},
         data={"n_turns_range": [10, 14]},
     )
@@ -123,9 +123,9 @@ def test_stage1_n_turns_range_plus_warmup_exceeds_max_turns():
     assert "Hint:" in str(exc.value)
 
 
-def test_stage1_n_turns_range_within_budget_ok():
+def test_dialog_n_turns_range_within_budget_ok():
     cfg = _stage(
-        "stage1",
+        "dialog",
         training={"max_turns_per_episode": 16, "turn_max_tokens": 512},
         data={"n_turns_range": [10, 14]},
     )
@@ -137,13 +137,13 @@ def test_stage1_n_turns_range_within_budget_ok():
 # 单 turn 长度由 ConversationDataset._stats.turn_truncation_rate 在加载期监测。
 
 # ────────────────────────────────────────────────────────────
-# 规则 6: stage1 beat3 长干扰不应阻止 turn_max_tokens=256
+# 规则 6: dialog beat3 长干扰不应阻止 turn_max_tokens=256
 # ────────────────────────────────────────────────────────────
 
-def test_stage1_beat3_min_chars_does_not_block_short_turn_max_tokens():
+def test_dialog_beat3_min_chars_does_not_block_short_turn_max_tokens():
     """beat3 是多 turn flush W,单 turn 长度无关 beat3_min_chars 门槛。"""
     cfg = _stage(
-        "stage1",
+        "dialog",
         training={"max_turns_per_episode": 16, "turn_max_tokens": 256},
         data={"n_turns_range": [10, 14], "beat3_min_chars": 450},
     )
@@ -151,12 +151,12 @@ def test_stage1_beat3_min_chars_does_not_block_short_turn_max_tokens():
 
 
 # ────────────────────────────────────────────────────────────
-# 规则 7: stage0 turn_count_hi > max_turns
+# 规则 7: skeleton turn_count_hi > max_turns
 # ────────────────────────────────────────────────────────────
 
-def test_stage0_turn_count_hi_exceeds_max_turns():
+def test_skeleton_turn_count_hi_exceeds_max_turns():
     cfg = _stage(
-        "stage0",
+        "skeleton",
         training={"max_turns_per_episode": 12, "turn_max_tokens": 256},
         data={"turn_count_hi": 14},
     )
@@ -172,7 +172,7 @@ def test_stage0_turn_count_hi_exceeds_max_turns():
 
 def test_distance_bucket_sum_not_1():
     cfg = _stage(
-        "stage0",
+        "skeleton",
         training={"max_turns_per_episode": 12, "turn_max_tokens": 256},
         data={"distance_bucket": {"near": 0.20, "mid": 0.35, "far": 0.30, "very_far": 0.10}},
     )
@@ -184,7 +184,7 @@ def test_distance_bucket_sum_not_1():
 
 def test_distance_bucket_valid_sum():
     cfg = _stage(
-        "stage0",
+        "skeleton",
         training={"max_turns_per_episode": 12, "turn_max_tokens": 256},
         data={"distance_bucket": {"near": 0.20, "mid": 0.35, "far": 0.30, "very_far": 0.15}},
     )
@@ -197,7 +197,7 @@ def test_distance_bucket_valid_sum():
 
 def test_multiple_errors_aggregated():
     cfg = _stage(
-        "stage0",
+        "skeleton",
         training={},  # 缺 max_turns + turn_max_tokens
         data={"distance_bucket": {"near": 0.5, "mid": 0.4}},  # sum=0.9
     )
@@ -218,7 +218,7 @@ def test_multiple_errors_aggregated():
 # ────────────────────────────────────────────────────────────
 
 def test_no_derive_on_invalid_config():
-    cfg = _stage("stage0", training={"max_turns_per_episode": 12})  # 缺 turn_max_tokens
+    cfg = _stage("skeleton", training={"max_turns_per_episode": 12})  # 缺 turn_max_tokens
     with pytest.raises(ConfigError):
         validate_stage_config("s0", cfg)
     assert "tbptt_turns" not in cfg["training"]

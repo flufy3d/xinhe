@@ -1,19 +1,19 @@
 """
-v8 评估入口 — token-level argmax 准确率，与训练目标完全一致。
+评估入口 — token-level argmax 准确率,与训练目标完全一致。
 
 两种模式:
 
   1. 单文件 / 目录扫描 (灵活探针):
-       python scripts/evaluate.py --checkpoint A1.pt --val data/v8/stage0/val.jsonl
-       python scripts/evaluate.py --checkpoint A1.pt --val-dir data/v8/stage0
+       python scripts/evaluate.py --checkpoint A1.pt --val data/skeleton/val.jsonl
+       python scripts/evaluate.py --checkpoint A1.pt --val-dir data/skeleton
 
   2. Stage joint 模式 (复用训练早停指标):
        python scripts/evaluate.py --checkpoint A1.pt \\
-           --config configs/persona_unified_v8_0.8b_A1.yaml \\
+           --config configs/persona_unified_0.8b_A1.yaml \\
            --stage 0_atomic_skeletons
 
      该模式从 yaml 的 curriculum 中找指定 stage,读其 val_sets,
-     然后调用 xinhe.evaluation.event_eval.eval_joint_v8 — 输出与训练
+     然后调用 xinhe.evaluation.event_eval.eval_joint — 输出与训练
      时 trainer 早停判定完全相同的指标 dict (overall / S{1..11} /
      distance_* / tier_* / substream_*)。
 
@@ -30,7 +30,7 @@ import torch
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
-from xinhe.evaluation.event_eval import eval_event_jsonl, eval_joint_v8
+from xinhe.evaluation.event_eval import eval_event_jsonl, eval_joint
 from xinhe.model.config import XinheConfig
 from xinhe.model.xinhe_model import XinheModel
 
@@ -42,7 +42,7 @@ def load_model_and_tokenizer(config, checkpoint_path, device):
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         if "hippocampus_state" not in checkpoint:
             raise RuntimeError(
-                "checkpoint 缺少 'hippocampus_state' 键。v8 仅兼容 v7+ 格式。"
+                "checkpoint 缺少 'hippocampus_state' 键。仅兼容 v7+ 格式。"
             )
         model.hippocampus.load_state_dict(checkpoint["hippocampus_state"], strict=True)
         from xinhe.model.lora import LoRALinear
@@ -131,7 +131,7 @@ def run_joint_stage(model, tokenizer, config, curriculum, args, device) -> dict:
     if not val_sets:
         raise SystemExit(f"--stage '{args.stage}' 没有 val_sets,无法 joint 评估")
 
-    # 把 stage 的 val_sets / turn_max_tokens 注入 config(eval_joint_v8 消费)
+    # 把 stage 的 val_sets / turn_max_tokens 注入 config(eval_joint 消费)
     stage_training = stage.get("training", {})
     seg_len = args.seg_len or stage_training.get("turn_max_tokens", config.turn_max_tokens)
     config = replace(config, val_sets=val_sets, turn_max_tokens=seg_len)
@@ -140,7 +140,7 @@ def run_joint_stage(model, tokenizer, config, curriculum, args, device) -> dict:
     print(f"  val_sets: {[v.get('name') for v in val_sets]}")
     print(f"  seg_len: {seg_len} | max_episodes: {args.max_episodes}")
 
-    flat = eval_joint_v8(
+    flat = eval_joint(
         model, tokenizer, config,
         device=device, max_episodes=args.max_episodes,
     )
@@ -179,7 +179,7 @@ def run_joint_stage(model, tokenizer, config, curriculum, args, device) -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="心核 v8 事件级评估")
+    parser = argparse.ArgumentParser(description="心核事件级评估")
     parser.add_argument("--checkpoint", required=True, help="ckpt 路径")
     parser.add_argument("--config", default="configs/base.yaml",
                         help="模型/课程配置 yaml(joint 模式必需带 curriculum)")
@@ -218,7 +218,7 @@ def main():
 
     device = torch.device(config.device if torch.cuda.is_available() else "cpu")
 
-    print("=== 心核 v8 评估 ===")
+    print("=== 心核评估 ===")
     print(f"  ckpt: {args.checkpoint}")
     print(f"  config: {args.config}")
     print(f"  device: {device} | max_episodes: {args.max_episodes}")

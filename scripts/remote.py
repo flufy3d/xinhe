@@ -90,7 +90,7 @@ def cmd_deploy(args):
     print("=" * 54)
 
     # 1. 同步代码 + 词典/语料（xinhe/data/dicts/files/*.txt + *.jsonl 随 xinhe 一起带上）。
-    #    训练集 data/v8/ 通过步骤 [4/4] 从 HuggingFace 拉取（见 scripts/download_from_hf.py）。
+    #    训练集 data/{skeleton,dialog,mix}/ 通过步骤 [4/4] 从 HuggingFace 拉取(见 scripts/download_from_hf.py)。
     print("\n[1/4] 同步代码...")
     run(ssh_base(host, port) + [f"mkdir -p {remote_dir}"])
     tar_paths = [

@@ -1,5 +1,5 @@
 """
-v8 原子事件注册表。
+原子事件注册表。
 
 13 个事件: A B C D E F G H I J K L L_partial
 (原 M(stale-miss)已合并入 K(stale-query),陈述句 + 疑问句两种用户句式都在 K 模板池里)

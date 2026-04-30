@@ -1,5 +1,5 @@
 """
-v8 记忆状态机：生成期 / 验证期共享的真值源。
+记忆状态机:生成期 / 验证期共享的真值源。
 
 key 三元组 = (subject, relation, scope)
   subject:  user / xiaolin / project_alpha / ...

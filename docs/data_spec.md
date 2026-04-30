@@ -136,7 +136,7 @@ class Persona:
 
 详见 [curriculum_learning.md](curriculum_learning.md) "Stage 1 的 turn kind 分布"。
 
-### 4.3 DeepSeek 对话语料 (v8)
+### 4.3 DeepSeek 对话语料
 
 `distract_chat` 和 `world_qa` 两种语料统一收纳到 `xinhe/data/dicts/files/*.jsonl`，
 按 SHA1(user) % 10 切到 train/val/test，可直接 `bank.load_pairs(name, split)` 消费。
@@ -245,15 +245,18 @@ xinhe/data/dicts/files/           # 入 git：素材根（小，可复现根）
 ├── world_qa.jsonl                 # 世界知识 QA (Stage 1 1B)
 └── version.json                   # 版本与切分清单
 
-data/v8/                          # 不入 git：训练数据（可重生成）
-├── stage0/
-│   ├── train.jsonl              # 训练集（dict_split=train）
-│   └── val.jsonl                # 验证集（dict_split=val，即 OOD entity）
-└── stage1/
+data/                              # 不入 git:训练数据(可重生成)
+├── skeleton/
+│   ├── train.jsonl              # 训练集(dict_split=train)
+│   └── val.jsonl                # 验证集(dict_split=val,即 OOD entity)
+├── dialog/
+│   ├── train.jsonl
+│   └── val.jsonl
+└── mix/
     ├── train.jsonl
     └── val.jsonl
 ```
 
-v8 起：词典/语料统一在 `xinhe/data/dicts/files/`（入 git，由 `scripts/build_dicts.py` 维护），训练数据在 `data/v8/`（不入 git，由 `scripts/generate_data.py` 按需生成）。
+词典/语料统一在 `xinhe/data/dicts/files/`(入 git,由 `scripts/build_dicts.py` 维护),训练数据在 `data/`(不入 git,由 `scripts/generate_data.py` 按需生成)。
 
 路径通过 `data:` 段配置（见 `configs/persona_unified_0.8b.yaml`）。

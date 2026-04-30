@@ -24,7 +24,7 @@ from xinhe.data.schema import Sample, normalize_train_loss
 from xinhe.data.validator.tier import TierVerdict, classify_tier
 
 if TYPE_CHECKING:
-    from xinhe.data.stage1.beat_planner import BeatPlan
+    from xinhe.data.generators.dialog.beat_planner import BeatPlan
 
 
 class ParseError(ValueError):

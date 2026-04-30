@@ -1,4 +1,4 @@
-"""轮数采样：截断高斯 μ=8 σ=2，clamp [4, 12]。"""
+"""轮数采样:截断高斯 μ=8 σ=2,clamp [4, 12]。"""
 from __future__ import annotations
 
 import random

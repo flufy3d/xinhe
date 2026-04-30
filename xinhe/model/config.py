@@ -1,7 +1,7 @@
 """
-XinheConfig — 心核配置 (v8)
+XinheConfig — 心核配置
 
-v8 Hippocampus:大一统单 W,纯 Delta Rule(无 γ 衰减)。
+Hippocampus:大一统单 W,纯 Delta Rule(无 γ 衰减)。
 """
 from dataclasses import dataclass, field
 from typing import Optional
@@ -23,7 +23,7 @@ class XinheConfig:
     read_scale_init: float = -5.0   # sigmoid(-5) ≈ 0.007，空态几乎无影响
     beta_bias_init: float = 0.0     # sigmoid(0)=0.5，初始 Delta Rule 学习率
 
-    # v8 写 kernel 后端: auto (Linux+FLA → fla, 否则 torch) / fla / torch
+    # 写 kernel 后端: auto (Linux+FLA → fla, 否则 torch) / fla / torch
     delta_backend: str = "auto"
     # 是否冻结 beta_proj.weight（保留 bias 可训，β 回归 per-head 静态先验）
     # 用于防止 β 在 W 空态死锁中被梯度压到 0
@@ -53,7 +53,7 @@ class XinheConfig:
     grad_clip: float = 1.0
     grad_accum_steps: int = 1           # 梯度累积步数 (模拟更大 batch)
     gradient_checkpointing: bool = False  # 用计算换显存 (重算激活值)
-    # v8 外层 per-segment ckpt: 把整个 model.forward(segment, W_in) 包进 checkpoint，
+    # 外层 per-segment ckpt: 把整个 model.forward(segment, W_in) 包进 checkpoint,
     # 跨 N 个 segment BPTT 显存从 N×L_turn 降到 ~1×L_turn（默认开）
     per_segment_checkpoint: bool = True
     resume_from: str = ""               # checkpoint 路径 (为空则不恢复)
@@ -62,10 +62,10 @@ class XinheConfig:
     early_stop_patience: int = 0        # (deprecated) 早停耐心
     early_stop_value: float = 0.995     # 早停 VALUE 阈值 (val breakdown 跨过即切下一 stage)
     early_stop_tell: float = 0.0        # 早停 TELL 阈值（整段 exact-match 率）；0 = 不查 TELL
-    # v8 联合早停: 通用 dict 形式（key 必须与 event_eval 输出指标名一致）
+    # 联合早停: 通用 dict 形式(key 必须与 event_eval 输出指标名一致)
     use_joint_early_stop: bool = False
     early_stop: dict = field(default_factory=dict)
-    # v8 val 集合: list[{"name": str, "path": str}]，由 event_eval.eval_joint_v8 消费
+    # val 集合: list[{"name": str, "path": str}],由 event_eval.eval_joint 消费
     val_sets: list = field(default_factory=list)
     warmup_steps: int = 100
     max_steps: int = 10000

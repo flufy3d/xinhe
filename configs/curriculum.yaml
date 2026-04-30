@@ -1,4 +1,4 @@
-# v8 课程：Stage 0 骨架混合 → Stage 1 5-Beat → Stage 2 联合巩固
+# 课程:skeleton(骨架混合) → dialog(5-Beat) → mix(联合巩固)
 
 training_defaults:
   learning_rate: 3.0e-4
@@ -11,7 +11,7 @@ training_defaults:
 stages:
   - name: "0_atomic_skeletons"
     data:
-      stage_kind: "stage0"
+      kind: "skeleton"
       skeleton_weights:
         S1: 1.0
         S2: 0.6
@@ -28,11 +28,10 @@ stages:
         mid: 0.35
         far: 0.30
         very_far: 0.15
-      n_canonical_range: [1, 3]
       num_train: 100000
       num_val: 1000
       seed: 42
-      out_dir: "data/v8/stage0"
+      out_dir: "data/skeleton"
     training:
       max_turns_per_episode: 12
       turn_max_tokens: 256
@@ -42,18 +41,18 @@ stages:
       warmup_steps: 200
       use_joint_early_stop: true
       early_stop:
-        stage0_val_overall: 0.90
-        stage0_val_S1: 0.95     # 简单单 fact 写读
-        stage0_val_S5: 0.85     # 覆写后 stale-read 对抗
-        stage0_val_S7: 0.85     # 多写 + 部分覆写 + 走神 + 全读(实战最像)
-        stage0_val_S10: 0.85    # 反向删除
-        stage0_val_S11: 0.80    # 多写部分删除(最难)
+        skeleton_val_overall: 0.90
+        skeleton_val_S1: 0.95     # 简单单 fact 写读
+        skeleton_val_S5: 0.85     # 覆写后 stale-read 对抗
+        skeleton_val_S7: 0.85     # 多写 + 部分覆写 + 走神 + 全读(实战最像)
+        skeleton_val_S10: 0.85    # 反向删除
+        skeleton_val_S11: 0.80    # 多写部分删除(最难)
     val_sets:
-      - {name: "stage0_val", path: "data/v8/stage0/val.jsonl"}
+      - {name: "skeleton_val", path: "data/skeleton/val.jsonl"}
 
   - name: "1_5beat_natural"
     data:
-      stage_kind: "stage1"
+      kind: "dialog"
       mix:
         "1A": 1.00
       n_canonical_range: [1, 3]
@@ -66,7 +65,7 @@ stages:
       seed: 43
       workers: 4
       model: "deepseek-v4-flash"
-      out_dir: "data/v8/stage1"
+      out_dir: "data/dialog"
     training:
       freeze_lora: false
       plugin_lr_multiplier: 0.3
@@ -76,24 +75,24 @@ stages:
       warmup_steps: 200
       use_joint_early_stop: true
       early_stop:
-        stage1_val_overall: 0.88
-        stage1_val_substream_1A: 0.90
-        stage1_val_substream_1B: 0.78
-        stage1_val_tier_hard: 0.92
+        dialog_val_overall: 0.88
+        dialog_val_substream_1A: 0.90
+        dialog_val_substream_1B: 0.78
+        dialog_val_tier_hard: 0.92
         # 注: 数据里没有 tier_soft,从未触发,移除避免误导
     val_sets:
-      - {name: "stage1_val", path: "data/v8/stage1/val.jsonl"}
+      - {name: "dialog_val", path: "data/dialog/val.jsonl"}
 
   - name: "2_joint_consolidation"
     data:
-      stage_kind: "stage2"
+      kind: "mix"
       sources:
-        - {path: "data/v8/stage0/train.jsonl", ratio: 0.15, tag: "stage0"}
-        - {path: "data/v8/stage1/train.jsonl", ratio: 0.85, tag: "stage1"}
+        - {path: "data/skeleton/train.jsonl", ratio: 0.15, tag: "skeleton"}
+        - {path: "data/dialog/train.jsonl",   ratio: 0.85, tag: "dialog"}
       num_train: 20000
       num_val: 500
       seed: 44
-      out_dir: "data/v8/stage2"
+      out_dir: "data/mix"
     training:
       freeze_lora: false
       plugin_lr_multiplier: 0.5
@@ -103,8 +102,8 @@ stages:
       warmup_steps: 100
       use_joint_early_stop: true
       early_stop:
-        stage0_val_overall: 0.85
-        stage1_val_overall: 0.85
+        skeleton_val_overall: 0.85
+        dialog_val_overall: 0.85
     val_sets:
-      - {name: "stage0_val", path: "data/v8/stage0/val.jsonl"}
-      - {name: "stage1_val", path: "data/v8/stage1/val.jsonl"}
+      - {name: "skeleton_val", path: "data/skeleton/val.jsonl"}
+      - {name: "dialog_val", path: "data/dialog/val.jsonl"}

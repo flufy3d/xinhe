@@ -40,7 +40,7 @@ def main():
     print(f"目标: {PROJECT_ROOT / args.data_root}")
 
     # local_dir = PROJECT_ROOT, allow_patterns="data/**"
-    # → 远端 data/v8/... 落到本地 data/v8/..., 跟本地原目录一一对齐
+    # → 远端 data/{skeleton,dialog,mix}/... 落到本地同名目录,跟本地原目录一一对齐
     snapshot_download(
         repo_id=args.repo,
         repo_type="dataset",

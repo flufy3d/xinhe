@@ -1,4 +1,4 @@
-"""DataLoader 端到端：v8 schema → 正确的 token weight 分配。"""
+"""DataLoader 端到端:schema → 正确的 token weight 分配。"""
 import json
 from pathlib import Path
 
@@ -85,8 +85,8 @@ def test_tokenize_turn_multi_value_budget(tokenizer):
     assert (torch.isclose(weights, torch.tensor(2.5))).any()
 
 
-def test_dataset_loads_v8_jsonl(tmp_path, tokenizer):
-    """ConversationDataset 应能正确读 v8 schema 多 turn 数据。"""
+def test_dataset_loads_jsonl(tmp_path, tokenizer):
+    """ConversationDataset 应能正确读 schema 多 turn 数据。"""
     sample = {
         "sample_id": "test1",
         "stage": "0",

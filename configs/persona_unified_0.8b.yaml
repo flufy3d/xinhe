@@ -1,7 +1,7 @@
-# Persona unified v8 (0.8B backbone) —— 引用 curriculum_v8.yaml
+# Persona unified (0.8B backbone) —— 引用 curriculum.yaml
 base: qwen3.5-0.8b.yaml
 
-curriculum_file: curriculum_v8.yaml
+curriculum_file: curriculum.yaml
 
 training:
   grad_accum_steps: 1
@@ -9,10 +9,10 @@ training:
 
 stage_overrides:
   default:
-    batch_size: 12
+    batch_size: 14
   0_atomic_skeletons:
     batch_size: 16
   1_5beat_natural:
-    batch_size: 12
+    batch_size: 14
   2_joint_consolidation:
-    batch_size: 12
+    batch_size: 14

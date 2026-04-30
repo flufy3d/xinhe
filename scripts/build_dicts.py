@@ -1,5 +1,5 @@
 """
-词典与语料构建脚本 v8。
+词典与语料构建脚本。
 
 两类素材统一管理：
   * 字符串字典 (.txt)：surnames / cities / foods / ...（12 类）
@@ -342,16 +342,7 @@ def cmd_seed() -> None:
           f"categories={len(manifest['categories'])}, corpora={len(manifest['corpora'])}")
 
 
-def _resolve_sampler(model: str):
-    """按 model 名 dispatch：含 '/' 视为 OpenRouter（minimax/...、google/... 等），否则 DeepSeek。
-
-    返回 (call_with_retry, ErrorClass)，两个 sampler 接口已对齐。
-    """
-    if "/" in model:
-        from xinhe.data.openrouter_sampler import call_with_retry as fn, OpenRouterError as Err
-        return fn, Err
-    from xinhe.data.deepseek_sampler import call_with_retry as fn, DeepSeekError as Err
-    return fn, Err
+from xinhe.data.samplers import resolve as _resolve_sampler
 
 
 def _expand_strings(target: int, model: str) -> None:

@@ -108,7 +108,7 @@ scripts/
   train.py                        # 训练入口
   chat.py                         # 交互式聊天
   chat_smoke.py                   # 批量人工验收脚本
-  generate_data.py                # v8 数据分发（Stage 0 / Stage 1）
+  generate_data.py                # 数据生成 dispatcher (skeleton / dialog / mix)
   build_dicts.py                  # 词典 + 对话语料 (DeepSeek 扩充)
   evaluate.py                     # event_eval 多维聚合评估
   eval_value_breakdown.py         # VALUE/FRAME/TELL 分解评估
@@ -143,8 +143,8 @@ python scripts/build_dicts.py --seed
 # 3. expand 用 DeepSeek 扩充到 1000+ 实体 / 5000+ 对话（off-peak 约 ¥10-15）
 python scripts/build_dicts.py --expand --target 1000 --target-pairs 5000
 
-# 4. 生成 Stage 0 + Stage 1 训练 / val 集（按 yaml 配置）
-python scripts/generate_data.py --config configs/persona_unified_v8_0.8b.yaml --all
+# 4. 生成 skeleton + dialog + mix 训练 / val 集(按 yaml 配置)
+python scripts/generate_data.py --config configs/persona_unified_0.8b.yaml --all
 ```
 
 ### 训练

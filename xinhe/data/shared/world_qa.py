@@ -1,10 +1,10 @@
-"""Stage 1 world_qa 工具：
+"""world_qa 工具:
 
-- wrap_world_qa_episodes: 老 1B 独立流（已废弃但保留供 caller fallback）
-- sample_world_qa_pairs: v7+ 新接口，抽 K 个 (user, assistant) pair 给 1A driver 当
-  warmup 闲聊插入到 Beat 1 之前，用于打散 fact 位置偏置 + 利用 max_turns_per_episode 余量。
+- wrap_world_qa_episodes: 老 1B 独立流(已废弃但保留供 caller fallback)
+- sample_world_qa_pairs: v7+ 接口,抽 K 个 (user, assistant) pair 给 dialog driver 当
+  warmup 闲聊插入到 Beat 1 之前,用于打散 fact 位置偏置 + 利用 max_turns_per_episode 余量。
 
-按 dict_split 切分（与字符串字典共享 SHA1 切分逻辑）。
+按 dict_split 切分(与字符串字典共享 SHA1 切分逻辑)。
 """
 from __future__ import annotations
 
@@ -40,9 +40,9 @@ def wrap_world_qa_episodes(
     rng: random.Random,
     dict_split: str = "train",
 ) -> Iterator[Sample]:
-    """从 world_qa 语料抽样 n_samples 条，每条包成 1-turn episode。
+    """从 world_qa 语料抽样 n_samples 条,每条包成 1-turn episode。
 
-    若语料缺失或为空（PairBank 抛异常），生成 0 条（caller 自己 fallback）。
+    若语料缺失或为空(PairBank 抛异常),生成 0 条(caller 自己 fallback)。
     """
     try:
         pb = load_pairs("world_qa", split=dict_split)

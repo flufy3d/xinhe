@@ -46,7 +46,7 @@ def load_tokenizer(config: XinheConfig):
 
 
 def print_stats(model: XinheModel, state: torch.Tensor):
-    """打印 Hippocampus 状态分析 (v8: 单 W,纯 Delta Rule)"""
+    """打印 Hippocampus 状态分析 (单 W,纯 Delta Rule)"""
     stats = model.state_stats(state)
     print(f"\n{'='*50}")
     print(f"  Hippocampus 状态分析 (W: {tuple(state.shape)})")

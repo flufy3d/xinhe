@@ -14,7 +14,7 @@
   v6 dual stream (W_fact + W_turn): phase 搜索失败（见 failure_postmortem.md）
   v7 Hippocampus (2026-04-24): 单一 W + per-head γ + content-driven time_shift
     后续实测 γ 训练不稳定 + FLA backward 在 bf16 误差 5–25%, 删除 γ 全部代码
-  v8 Hippocampus (2026-04-29, 当前活跃):
+  Hippocampus 当前架构 (2026-04-29, 当前活跃):
     单一 W + 纯 Delta Rule (无 γ 衰减), L2 归一 k 自然实现槽位覆写
     训练强制 torch backend, 推理 auto→FLA (forward 误差 < 0.5%)
     Phase 2 规划: Neocortex (Memory MLP 全秩并联) 长期固化
@@ -108,8 +108,8 @@
 
 ### 中期：长期记忆固化（Neocortex + Sleep）
 
-**4. 实现 Neocortex 长期记忆层(Phase 2,v8 架构的未来扩展)**
-- **生物类比**:v8 的 Hippocampus(单 W 张量)是**短期工作记忆**(海马体 / 单次对话内动态演化)。Neocortex(Memory MLP 全秩并联)是**长期记忆**(皮层 / 跨 session 权重级固化)
+**4. 实现 Neocortex 长期记忆层(Phase 2,当前架构的未来扩展)**
+- **生物类比**:当前 Hippocampus(单 W 张量)是**短期工作记忆**(海马体 / 单次对话内动态演化)。Neocortex(Memory MLP 全秩并联)是**长期记忆**(皮层 / 跨 session 权重级固化)
 - **架构**:Neocortex = per-layer 全秩并联 SwiGLU(在 Base MLP 旁,参数完全独立),不是 LoRA 低秩扰动
 - **Sleep 机制**:冻结 Hippocampus 和 Attention LoRA,开 Memory MLP,Teacher 重建白天 W 轨迹,Student 强制 W 读为 0,靠 Memory MLP 自身复现 Teacher 通路 → 蒸馏 KL + 隐藏态 MSE
 - **Replay 采样策略**:70% 当日窗口 + 30% 历史窗口(reservoir sampling)

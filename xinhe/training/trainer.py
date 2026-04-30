@@ -320,9 +320,9 @@ class Trainer:
                 self.model.train()
                 return
 
-            # 联合早停 (v8): 通用循环，从 config.early_stop dict 或 early_stop_<key> 字段读阈值
-            from xinhe.evaluation.event_eval import eval_joint_v8
-            joint = eval_joint_v8(
+            # 联合早停: 通用循环,从 config.early_stop dict 或 early_stop_<key> 字段读阈值
+            from xinhe.evaluation.event_eval import eval_joint
+            joint = eval_joint(
                 self.model, tokenizer, self.config, device=self.device,
                 max_episodes=50,
             )

@@ -5,7 +5,7 @@ import json
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from xinhe.data.stage1.beat_planner import BeatPlan
+    from xinhe.data.generators.dialog.beat_planner import BeatPlan
 
 
 SYSTEM_PROMPT = """你是对话剧本生成器。你将生成一段自然的中文 user / assistant 多轮对话,**总轮数严格 = {n_turns} 对 user/assistant 配对**(不是 5 对!)。

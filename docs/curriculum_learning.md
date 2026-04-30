@@ -8,41 +8,41 @@
 
 ---
 
-## 当前课程:v8 三阶段
+## 当前课程:三阶段
 
-`configs/curriculum_v8.yaml` 定义所有 stages,`configs/persona_unified_v8_0.8b.yaml`(0.8b)和 `_4b.yaml`(4b)引用它 + 加 backbone-specific 的 batch overrides。
+`configs/curriculum.yaml` 定义所有 stages,`configs/persona_unified_0.8b.yaml`(0.8b)和 `_4b.yaml`(4b)引用它 + 加 backbone-specific 的 batch overrides。
 
 ```
-Stage 0: 0_atomic_skeletons
-  数据: stage0 generator 按 11 个骨架(S1–S11)加权混合,distance bucket 控远近
+Stage 0: 0_atomic_skeletons (kind=skeleton)
+  数据: skeleton generator 按 11 个骨架(S1–S11)加权混合,distance bucket 控远近
         S1=1.0 简单写读, S5=1.0 stale-read, S7=1.0 多写+部分覆写+走神, S10=0.8 反向删除, ...
   训练: max_turns=12, max_steps=6000, freeze_lora=false, plugin_lr_mult=1.0
-        多指标早停(stage0_val_overall ≥ 0.90, S1 ≥ 0.95, S5/S7/S10 ≥ 0.85, S11 ≥ 0.80)
+        多指标早停(skeleton_val_overall ≥ 0.90, S1 ≥ 0.95, S5/S7/S10 ≥ 0.85, S11 ≥ 0.80)
   目标: Hippocampus 的 k_proj/v_proj/q_projs/o_projs/beta_proj 学会 Delta Rule 读写,
         LoRA 学会和 Hippocampus 协同(不抄写到 backbone 自己记)
 
     ↓ 骨架级读写已通
 
-Stage 1: 1_5beat_natural
-  数据: stage1 generator (DeepSeek 采样) 5-beat 自然长对话,10–14 turn,1A 子流
+Stage 1: 1_5beat_natural (kind=dialog)
+  数据: dialog generator (DeepSeek 采样) 5-beat 自然长对话,10–14 turn,1A 子流
   训练: max_turns=16, max_steps=10000, plugin_lr_mult=0.3
-        早停: stage1_val_overall ≥ 0.88, substream_1A ≥ 0.90, tier_hard ≥ 0.92
+        早停: dialog_val_overall ≥ 0.88, substream_1A ≥ 0.90, tier_hard ≥ 0.92
   目标: 跨 turn retention,自然语言中的 reveal/recall/refusal/overwrite 综合达标
 
     ↓ 自然分布已学会
 
-Stage 2: 2_joint_consolidation
-  数据: stage0+stage1 混采(15% : 85%) 联合巩固
+Stage 2: 2_joint_consolidation (kind=mix)
+  数据: skeleton+dialog 混采(15% : 85%) 联合巩固
   训练: max_turns=16, max_steps=4000, plugin_lr_mult=0.5
-        早停: stage0_val_overall ≥ 0.85 AND stage1_val_overall ≥ 0.85
-  目标: 防止 stage 1 训完后 stage 0 骨架能力退化,全面巩固
+        早停: skeleton_val_overall ≥ 0.85 AND dialog_val_overall ≥ 0.85
+  目标: 防止 dialog 训完后 skeleton 骨架能力退化,全面巩固
 ```
 
 ---
 
 ## Warmup baseline (debug 用)
 
-`configs/persona_unified_v8_0.8b_warmup.yaml` + `curriculum_v8_warmup_only.yaml` 是快速 debug baseline:
+`configs/persona_unified_0.8b_warmup.yaml` + `curriculum_warmup_only.yaml` 是快速 debug baseline:
 
 ```
 Stage: 0_warmup_name
@@ -149,16 +149,16 @@ step 8000: 96   (突破 plugin 训练死点)
 
 | 目标 | 命令 |
 |---|---|
-| 0.8b 端到端 | `uv run python scripts/train.py --config configs/persona_unified_v8_0.8b.yaml` |
-| 4b 端到端 | `uv run python scripts/train.py --config configs/persona_unified_v8_4b.yaml` |
-| Warmup baseline (debug) | `uv run python scripts/train.py --config configs/persona_unified_v8_0.8b_warmup.yaml` |
+| 0.8b 端到端 | `uv run python scripts/train.py --config configs/persona_unified_0.8b.yaml` |
+| 4b 端到端 | `uv run python scripts/train.py --config configs/persona_unified_4b.yaml` |
+| Warmup baseline (debug) | `uv run python scripts/train.py --config configs/persona_unified_0.8b_warmup.yaml` |
 | 只跑 stage 0 | 同上 + `--from-stage 0_atomic_skeletons` |
 | 从 stage 1 开始 | 同上 + `--from-stage 1_5beat_natural` |
 | 从 stage 2 开始 | 同上 + `--from-stage 2_joint_consolidation` |
 
 `train.py` 的 auto-skip 逻辑会自动跳过 `checkpoints/curriculum/{stage_name}.pt` 已存在的 stage。要重跑,删掉 ckpt 或用 `--from-stage`。
 
-数据生成走 cache check:`data/v8/{stage0,stage1,stage2,warmup}/` 下 train.jsonl + val.jsonl 存在且条数够,就跳过生成。`--force` 强制重生成,或直接 rm。
+数据生成走 cache check:`data/{skeleton,dialog,mix,warmup}/` 下 train.jsonl + val.jsonl 存在且条数够,就跳过生成。`--force` 强制重生成,或直接 rm。
 
 ---
 

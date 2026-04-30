@@ -1,11 +1,11 @@
-"""Stage0 generator world_qa warmup 注入单测。"""
+"""Skeleton generator world_qa warmup 注入单测。"""
 from __future__ import annotations
 
 import random
 
 import pytest
 
-from xinhe.data.stage0.runner import generate_stage0_episode
+from xinhe.data.generators.skeleton.runner import generate_stage0_episode
 from xinhe.data.warmup import inject_world_qa_warmup
 from xinhe.data.schema import Sample
 

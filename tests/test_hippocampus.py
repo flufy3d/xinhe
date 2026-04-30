@@ -137,7 +137,7 @@ def test_decoupled_dims():
 
 
 def test_state_stats(interface):
-    """get_state_stats 返回 v8 字段(γ 已删)"""
+    """get_state_stats 返回新字段(γ 已删)"""
     W = interface.blank_state(1)
     stats = interface.get_state_stats(W)
     assert "read_scale" in stats
@@ -201,7 +201,7 @@ def test_write_then_read_end_to_end():
 
 
 def test_param_count_budget():
-    """v8 Hippocampus 参数量(γ 已删)"""
+    """Hippocampus 参数量(γ 已删)"""
     iface = Hippocampus(
         hidden_size=1024, n_heads=16, head_dim=64, n_layers=6,
     )

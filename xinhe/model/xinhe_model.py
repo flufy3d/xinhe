@@ -189,7 +189,7 @@ class XinheModel(nn.Module):
                 flat_logits = shift_logits.view(-1, shift_logits.size(-1))
                 flat_labels = shift_labels.view(-1)
                 if weights is not None:
-                    # Per-token weighted loss (v8):
+                    # Per-token weighted loss:
                     #   - VALUE token weight = sample.weight_per_span（Stage0 hard 默认 5.0,Stage1 hard=3.0,soft=1.5）
                     #   - lm_only segment weight = 0.3（保 backbone 流畅但抑制 W 写入）
                     #   - false segment weight = 0（labels 全 -100,不参与梯度）

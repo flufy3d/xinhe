@@ -1,6 +1,6 @@
 # Warmup 实验:S_simple(2-turn write+read) + force_relation=self_name + 姓+名合成
 # 用作快速 debug baseline,1000 步内拿到 chat 5/5。
-# 数据由 stage0.runner 自动生成到 data/v8/warmup/(初次跑会触发,之后命中缓存)。
+# 数据由 SkeletonGenerator 自动生成到 data/warmup/(初次跑会触发,之后命中缓存)。
 
 training_defaults:
   learning_rate: 5.0e-4
@@ -13,14 +13,14 @@ training_defaults:
 stages:
   - name: "0_warmup_name"
     data:
-      stage_kind: "stage0"
+      kind: "skeleton"
       skeleton_weights:
         S_simple: 1.0       # 只采 S_simple(默认 weight=0,这里显式拉满)
       force_relation: "self_name"   # 强制 self_name 关系,姓+名合成
       num_train: 10000
       num_val: 200
       seed: 42
-      out_dir: "data/v8/warmup"
+      out_dir: "data/warmup"
     training:
       max_turns_per_episode: 2
       turn_max_tokens: 128
@@ -30,4 +30,4 @@ stages:
       warmup_steps: 100
       use_joint_early_stop: false
     val_sets:
-      - {name: "warmup_val", path: "data/v8/warmup/val.jsonl"}
+      - {name: "warmup_val", path: "data/warmup/val.jsonl"}

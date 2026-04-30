@@ -1,4 +1,4 @@
-"""v8 验证器：四元一致性 + memory_state 重放 + Hard/Soft/Reject + Beat 3 纯洁性。"""
+"""验证器:四元一致性 + memory_state 重放 + Hard/Soft/Reject + Beat 3 纯洁性。"""
 from xinhe.data.validator.api import (
     ValidationResult,
     validate,

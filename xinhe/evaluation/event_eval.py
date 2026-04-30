@@ -1,7 +1,7 @@
 """
-v8 事件级评估。
+事件级评估。
 
-输入：v8 schema JSONL 验证集（带 skeleton_id / distance_bucket / value_tier / substream）。
+输入:JSONL 验证集(带 skeleton_id / distance_bucket / value_tier / substream)。
 输出：按多维度聚合的 token-level argmax 准确率字典。
 
 判定规则：
@@ -241,7 +241,7 @@ def eval_event_jsonl(
     }
 
 
-def eval_joint_v8(
+def eval_joint(
     model,
     tokenizer,
     config,
@@ -293,8 +293,8 @@ def eval_joint_v8(
 def _default_val_sets() -> list[dict]:
     """val_sets 缺失时的 fallback 默认。"""
     candidates = [
-        ("stage0_val", "data/v8/stage0/val.jsonl"),
-        ("stage1_val", "data/v8/stage1/val.jsonl"),
+        ("skeleton_val", "data/skeleton/val.jsonl"),
+        ("dialog_val", "data/dialog/val.jsonl"),
     ]
     out = []
     for name, path in candidates:

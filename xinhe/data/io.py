@@ -1,5 +1,5 @@
 """
-v8 数据 IO：JSONL 读写 + 写盘前 schema 校验。
+数据 IO:JSONL 读写 + 写盘前 schema 校验。
 
 替代旧 samplers.episode_to_jsonl（保留语义但统一从 Sample dataclass 走）。
 """
