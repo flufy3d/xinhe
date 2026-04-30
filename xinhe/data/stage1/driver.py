@@ -93,7 +93,7 @@ def _supports_conditional_retry(model: str) -> bool:
       - openrouter (含 /,主流 provider 都支持 multi-turn,免费 provider 也能用,只是不享 cache)
     不支持:codex-cli / gemini-cli (subprocess 单次调用,不方便追加上下文)。"""
     head = model.split(":", 1)[0].lower()
-    if head in ("codex-cli", "codex", "gemini-cli", "gemini"):
+    if head in ("codex-cli", "codex", "gemini-cli", "gemini", "claude-cli", "claude"):
         return False
     return True
 
@@ -192,10 +192,11 @@ def _build_fix_message(reason: str, plan) -> str:
 
 
 def _resolve_sampler(model: str):
-    """按 model 名 dispatch,返回 (call_with_retry, ApiError),四家 sampler 接口已对齐。
+    """按 model 名 dispatch,返回 (call_with_retry, ApiError),五家 sampler 接口已对齐。
 
       codex-cli[:backing]  → codex_cli_sampler   (subprocess, ChatGPT Plus 配额)
       gemini-cli[:backing] → gemini_cli_sampler  (subprocess, Google 账号配额)
+      claude-cli[:backing] → claude_cli_sampler  (subprocess, Claude Code 订阅配额)
       含 "/"               → openrouter_sampler  (HTTP, minimax/google/qwen 等)
       其他                  → deepseek_sampler    (HTTP, deepseek-v4-flash 等)
     """
@@ -205,6 +206,9 @@ def _resolve_sampler(model: str):
         return fn, Err
     if head in ("gemini-cli", "gemini"):
         from xinhe.data.gemini_cli_sampler import call_with_retry as fn, GeminiCliError as Err
+        return fn, Err
+    if head in ("claude-cli", "claude"):
+        from xinhe.data.claude_cli_sampler import call_with_retry as fn, ClaudeCliError as Err
         return fn, Err
     if "/" in model:
         from xinhe.data.openrouter_sampler import call_with_retry as fn, OpenRouterError as Err
