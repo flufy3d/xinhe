@@ -112,7 +112,7 @@ def call_with_retry(
     top_p: float = 0.92,          # ignored
     max_tokens: int = 12000,      # ignored
     json_mode: bool = True,       # 永远走 --json-schema
-    timeout: int = 600,           # 5-Beat 长输出 + schema 校验 ~200-300s,留 2x 余量
+    timeout: int = 900,           # 5-Beat 长输出 + schema 校验 实测中位数 ~400s, 长尾到 520s+, 留 ~70% 余量
     max_budget_usd: float = 5.0,  # 单次调用上限,防失控
     **_ignore,
 ) -> dict:
