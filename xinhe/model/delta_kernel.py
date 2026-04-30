@@ -79,6 +79,16 @@ def delta_rule_write(
     return Hippocampus._delta_parallel(W, k, v, beta)
 
 
+def suppress_log(backend: str) -> None:
+    """标记 backend 已 logged,后续首次调用不再打印。
+
+    用途:trainer 在 __init__ 时调用 suppress_log("fla"),抑制训练进程里
+    验证段的 `[delta_kernel] backend=fla` 噪音。独立运行 evaluate.py /
+    chat.py / visualize_state.py 等脚本不调用本函数,首次写时正常打印。
+    """
+    _LOGGED_BACKENDS.add(backend)
+
+
 def _fla_write(
     W: torch.Tensor,
     k: torch.Tensor,

@@ -24,6 +24,11 @@ except Exception:
 from ..model.xinhe_model import XinheModel
 from ..model.config import XinheConfig
 from ..model.lora import get_lora_params
+from ..model.delta_kernel import suppress_log as _suppress_delta_log
+
+# 训练进程内静默验证段的 fla 后端 log:训练首次写时仍会打印 backend=torch,
+# 验证段第一次切到 fla 不再噪音。独立运行 evaluate/chat/visualize 脚本不受影响。
+_suppress_delta_log("fla")
 
 
 class Trainer:
