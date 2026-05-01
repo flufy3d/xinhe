@@ -38,7 +38,8 @@ def run_stage(stage_cfg: dict, *,
               model: str | None = None,
               out_suffix: str = "",
               seed_offset: int = 0,
-              workers: int | None = None) -> None:
+              workers: int | None = None,
+              novel_path: str | None = None) -> None:
     name = stage_cfg.get("name", "?")
     validate_stage_config(name, stage_cfg)
 
@@ -65,6 +66,13 @@ def run_stage(stage_cfg: dict, *,
                 gen_cfg["model"] = model
             if workers is not None:
                 gen_cfg["workers"] = workers
+        if kind == "novel":
+            if not novel_path:
+                raise ValueError(
+                    f"stage {name!r}: kind=novel 需要从 CLI 传入 --novel-path /path/to/novel.txt "
+                    "(配置文件不持久化路径)"
+                )
+            gen_cfg["novel_path"] = novel_path
 
         gen = GENERATORS[kind](**gen_cfg)
 
@@ -72,7 +80,10 @@ def run_stage(stage_cfg: dict, *,
             n = (n_train if split == "train" else n_val)
             if n is None:
                 n = (num_train_yaml if split == "train" else num_val_yaml)
-            if n <= 0:
+            # n == -1 是 escape 信号: generator 自决数量(novel coverage 自适应)
+            if n == -1:
+                pass
+            elif n <= 0:
                 continue
             suffix = out_suffix if (split == "train" and kind == "dialog") else ""
             seed = seed_base + (0 if split == "train" else 1) \
@@ -130,6 +141,8 @@ def main():
                         help="seed 偏移(避免副 driver 与主 driver 撞种),eg 1000。")
     parser.add_argument("--workers", type=int, default=None,
                         help="覆写 yaml 里 workers(仅 dialog 生效)。OR 限流时一键降并发。")
+    parser.add_argument("--novel-path", type=str, default=None,
+                        help="小说 txt 路径(仅 kind=novel 生效)。配置文件不持久化此路径。")
     args = parser.parse_args()
 
     from xinhe.model.config import XinheConfig
@@ -162,6 +175,7 @@ def main():
             out_suffix=args.out_suffix,
             seed_offset=args.seed_offset,
             workers=args.workers,
+            novel_path=args.novel_path,
         )
 
 

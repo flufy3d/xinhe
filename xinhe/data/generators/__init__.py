@@ -8,10 +8,12 @@ from __future__ import annotations
 from xinhe.data.generators.base import Generator, GenerateRequest
 from xinhe.data.generators.skeleton.generator import SkeletonGenerator
 from xinhe.data.generators.dialog.generator import DialogGenerator
+from xinhe.data.generators.novel.generator import NovelGenerator
 
 GENERATORS: dict[str, type[Generator]] = {
     "skeleton": SkeletonGenerator,
     "dialog": DialogGenerator,
+    "novel": NovelGenerator,
 }
 
 __all__ = ["GENERATORS", "Generator", "GenerateRequest"]

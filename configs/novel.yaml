@@ -1,0 +1,17 @@
+# Novel-recall 实验:基于真实小说训 W 的长程上下文携带能力
+# 用法:
+#   生成数据: python scripts/generate_data.py --config configs/novel.yaml --stage novel_only
+#   训练:    python scripts/train.py        --config configs/novel.yaml
+#
+# 与主 curriculum (skeleton/dialog/mix) 解耦,独立验证用。
+base: qwen3.5-0.8b.yaml
+
+curriculum_file: curriculum_novel.yaml
+
+training:
+  grad_accum_steps: 1
+  dtype: bfloat16
+
+stage_overrides:
+  default:
+    batch_size: 14

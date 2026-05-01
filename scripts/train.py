@@ -131,12 +131,30 @@ def generate_stage_data(stage: dict, stage_name: str) -> tuple[str, str]:
     """通过 generate_data.run_stage 调用对应 kind 的 generator/mix。
 
     Returns: (train_path, val_path) — 由 stage.data.out_dir 推导。
+
+    特例:kind=novel 不在训练时触发生成(novel_path 必须从 CLI 传给
+    generate_data.py)。仅检查文件存在,缺失打 hint 后 sys.exit。
     """
-    from scripts.generate_data import run_stage as _run_stage
-    _run_stage(stage, force=False)
     kind = stage["data"].get("kind", "skeleton")
     out_dir = Path(stage["data"].get("out_dir", f"data/{kind}"))
-    return str(out_dir / "train.jsonl"), str(out_dir / "val.jsonl")
+    train_path = out_dir / "train.jsonl"
+    val_path = out_dir / "val.jsonl"
+
+    if kind == "novel":
+        missing = [p for p in (train_path, val_path) if not p.exists()]
+        if missing:
+            print(
+                f"\n[novel] 数据未生成: {[str(p) for p in missing]}\n"
+                f"  训练入口不会自动生成 novel 数据 (path 只能从 CLI 传)。请先运行:\n"
+                f"    python scripts/generate_data.py --config <novel-config.yaml> "
+                f"--stage {stage_name} --novel-path /path/to/novel.txt\n"
+            )
+            sys.exit(1)
+        return str(train_path), str(val_path)
+
+    from scripts.generate_data import run_stage as _run_stage
+    _run_stage(stage, force=False)
+    return str(train_path), str(val_path)
 
 
 def train_single(config, args):
