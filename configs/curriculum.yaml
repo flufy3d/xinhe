@@ -37,7 +37,7 @@ stages:
       turn_max_tokens: 256
       freeze_lora: false
       plugin_lr_multiplier: 1.0
-      max_steps: 6000
+      max_steps: 3500
       warmup_steps: 200
       use_joint_early_stop: true
       early_stop:
@@ -61,7 +61,7 @@ stages:
       beat3_min_chars: 450
       beat3_chars_tolerance: 0.56
       num_train: 30000
-      num_val: 500
+      num_val: 50
       seed: 43
       workers: 4
       model: "deepseek-v4-flash"
@@ -71,7 +71,7 @@ stages:
       plugin_lr_multiplier: 0.3
       max_turns_per_episode: 16
       turn_max_tokens: 256
-      max_steps: 10000
+      max_steps: 4000
       warmup_steps: 200
       use_joint_early_stop: true
       early_stop:
@@ -90,7 +90,7 @@ stages:
         - {path: "data/skeleton/train.jsonl", ratio: 0.15, tag: "skeleton"}
         - {path: "data/dialog/train.jsonl",   ratio: 0.85, tag: "dialog"}
       num_train: 20000
-      num_val: 500
+      num_val: 50
       seed: 44
       out_dir: "data/mix"
     training:

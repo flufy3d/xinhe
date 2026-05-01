@@ -6,11 +6,20 @@ HuggingFace 数据集仓库 → 本地 data/ 的幂等下载工具。
     uv run python scripts/download_from_hf.py             # 拉全部 data/**
     uv run python scripts/download_from_hf.py --repo X    # 换仓库
     uv run python scripts/download_from_hf.py --clean-stale  # 顺便删本地多余 jsonl
+    # 应急: list endpoint 看不到新文件(mirror git-tree 滞后),但 resolve-cache
+    # 已同步;直接走 URL 拉,跳过 list_repo_files。
+    uv run python scripts/download_from_hf.py --resolve-paths \\
+        data/novel/train.jsonl data/novel/val.jsonl
 
 环境变量:
     HF_ENDPOINT (可选): 国内服务器 export HF_ENDPOINT=https://hf-mirror.com
-                       本地通常不设, snapshot_download 自动读取此变量。
-                       注意:hf-mirror 同步主站有延迟,新上传的文件可能要等几分钟。
+                       默认走主站 https://huggingface.co
+                       仅影响"下载"(snapshot_download / 兜底 URL),不影响 list。
+    HF_LIST_ENDPOINT (可选): list_repo_files 用此端点。
+                       默认硬写 https://huggingface.co —— mirror 的 git-tree
+                       同步主站有滞后(几分钟到小时级),会让 list 漏掉新 commit
+                       的文件,导致新加的 jsonl 永远不会被识别为"该下载"。
+                       list API 流量极小,走主站对国内服务器无负担。
 
 幂等性:
     snapshot_download 默认按 hash 增量, 已存在且未变的文件跳过。
@@ -39,16 +48,42 @@ def main():
                         help="本地数据目录(项目相对路径,默认 data)")
     parser.add_argument("--clean-stale", action="store_true",
                         help="删除本地 data_root 下、远端不存在的 jsonl(默认仅警告)")
+    parser.add_argument("--resolve-paths", nargs="+", default=None, metavar="PATH",
+                        help="指定路径直接走 resolve URL 下载,跳过 list_repo_files。"
+                             "应急用:hf-mirror git-tree 滞后但 resolve-cache 已同步、"
+                             "或远端拿不到 list 端点时。例: --resolve-paths "
+                             "data/novel/train.jsonl data/novel/val.jsonl")
     args = parser.parse_args()
 
     endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co")
+
+    # 应急路径:跳过 list_repo_files,直接走 resolve URL 拉指定文件
+    if args.resolve_paths:
+        paths = sorted(set(p.replace("\\", "/") for p in args.resolve_paths))
+        print(f"仓库:        {args.repo}")
+        print(f"端点(下载):  {endpoint}")
+        print(f"模式:        --resolve-paths (跳过 list_repo_files)")
+        print(f"\n直接拉 {len(paths)} 个文件:")
+        recovered = _resolve_url_fallback(paths, args.repo, endpoint)
+        still_missing = [p for p in paths if p not in recovered]
+        if still_missing:
+            print(f"\n✗ 失败 {len(still_missing)} 个:")
+            for p in still_missing:
+                print(f"  {p}")
+            sys.exit(2)
+        print("\n下载完成。")
+        return
+    # list 永远走主站(或 HF_LIST_ENDPOINT 显式覆盖):mirror 的 git-tree 同步滞后
+    # 会让新 commit 的文件被错过,导致 missing 兜底也跳不到(因为 list 里就没有)。
+    list_endpoint = os.environ.get("HF_LIST_ENDPOINT", "https://huggingface.co")
     data_root_rel = args.data_root.replace("\\", "/").rstrip("/")
     data_root = (PROJECT_ROOT / data_root_rel).resolve()
-    print(f"仓库:   {args.repo}")
-    print(f"端点:   {endpoint}")
-    print(f"目标:   {data_root}")
+    print(f"仓库:        {args.repo}")
+    print(f"端点(list):  {list_endpoint}")
+    print(f"端点(下载):  {endpoint}")
+    print(f"目标:        {data_root}")
 
-    api = HfApi(endpoint=endpoint)
+    api = HfApi(endpoint=list_endpoint)
     remote_all = api.list_repo_files(repo_id=args.repo, repo_type="dataset")
     remote_data = sorted(
         f for f in remote_all
@@ -122,14 +157,19 @@ def main():
 
 def _resolve_url_fallback(missing: list[str], repo: str, endpoint: str) -> list[str]:
     """对 snapshot_download 漏拉的文件,走 {endpoint}/datasets/{repo}/resolve/main/<path>
-    直接 HTTP 下载。返回成功下载的路径列表。"""
+    直接 HTTP 下载。返回成功下载的路径列表。
+
+    带 Mozilla UA: hf-mirror 的 /api/resolve-cache 重定向对默认 Python-urllib UA 返 403。
+    """
+    headers = {"User-Agent": "Mozilla/5.0"}
     recovered = []
     for path in missing:
         url = f"{endpoint}/datasets/{repo}/resolve/main/{path}"
         out = PROJECT_ROOT / path
         out.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with urllib.request.urlopen(url, timeout=60) as resp, open(out, "wb") as fp:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=60) as resp, open(out, "wb") as fp:
                 downloaded = 0
                 while True:
                     chunk = resp.read(1 << 20)    # 1 MB

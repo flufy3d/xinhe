@@ -22,6 +22,12 @@ lora:
   dropout: 0.0
   target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
 
+# 注意力层 ["q_proj", "k_proj", "v_proj", "o_proj"]
+# 线性注意力层 ["in_proj_qkv", "in_proj_a", "in_proj_b", "in_proj_z", "out_proj"]
+# MLP层 ["gate_proj", "up_proj", "down_proj"]
+
+
+
 # turn_max_tokens / max_turns_per_episode / tbptt_turns 必须 per-stage 显式给
 training:
   batch_size: 1
