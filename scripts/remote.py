@@ -151,15 +151,21 @@ export PATH="/usr/local/cuda/bin:/opt/conda/bin:$HOME/.local/bin:$PATH"
 export CUDA_HOME="/usr/local/cuda"
 export UV_CACHE_DIR="/root/shared-storage/.uv-cache"
 export HF_ENDPOINT="https://hf-mirror.com"
+# pypi 默认 index 走清华镜像：国内机直连 pypi.org 经常 connect timeout，
+# 表现为 uv pip install 卡几分钟后报 "Failed to fetch ... operation timed out"。
+# torch 仍走 pyproject.toml 里的 [[tool.uv.index]] pytorch-cu130（explicit=true 不受默认覆盖）。
+export UV_DEFAULT_INDEX="https://pypi.tuna.tsinghua.edu.cn/simple"
 # 持久化环境变量到 bashrc (SSH 登录也生效)
 grep -q UV_CACHE_DIR ~/.bashrc 2>/dev/null || cat >> ~/.bashrc << 'ENVEOF'
 export PATH="/usr/local/cuda/bin:$PATH"
 export CUDA_HOME="/usr/local/cuda"
 export UV_CACHE_DIR="/root/shared-storage/.uv-cache"
 export HF_ENDPOINT="https://hf-mirror.com"
+export UV_DEFAULT_INDEX="https://pypi.tuna.tsinghua.edu.cn/simple"
 ENVEOF
 # 已有 bashrc 块但缺 HF_ENDPOINT 时补一行（兼容旧机器）
 grep -q HF_ENDPOINT ~/.bashrc 2>/dev/null || echo 'export HF_ENDPOINT="https://hf-mirror.com"' >> ~/.bashrc
+grep -q UV_DEFAULT_INDEX ~/.bashrc 2>/dev/null || echo 'export UV_DEFAULT_INDEX="https://pypi.tuna.tsinghua.edu.cn/simple"' >> ~/.bashrc
 if command -v uv >/dev/null 2>&1; then
   echo '  uv 已安装，跳过'
 else
@@ -168,22 +174,34 @@ else
   export PATH="$HOME/.local/bin:$PATH"
 fi
 echo '  uv sync...'
-uv sync
+# --inexact: 不删除 venv 里 lockfile 之外的包，否则下面 uv pip 装的 causal-conv1d
+# 每次 deploy 都被清掉 → 重编 30+ 分钟，破坏幂等性。
+uv sync --inexact
 # causal-conv1d 需要 --no-build-isolation 用 venv 的 torch 编译
 if ! uv pip show causal-conv1d >/dev/null 2>&1; then
-  echo '  安装 causal-conv1d (首次编译，需几分钟)...'
+  # 默认会为 sm_75/80/87/90/100/103/110/120/121 全部生 PTX，单卡机浪费 5-7x 时间。
+  # 从 nvidia-smi 读当前卡的 compute_cap 限定，只编当前架构。
+  ARCH=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d ' ')
+  if [ -n "$ARCH" ]; then
+    export TORCH_CUDA_ARCH_LIST="$ARCH"
+    echo "  安装 causal-conv1d (首次编译 sm_${{ARCH//./}}，需几分钟)..."
+  else
+    echo '  安装 causal-conv1d (首次编译全架构，需 30+ 分钟)...'
+  fi
   uv pip install causal-conv1d --no-build-isolation
 fi
 """
     run(ssh_base(host, port) + [init_script])
 
     # 4. 同步训练数据（从 HuggingFace 经 hf-mirror 镜像拉取）
+    #    list 端点默认跟随 HF_ENDPOINT，国内机不必再单独设 HF_LIST_ENDPOINT。
     print("\n[4/4] 同步训练数据...")
     sync_script = f"""set -e
 cd {remote_dir}
 export PATH="$HOME/.local/bin:$PATH"
 export HF_ENDPOINT="https://hf-mirror.com"
-uv run python scripts/download_from_hf.py
+export PYTHONUNBUFFERED=1
+uv run python -u scripts/download_from_hf.py
 """
     run(ssh_base(host, port) + [sync_script])
 

@@ -14,12 +14,14 @@ HuggingFace 数据集仓库 → 本地 data/ 的幂等下载工具。
 环境变量:
     HF_ENDPOINT (可选): 国内服务器 export HF_ENDPOINT=https://hf-mirror.com
                        默认走主站 https://huggingface.co
-                       仅影响"下载"(snapshot_download / 兜底 URL),不影响 list。
-    HF_LIST_ENDPOINT (可选): list_repo_files 用此端点。
-                       默认硬写 https://huggingface.co —— mirror 的 git-tree
-                       同步主站有滞后(几分钟到小时级),会让 list 漏掉新 commit
-                       的文件,导致新加的 jsonl 永远不会被识别为"该下载"。
-                       list API 流量极小,走主站对国内服务器无负担。
+                       同时影响"下载"和"list"(后者通过 HF_LIST_ENDPOINT fallback)。
+    HF_LIST_ENDPOINT (可选): list_repo_files 用此端点,
+                       默认 fallback 到 HF_ENDPOINT,再 fallback 到主站。
+                       国内机直连主站会 silent 死等,所以默认跟随 HF_ENDPOINT。
+                       代价:mirror 的 git-tree 同步滞后(几分钟到小时级),新 commit
+                       的文件可能 list 漏拉 —— 这种情况显式 export
+                       HF_LIST_ENDPOINT=https://huggingface.co 走主站,或用
+                       --resolve-paths 兜底。
 
 幂等性:
     snapshot_download 默认按 hash 增量, 已存在且未变的文件跳过。
@@ -73,9 +75,13 @@ def main():
             sys.exit(2)
         print("\n下载完成。")
         return
-    # list 永远走主站(或 HF_LIST_ENDPOINT 显式覆盖):mirror 的 git-tree 同步滞后
-    # 会让新 commit 的文件被错过,导致 missing 兜底也跳不到(因为 list 里就没有)。
-    list_endpoint = os.environ.get("HF_LIST_ENDPOINT", "https://huggingface.co")
+    # list 默认跟随 HF_ENDPOINT:国内机直连主站 silent 死等,跟下载端点保持一致最省心。
+    # 显式 export HF_LIST_ENDPOINT 才覆盖 —— 比如想绕过 mirror 的 git-tree 同步滞后
+    # (新 commit 的文件 list 漏拉)时,export HF_LIST_ENDPOINT=https://huggingface.co。
+    list_endpoint = os.environ.get(
+        "HF_LIST_ENDPOINT",
+        os.environ.get("HF_ENDPOINT", "https://huggingface.co"),
+    )
     data_root_rel = args.data_root.replace("\\", "/").rstrip("/")
     data_root = (PROJECT_ROOT / data_root_rel).resolve()
     print(f"仓库:        {args.repo}")
