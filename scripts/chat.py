@@ -8,12 +8,14 @@
     /stats           显示状态分析 (gate分布、活跃维度、有效秩)
     /burnin <text>   用文本初始化 persona 状态
     /reset           重置为空白状态
+    /persona on|off  切换 PersonaExpert 注入开关 (--persona-ckpt 加载后生效)
     /quit            退出
 
 用法:
     python scripts/chat.py
     python scripts/chat.py --checkpoint checkpoints/xinhe_step_5000.pt
     python scripts/chat.py --state saved_states/james.pt
+    python scripts/chat.py --persona-ckpt checkpoints/persona_expert/<novel>/persona_expert.pt
     python scripts/chat.py --no-stream       # 关闭流式逐字输出
 """
 import argparse
@@ -87,10 +89,32 @@ def main():
     parser.add_argument("--config", type=str, default="configs/base.yaml")
     parser.add_argument("--checkpoint", type=str, default=None, help="模型 checkpoint 路径")
     parser.add_argument("--state", type=str, default=None, help="初始状态文件路径")
-    parser.add_argument("--max-tokens", type=int, default=512, help="最大生成 token 数")
+    parser.add_argument("--max-tokens", type=int, default=256,
+                        help="最大生成 token 数(默认 256;无 KV cache 长序列单 forward 开销 O(T^2),"
+                             "T>500 在 8GB 显卡 + persona expert OOD 累积时易 OOM)")
     parser.add_argument("--temperature", type=float, default=0.85)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--no-stream", action="store_true", help="关闭流式输出")
+    parser.add_argument(
+        "--persona-ckpt", type=str, default=None,
+        help="离线人格注入协议产出的 persona_expert.pt(或 step_*.pt)",
+    )
+    parser.add_argument(
+        "--persona-scale", type=float, default=0.5,
+        help="expert 注入强度(0=纯 base, 1=协议字面);"
+             "默认 0.5 — 配合 max-ratio 硬约束,触发词上单点不会爆",
+    )
+    parser.add_argument(
+        "--persona-max-ratio", type=float, default=0.1,
+        help="per-token ||delta||/||h|| 上限(默认 0.1)。"
+             "trigger 词(罗兰/女巫等训练高频)上 SwiGLU gate 可能突激活,"
+             "无 clip 时单点 ratio 数十倍,瞬间推 hidden 出语言流形 → 第一 token 乱码。"
+             "0=关 clip,只用 scale。",
+    )
+    parser.add_argument(
+        "--persona-skip-last", type=int, default=1,
+        help="跳过最深 N 层不挂 hook(默认 1:layer 23 训练 cos 最低,污染最大)",
+    )
     args = parser.parse_args()
 
     # 加载 checkpoint（如提供）
@@ -141,6 +165,23 @@ def main():
     model.to(device)
     model.eval()
 
+    # 加载 PersonaExpert(零号纪元离线注入产物);必须在 model.to(device) 之后
+    persona_summary = None
+    if args.persona_ckpt:
+        from xinhe.model.persona_expert import attach_persona_expert
+        persona_summary = attach_persona_expert(
+            model, args.persona_ckpt, map_location=device, enabled=True,
+            scale=args.persona_scale, max_ratio=args.persona_max_ratio,
+            skip_last_n=args.persona_skip_last,
+        )
+        print(
+            f"  PersonaExpert 已挂载: novel={persona_summary['novel_stem']!r} "
+            f"attached={persona_summary['attached_layers']} "
+            f"skipped={persona_summary['skipped_layers']} "
+            f"scale={persona_summary['scale']} max_ratio={persona_summary['max_ratio']} "
+            f"params={persona_summary['n_params']/1e6:.1f}M (全冻结)"
+        )
+
     # 加载 tokenizer
     tokenizer = load_tokenizer(config)
 
@@ -189,6 +230,7 @@ def main():
                 print("  /stats         — 状态分析")
                 print("  /reset         — 重置为空白状态")
                 print("  /burnin <text> — 用文本初始化 persona")
+                print("  /persona on|off|scale <f>|ratio <f> — 切换/调强度/调 RMS clip 上限")
                 print("  /quit          — 退出")
 
             elif cmd == "/save":
@@ -214,6 +256,34 @@ def main():
                 state = model.init_state(batch_size=1).to(device)
                 turn_count = 0
                 print("  状态和对话已重置")
+
+            elif cmd == "/persona":
+                if persona_summary is None:
+                    print("  未加载 persona ckpt(启动加 --persona-ckpt 才能切换)")
+                else:
+                    arg = cmd_arg.strip()
+                    from xinhe.model.persona_expert import (
+                        set_persona_enabled, set_persona_scale, set_persona_max_ratio,
+                    )
+                    if arg.lower() in ("on", "off"):
+                        n = set_persona_enabled(model, enabled=(arg.lower() == "on"))
+                        print(f"  PersonaExpert {arg.upper()}: 已切换 {n} 层")
+                    elif arg.startswith("scale ") or arg.startswith("ratio "):
+                        key, _, val = arg.partition(" ")
+                        try:
+                            v = float(val.strip())
+                        except ValueError:
+                            print(f"  解析失败: {arg!r}")
+                        else:
+                            if key == "scale":
+                                n = set_persona_scale(model, v)
+                                print(f"  PersonaExpert scale={v}: 已切换 {n} 层")
+                            else:
+                                n = set_persona_max_ratio(model, v)
+                                print(f"  PersonaExpert max_ratio={v}: 已切换 {n} 层")
+                    else:
+                        print("  用法: /persona on | /persona off | "
+                              "/persona scale <float> | /persona ratio <float>")
 
             elif cmd == "/burnin":
                 if not cmd_arg:

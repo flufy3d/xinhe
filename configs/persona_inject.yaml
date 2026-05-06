@@ -1,0 +1,50 @@
+# 离线人格注入协议(零号纪元) —— 一次性,不进 curriculum。
+#
+# 用法:
+#   1) 生成数据(只跑一次,带缓存指纹):
+#      python scripts/generate_persona_data.py \
+#          --config configs/persona_inject.yaml \
+#          --novel-path /path/to/novel.txt
+#
+#   2) 训练 PersonaExpertStack(脱离 trainer.py / curriculum):
+#      python scripts/train_persona.py --config configs/persona_inject.yaml
+#
+# 协议出处: docs/心核 架构蓝图:大一统快慢交替记忆网络.md - "零号纪元"。
+base: qwen3.5-0.8b.yaml          # 复用 backbone.model_path / hidden_size
+
+# --- 数据生成阶段 ---
+persona_inject:
+  out_dir: data/persona            # 实际写入 data/persona/<novel_stem>/
+  block_size: 192                  # 协议建议 128~256
+  chapter_aware: true              # 章末截断,(P_n, P_{n+1}) 不跨章
+  layer_indices: [16, 17, 18, 19, 20, 21, 22, 23]   # Qwen3.5-0.8B 24 层的最后 1/3
+  extract_batch_size: 8
+  extract_dtype: bfloat16
+  device: cuda
+  min_dialog_density: 0.0          # 人格注入不要求对话密度,任意小说均可
+  # chapter_pattern: 默认覆盖中文"第X章/回/节",如需特殊小说在此覆盖
+
+# --- PersonaExpert 模型形参 ---
+persona_expert:
+  intermediate_dim: 0              # 0 = 自动用 backbone 自身 intermediate_size (Qwen3.5-0.8B = 3584)
+  init_scale: 0.02                 # gate/up_proj std;down_proj std = init_scale / sqrt(2*N)
+
+# --- 训练 ---
+persona_training:
+  data_dir: data/persona           # 内部 <data_dir>/<novel_stem>/ 自动检测
+  out_dir: checkpoints/persona_expert    # 实际 <out_dir>/<novel_stem>/persona_expert.pt
+  batch_size: 64
+  learning_rate: 5.0e-4
+  weight_decay: 0.01
+  warmup_steps: 100
+  max_steps: 5000
+  dropout_p: 0.4                   # 协议建议 0.3~0.5
+  layer_weight_min: 0.5            # 浅层(layer_indices[0])权重
+  layer_weight_max: 1.5            # 深层(layer_indices[-1])权重
+  l2_reg: 1.0e-3                   # ||pred||^2 防发散(协议建议 λ ‖ΔĤ‖^2)
+  grad_clip: 1.0
+  log_every: 50
+  save_every: 500
+  num_workers: 0
+  device: cuda
+  dtype: bfloat16
