@@ -16,6 +16,11 @@ dependencies = [
     "accelerate",
     "flash-linear-attention ; sys_platform == 'linux'",
     "huggingface-hub>=0.24",
+    # NeuralMemory + MemoryMLP (xinhe/model/neural_memory.py) 依赖
+    "tensordict",
+    "assoc-scan>=0.0.4",
+    "einops>=0.8.0",
+    "einx>=0.3.0",
 ]
 
 [[tool.uv.index]]

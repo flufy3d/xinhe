@@ -1,7 +1,7 @@
 """NeuralMemoryPair (v9) — 双 NeuralMemory:Hippocampus 浅 MLP + Neocortex 深 MLP
 
-每个 full-attn 层挂一个实例。基于 titans-pytorch NeuralMemory(已 patch
-read_before_write=True)。生物类比:
+每个 full-attn 层挂一个实例。基于 NeuralMemory(test-time SGD MLP fast-weights,
+xinhe 内 patch 了 read_before_write=True 入口分支)。生物类比:
   - Hippocampus(海马):depth=2 浅 MLP,白天 test-time SGD,retention=0.99 自然遗忘
   - Neocortex(大脑皮层):depth=4 深 MLP,白天冻结(P-cap 例外),Sleep 标准 backprop
 
@@ -15,8 +15,7 @@ forward:
   7. return (x + alpha * mem_out, LayerMemState, aux)
 
 read 在 write 之前由 NeuralMemory 的 `read_before_write=True` 保证(见
-D:/Projects/titans-pytorch/titans_pytorch/neural_memory.py 的 forward 内
-的入口 retrieve 分支)。
+xinhe/model/neural_memory.py 的 forward 内入口 retrieve 分支)。
 """
 import math
 from dataclasses import dataclass
@@ -26,9 +25,8 @@ import torch
 import torch.nn as nn
 from torch.utils._pytree import tree_map
 
-from titans_pytorch import NeuralMemory
-from titans_pytorch.memory_models import MemoryMLP
-from titans_pytorch.neural_memory import NeuralMemState, mem_state_detach
+from .neural_memory import NeuralMemory, NeuralMemState, mem_state_detach
+from .memory_models import MemoryMLP
 
 
 def _mem_state_to(state: NeuralMemState, device) -> NeuralMemState:

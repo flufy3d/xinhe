@@ -1,19 +1,28 @@
 # v9 P-cap mini run 入口 — fast-weights 长上下文能力底座
 #
-# 用法(2 步):
-#   1. 生成 novel raw chunking 数据:
-#      python scripts/generate_data.py --config configs/novel.yaml \
-#        --stage novel_only --novel-path "C:/path/to/novel.txt"
+# 数据:经 scripts/upload_to_hf.py / download_from_hf.py 在 flufy3d/xinhe-dataset 同步,
+#      4 个 source(novel / longcite / dialog / skeleton)在内存按比例 mix_dynamic 抽样,不落物理 mix 文件。
 #
-#   2. 跑 P-cap mini 训练(novel + dialog + skeleton 混合):
-#      python scripts/generate_data.py --config configs/pcap.yaml --stage pcap_mini   # mix 数据
-#      python scripts/train.py --config configs/pcap.yaml
+# 跑训练:
+#   python scripts/train.py --config configs/pcap.yaml
 #
-# 现 dialog/skeleton 数据已存在 data/{dialog,skeleton}/,直接复用。
+# 远端(VM):
+#   python scripts/remote.py deploy   # 同步代码 + HF 拉数据
+#   python scripts/remote.py start python scripts/train.py --config configs/pcap.yaml
+#   python scripts/remote.py logs -f
+#
+# 显存调优(RTX 4090 24GB,0.8B + v9 NeuralMemoryPair):
+#   - batch_size=1 + grad_accum_steps=4 = effective batch 4,稳跑约 8-12 GB
+#   - 若有显存余量可在 stage_overrides 里 batch_size=2(检验后再调)
 base: qwen3.5-0.8b.yaml
 
 curriculum_file: curriculum_pcap.yaml
 
 training:
-  grad_accum_steps: 1
+  grad_accum_steps: 4
   dtype: bfloat16
+
+stage_overrides:
+  pcap_mini:
+    batch_size: 1
+    grad_accum_steps: 4
