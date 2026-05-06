@@ -21,8 +21,14 @@ curriculum_file: curriculum_pcap.yaml
 training:
   grad_accum_steps: 4
   dtype: bfloat16
+  compile_backbone_layers: true   # 局部 compile 每个 Qwen layer body(NM 在 compile 外)
 
 stage_overrides:
   pcap_mini:
     batch_size: 1
     grad_accum_steps: 4
+    # 24GB / 0.8B 第一次跑保守起步,跑通后再视余量上调:
+    #   turn=512 × max_turns=4 → 2048 tokens/episode,32 个 Hippo chunks
+    #   Neo 走标准 backprop 已不再是 OOM 主因,可以保留 base 默认(depth=4 exp=4.0)
+    turn_max_tokens: 512
+    max_turns_per_episode: 4

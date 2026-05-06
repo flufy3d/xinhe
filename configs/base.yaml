@@ -7,7 +7,10 @@ backbone:
   hidden_size: 1024
   freeze: true
 
-# v9 NeuralMemoryPair: Hippocampus(浅 MLP, awake plastic) + Neocortex(深 MLP, sleep only)
+# v9 NeuralMemoryPair:
+#   - Hippocampus:浅 MLP + TTT inner SGD(episode 内 fast weights 演化)
+#   - Neocortex:深 MLP + 标准 backprop(慢知识基底,outer Adam 经 backbone 慢更新,
+#                无 episode-scoped state,无 vmap+grad,扩深不爆显存)
 state:
   n_heads: 16
   head_dim: 64                    # d_total = 16*64 = 1024 = hidden_size
@@ -15,11 +18,9 @@ state:
   hippo_mlp_expansion: 2.0
   neo_mlp_depth: 4
   neo_mlp_expansion: 4.0
-  hippo_retention: 0.99           # 每 chunk 保留 99% 自然遗忘
-  neo_retention: 1.0              # 不衰减(靠 anchor 正则)
-  hippo_base_lr: 1.0e-2
-  neo_base_lr: 1.0e-4             # P-cap 默认小 lr,sleep 切到 5e-4
-  mem_chunk_size: 64
+  hippo_retention: 0.99           # Hippo 每 chunk 保留 99% 自然遗忘
+  hippo_base_lr: 1.0e-2           # Hippo 内层 test-time SGD lr 上限
+  mem_chunk_size: 64              # 仅作用于 Hippo TTT 路径
   alpha_logit_init: -5.0          # sigmoid(-5)≈0.007 保守起步
   alpha_min_clamp: 0.02
   gate_entropy_lambda: 0.01

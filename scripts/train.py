@@ -71,6 +71,7 @@ def make_dataloaders(config, tokenizer, stage_data: dict | None = None):
             turn_max_tokens=config.turn_max_tokens,
             max_turns_per_episode=config.max_turns_per_episode,
             value_weight_cap=cap,
+            cache_slot="mix_train",
         )
         val_dataset = (
             MixedConversationDataset(
@@ -81,6 +82,7 @@ def make_dataloaders(config, tokenizer, stage_data: dict | None = None):
                 turn_max_tokens=config.turn_max_tokens,
                 max_turns_per_episode=config.max_turns_per_episode,
                 value_weight_cap=cap,
+                cache_slot="mix_val",
             )
             if n_val > 0 else None
         )
@@ -91,6 +93,7 @@ def make_dataloaders(config, tokenizer, stage_data: dict | None = None):
             turn_max_tokens=config.turn_max_tokens,
             max_turns_per_episode=config.max_turns_per_episode,
             value_weight_cap=cap,
+            cache_slot="single_train",
         )
         val_dataset = ConversationDataset(
             data_path=config.val_path,
@@ -98,6 +101,7 @@ def make_dataloaders(config, tokenizer, stage_data: dict | None = None):
             turn_max_tokens=config.turn_max_tokens,
             max_turns_per_episode=config.max_turns_per_episode,
             value_weight_cap=cap,
+            cache_slot="single_val",
         ) if Path(config.val_path).exists() else None
 
     train_loader = DataLoader(
@@ -128,6 +132,7 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
         "batch_size": "batch_size",
         "grad_accum_steps": "grad_accum_steps",
         "gradient_checkpointing": "gradient_checkpointing",
+        "per_segment_checkpoint": "per_segment_checkpoint",
         "learning_rate": "learning_rate",
         "plugin_lr_multiplier": "plugin_lr_multiplier",
         "freeze_alpha": "freeze_alpha",
@@ -150,9 +155,7 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
         "n_heads": "n_heads",
         "head_dim": "head_dim",
         "hippo_retention": "hippo_retention",
-        "neo_retention": "neo_retention",
         "hippo_base_lr": "hippo_base_lr",
-        "neo_base_lr": "neo_base_lr",
         "phase": "phase",
     }
     for yaml_key, field_name in field_map.items():
@@ -219,10 +222,8 @@ def train_single(config, args):
     train_loader, val_loader, n_train, n_val = make_dataloaders(config, tokenizer)
 
     if n_train == 0:
-        print(f"错误: 训练数据为空，请先生成数据")
+        print(f"错误: 训练数据为空,请先生成数据")
         sys.exit(1)
-
-    print(f"训练集: {n_train} episodes | 验证集: {n_val} episodes")
 
     model = XinheModel(config)
     trainer = Trainer(model, config, train_loader, val_loader, pad_token_id=tokenizer.pad_token_id)
@@ -303,20 +304,15 @@ def train_curriculum(base_config, stages, args):
         # 配错在这里立刻抛 ConfigError 带 Hint，不让训练静默跑被截断的数据
         validate_stage_config(stage_name, stage)
 
-        # 准备数据 (统一分发: memory/persona 自动识别)
-        print(f"[数据生成] type={data_cfg.get('type', 'memory')}")
         train_path, val_path = generate_stage_data(stage, stage_name)
 
-        # 构建本阶段 config
         stage_config = apply_stage_overrides(base_config, stage)
         stage_config = replace(stage_config, train_path=train_path, val_path=val_path)
 
-        # 创建 DataLoader(mix_dynamic 时把 stage["data"] 传进去走 MixedConversationDataset)
         train_loader, val_loader, n_train, n_val = make_dataloaders(
             stage_config, tokenizer, stage_data=stage.get("data"),
         )
-        print(f"[数据] 训练集: {n_train} | 验证集: {n_val}")
-        print(f"[参数] lr={stage_config.learning_rate} batch={stage_config.batch_size} "
+        print(f"  lr={stage_config.learning_rate} batch={stage_config.batch_size} "
               f"max_turns={stage_config.max_turns_per_episode} max_steps={stage_config.max_steps}")
 
         # 训练
@@ -362,8 +358,8 @@ def main():
     print(f"Backbone: {config.backbone_type} ({config.backbone_model_path}) | 设备: {config.device} | 精度: {config.dtype}")
     print(f"NeuralMemoryPair: H={config.n_heads} d_head={config.head_dim} "
           f"chunk={config.mem_chunk_size} phase={config.phase}")
-    print(f"  Hippo: depth={config.hippo_mlp_depth} retention={config.hippo_retention} lr={config.hippo_base_lr}")
-    print(f"  Neo:   depth={config.neo_mlp_depth} retention={config.neo_retention} lr={config.neo_base_lr}")
+    print(f"  Hippo: depth={config.hippo_mlp_depth} retention={config.hippo_retention} lr={config.hippo_base_lr} (TTT inner SGD)")
+    print(f"  Neo:   depth={config.neo_mlp_depth} expansion={config.neo_mlp_expansion} (普通 MLP + 标准 backprop)")
 
     if curriculum:
         print(f"课程学习: {len(curriculum)} 个阶段")

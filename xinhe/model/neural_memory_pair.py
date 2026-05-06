@@ -1,21 +1,29 @@
-"""NeuralMemoryPair (v9) — 双 NeuralMemory:Hippocampus 浅 MLP + Neocortex 深 MLP
+"""NeuralMemoryPair (v9) — Hippocampus(快适配)+ Neocortex(慢知识基底)。
 
-每个 full-attn 层挂一个实例。基于 NeuralMemory(test-time SGD MLP fast-weights,
-xinhe 内 patch 了 read_before_write=True 入口分支)。生物类比:
-  - Hippocampus(海马):depth=2 浅 MLP,白天 test-time SGD,retention=0.99 自然遗忘
-  - Neocortex(大脑皮层):depth=4 深 MLP,白天冻结(P-cap 例外),Sleep 标准 backprop
+两条路径**训练机制完全不同**(这是 v9 的核心架构选择):
+
+  - Hippocampus(海马):浅 MLP(默认 depth=2 exp=2.0),**TTT inner SGD** 路径。
+    每 token 当作一次 SGD 例子,vmap(grad) 内层算 ∇W,W ← W - lr·∇W。
+    每 episode 内 fast weights 演化,不带跨 episode 持久状态。
+    走 NeuralMemory.forward,xinhe 内 patch 了 `read_before_write=True`。
+
+  - Neocortex(大脑皮层):深 MLP(默认 depth=4 exp=4.0),**普通 nn.Module + 标准 backprop**。
+    weights 是 nn.Parameter,跨 episode 持久。outer Adam 经 backbone-driven backward
+    更新 — 即"白天活动 → 慢慢沉淀的世界知识"。无 vmap,无 fast weights,无 chunk SGD,
+    扩深(future)只受标准激活内存约束,不会爆 vmap 梯度张量。
+
+  Sleep 阶段(P-cap 之后)是把 Hippo 累积的活动 replay 到 Neo,推动 Neo 权重一次大更新;
+  也通过同样的标准 backprop。
 
 forward:
-  1. retrieve(x, h_old_weights, read_before_write=True) → r_h
-  2. retrieve(x, n_old_weights, read_before_write=True) → r_n
-  3. store(x) 内嵌在 NeuralMemory.forward → next_state(daytime_plastic=False 时丢弃)
-  4. q = gate_q(x); logit = <q, r>/√d; gate = softmax([h, n])     # 内容感知门控
-  5. mem_out = gate * r_{h,n} 加权 → mem_rmsnorm
-  6. alpha = sigmoid(alpha_logit).clamp(min);可被 mem_alpha_override 覆写
-  7. return (x + alpha * mem_out, LayerMemState, aux)
+  1. r_h, h_new = hippocampus(x, state=h_old, read_before_write=True)   # TTT
+  2. r_n         = neocortex(x)                                           # 普通 fwd
+  3. q = gate_q(x); gate = softmax([⟨q,r_h⟩, ⟨q,r_n⟩] / √d)               # 内容感知
+  4. mem_out = gate·{r_h, r_n} → mem_rmsnorm
+  5. alpha = sigmoid(alpha_logit).clamp(min);受 mem_alpha_override 覆写
+  6. return (x + alpha·mem_out, LayerMemState(hippo=h_new, neo=None), aux)
 
-read 在 write 之前由 NeuralMemory 的 `read_before_write=True` 保证(见
-xinhe/model/neural_memory.py 的 forward 内入口 retrieve 分支)。
+LayerMemState.neo 永远 None(为兼容旧字段保留位置),Neo 没有 episode 内状态。
 """
 import math
 from dataclasses import dataclass
@@ -23,6 +31,7 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils._pytree import tree_map
 
 from .neural_memory import NeuralMemory, NeuralMemState, mem_state_detach
@@ -42,6 +51,39 @@ def _logit(p: float, eps: float = 1e-6) -> float:
     """logit(p) = log(p / (1-p)),有 eps 防溢出。"""
     p = min(max(p, eps), 1.0 - eps)
     return math.log(p / (1.0 - p))
+
+
+class AdaptiveRMSNorm(nn.RMSNorm):
+    """nn.RMSNorm 的 autocast 友好版:γ 始终保持 fp32(Adam 高精),forward 时
+    按 input dtype 即时 cast。
+
+    PyTorch 默认 nn.RMSNorm + autocast(bf16) 时,weight 是 fp32 / input 是 bf16,
+    `torch.rms_norm` 的 fused 内核拒绝混合 dtype → 退到非融合路径 + 警告。本类把
+    weight 临时 cast 到 input dtype 再调 fused 内核,既无警告也走 fused 快路径,
+    且 fp32 master 不变。
+    """
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        w = self.weight
+        if w is not None and w.dtype != x.dtype:
+            w = w.to(x.dtype)
+        return F.rms_norm(x, self.normalized_shape, w, self.eps)
+
+
+def _upgrade_rmsnorms_to_adaptive(module: nn.Module) -> None:
+    """递归把 module 子树里所有 `type(m) is nn.RMSNorm` 实例换成 AdaptiveRMSNorm,
+    γ 数据原封拷过去。Hippo NeuralMemory 内部的 RMSNorm 由此一并升级。"""
+    for name, child in list(module.named_children()):
+        if type(child) is nn.RMSNorm:
+            shape = child.normalized_shape
+            dim = shape[0] if isinstance(shape, (tuple, list)) else int(shape)
+            affine = child.weight is not None
+            new = AdaptiveRMSNorm(dim, eps=child.eps, elementwise_affine=affine)
+            if affine:
+                new.weight.data.copy_(child.weight.data)
+            setattr(module, name, new)
+        else:
+            _upgrade_rmsnorms_to_adaptive(child)
 
 
 @dataclass
@@ -98,8 +140,65 @@ class XinheMemoryState:
         return self.layers.values()
 
 
+class NeocortexBlock(nn.Module):
+    """Neo: 多头深 MLP,普通 nn.Module + 标准 backprop。
+
+    与 Hippo(TTT inner SGD)对比:
+      - 不持有 episode-scoped fast weights(weights 是 nn.Parameter,跨 episode/batch 持久)
+      - 不走 vmap+grad,前向就是 multi-head GeLU MLP
+      - 显存仅吃常规 activation,扩深不爆
+
+    结构(每 head 独立 MLP weights,广播到 batch 维度):
+      x: (..., d_total)
+      → pre_rmsnorm
+      → split heads: (..., heads, d_head)
+      → for each layer: GeLU(prev) @ W_h    (W_h shape: (heads, d_in, d_out))
+      → merge heads: (..., d_total)
+    """
+
+    def __init__(
+        self,
+        d_total: int,
+        n_heads: int,
+        d_head: int,
+        depth: int,
+        expansion: float,
+        pre_norm: bool = True,
+    ):
+        super().__init__()
+        assert d_total == n_heads * d_head
+        self.d_total = d_total
+        self.n_heads = n_heads
+        self.d_head = d_head
+        self.norm = AdaptiveRMSNorm(d_total) if pre_norm else nn.Identity()
+
+        dim_hidden = int(d_head * expansion)
+        dims = [d_head] + [dim_hidden] * (depth - 1) + [d_head]
+        self.weights = nn.ParameterList([
+            nn.Parameter(torch.empty(n_heads, di, do))
+            for di, do in zip(dims[:-1], dims[1:])
+        ])
+        for w in self.weights:
+            for h in range(n_heads):
+                nn.init.xavier_uniform_(w[h])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (..., d_total)
+        h = self.norm(x)
+        # split into heads: (..., heads, d_head)
+        leading = h.shape[:-1]
+        h_per_head = h.view(*leading, self.n_heads, self.d_head)
+        for ind, w in enumerate(self.weights):
+            if ind > 0:
+                h_per_head = F.gelu(h_per_head)
+            # einsum: ...hd, hde -> ...he
+            h_per_head = torch.einsum('...hd,hde->...he', h_per_head, w)
+        # merge heads back
+        return h_per_head.reshape(*leading, self.d_total)
+
+
 class NeuralMemoryPair(nn.Module):
-    """挂载在单个 full-attn 层上的双 NeuralMemory 容器。"""
+    """挂在单个 full-attn 层上的 Hippo(TTT)+ Neo(static MLP)容器。"""
 
     def __init__(
         self,
@@ -111,9 +210,7 @@ class NeuralMemoryPair(nn.Module):
         neo_mlp_depth: int = 4,
         neo_mlp_expansion: float = 4.0,
         hippo_retention: float = 0.99,
-        neo_retention: float = 1.0,
         hippo_base_lr: float = 1e-2,
-        neo_base_lr: float = 1e-4,
         chunk_size: int = 64,
         alpha_logit_init: float = -5.0,
         alpha_min_clamp: float = 0.02,
@@ -131,13 +228,15 @@ class NeuralMemoryPair(nn.Module):
         self.gate_entropy_lambda = float(gate_entropy_lambda)
         self.phase = phase
 
+        # Hippo:TTT inner SGD via NeuralMemory(快适配,episode 内演化)
         self.hippocampus = self._build_neural_memory(
             d_total, n_heads, d_head, hippo_mlp_depth, hippo_mlp_expansion,
             hippo_retention, hippo_base_lr, chunk_size,
         )
-        self.neocortex = self._build_neural_memory(
-            d_total, n_heads, d_head, neo_mlp_depth, neo_mlp_expansion,
-            neo_retention, neo_base_lr, chunk_size,
+        # Neo:普通深 MLP(慢知识基底,outer Adam 慢更新)
+        self.neocortex = NeocortexBlock(
+            d_total, n_heads, d_head,
+            depth=neo_mlp_depth, expansion=neo_mlp_expansion,
         )
 
         # 内容感知 gate:q from x;<q, r_h>/<q, r_n> 决定权重
@@ -148,13 +247,17 @@ class NeuralMemoryPair(nn.Module):
         self.alpha_logit = nn.Parameter(torch.tensor(float(alpha_logit_init)))
 
         # 控制 mem_out 跟 attn_out 同量级,避免幅值竞争盖住 backbone
-        self.mem_rmsnorm = nn.RMSNorm(d_total)
+        self.mem_rmsnorm = AdaptiveRMSNorm(d_total)
 
-        # daytime_plastic flags(可经 set_daytime_plastic 切换)
-        # P-cap:Neo 也开 plastic(lr=neo_base_lr 默认 1e-4),防 mix_gate 学死 Neo
-        # Operational:Neo 严格冻结,只在 sleep 打开
+        # daytime_plastic_hippo:控制 episode 内 fast weights 是否演化(set_daytime_plastic 切)
+        # daytime_plastic_neo:Neo 是普通 backprop 路径,这个 flag 仅作 API 兼容,
+        #   实际"冻 Neo"应该改 self.neocortex.requires_grad_(False)。
         self._daytime_plastic_hippo: bool = True
         self._daytime_plastic_neo: bool = (phase == "P-cap")
+
+        # Hippo NeuralMemory 内部仍是普通 nn.RMSNorm(γ fp32),autocast 下仍报警告。
+        # 升级它们到 AdaptiveRMSNorm:weight 保留 fp32 不动 Adam,forward 即时 cast 走 fused。
+        _upgrade_rmsnorms_to_adaptive(self.hippocampus)
 
     @staticmethod
     def _build_neural_memory(
@@ -229,25 +332,21 @@ class NeuralMemoryPair(nn.Module):
 
         返回:
             x_out:      (B, T, d_total) — 已加 alpha*mem_out 残差
-            new_state:  LayerMemState(hippo, neo)
+            new_state:  LayerMemState(hippo=NeuralMemState, neo=None)
             aux:        {"gate_entropy_reg_loss": Tensor, ...}
         """
         if layer_state is None:
             layer_state = LayerMemState(None, None)
 
         h_old = layer_state.hippo
-        n_old = layer_state.neo
 
-        # 1. Hippo & Neo retrieve(read_before_write=True → retrieve 用入口 weights)
-        #    NeuralMemory.forward 同时返回 next_state(包含 store 路径输出)
+        # 1. Hippo:TTT inner SGD,read_before_write=True → retrieve 用入口 weights
         r_h, h_new = self.hippocampus(x, state=h_old, read_before_write=True)
-        r_n, n_new = self.neocortex(x, state=n_old, read_before_write=True)
-
-        # 2. daytime_plastic=False:state 不演化(扔掉 forward 算的 next_state)
         if not self._daytime_plastic_hippo:
             h_new = h_old
-        if not self._daytime_plastic_neo:
-            n_new = n_old
+
+        # 2. Neo:普通 multi-head MLP,无 state、无 vmap、无 chunk SGD
+        r_n = self.neocortex(x)
 
         # 3. 内容感知 gate:用 x 投影出 q,跟 r_h / r_n 点积取置信度
         q = self.gate_q(x)
@@ -260,11 +359,13 @@ class NeuralMemoryPair(nn.Module):
         mem_out = gate[..., 0:1] * r_h + gate[..., 1:2] * r_n
         mem_out = self.mem_rmsnorm(mem_out)
 
-        # 5. alpha 开度
+        # 5. alpha 开度。reparam 保证 alpha ∈ [alpha_min, 1] 且全程可导:
+        #    alpha = alpha_min + (1 - alpha_min) * sigmoid(alpha_logit)
+        #    旧版 sigmoid().clamp(min) 在 sigmoid<min 时梯度断 → alpha_logit 永不学。
         if mem_alpha_override is not None:
             alpha = torch.tensor(float(mem_alpha_override), device=x.device, dtype=x.dtype)
         else:
-            alpha = torch.sigmoid(self.alpha_logit).clamp(min=self.alpha_min)
+            alpha = self.alpha_min + (1.0 - self.alpha_min) * torch.sigmoid(self.alpha_logit)
 
         x_out = x + alpha * mem_out
 
@@ -278,4 +379,4 @@ class NeuralMemoryPair(nn.Module):
             "gate_mean_n": gate[..., 1].mean().detach(),
         }
 
-        return x_out, LayerMemState(hippo=h_new, neo=n_new), aux
+        return x_out, LayerMemState(hippo=h_new, neo=None), aux

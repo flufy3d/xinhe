@@ -42,6 +42,24 @@ class QwenBackbone(nn.Module, BackboneBase):
             for param in self.model.parameters():
                 param.requires_grad = False
 
+        # 局部 torch.compile:只编每个 transformer block(attn+FFN body)。
+        # NeuralMemoryPair 的 hook 在 forward_blocks 里调,不进 compile 边界 →
+        # 不会触发 Dynamo ↔ vmap+grad 的 saved_tensors_hooks 冲突。
+        # 多卡 device_map="auto" 时跳过(compile + 跨设备 layer 不稳定)。
+        if (getattr(config, "compile_backbone_layers", False)
+                and torch.cuda.device_count() <= 1):
+            try:
+                compiled_count = 0
+                for i, layer in enumerate(self.model.model.layers):
+                    self.model.model.layers[i] = torch.compile(
+                        layer, mode="default", fullgraph=False, dynamic=False,
+                    )
+                    compiled_count += 1
+                print(f"[torch.compile] 已编译 {compiled_count} 个 backbone block "
+                      f"(NeuralMemoryPair 不在 compile 边界内)")
+            except Exception as e:
+                print(f"[torch.compile] 跳过(异常: {e})")
+
     def embed(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.model.embed_tokens(input_ids)
 

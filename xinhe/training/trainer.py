@@ -132,23 +132,10 @@ class Trainer:
         # TF32 加速
         torch.set_float32_matmul_precision('high')
 
-        # torch.compile: 只编译 backbone (transformer blocks)，plugin 的 state 操作不编译
-        import sys
-        import warnings
-        if sys.platform == "linux" and not getattr(self, "_compiled", False):
-            warnings.filterwarnings("ignore", message=".*Dynamo.*", category=UserWarning)
-            warnings.filterwarnings("ignore", module=r"torch\._dynamo.*", category=UserWarning)
-            try:
-                torch._logging.set_logs(dynamo=40)
-            except Exception:
-                pass
-            try:
-                self.model.backbone.forward_blocks = torch.compile(
-                    self.model.backbone.forward_blocks)
-                self._compiled = True
-                print("[torch.compile] backbone 已编译")
-            except Exception as e:
-                print(f"[torch.compile] 跳过: {e}")
+        # NOTE: 不开 torch.compile。NeuralMemoryPair 内 store_memories 走 vmap(grad)
+        # 做 test-time SGD,Dynamo 编译路径会强制 disable_saved_tensors_hooks,
+        # 但 vmap(grad) 自己也用同一机制 → 冲突直接 InternalTorchDynamoError。
+        # 而且 backbone 是 frozen 的,只 fwd 不 bwd,compile 收益只剩 ~20%,不值。
 
         total_params = self.model.get_total_param_count()
         trainable_params = self.model.get_trainable_param_count()

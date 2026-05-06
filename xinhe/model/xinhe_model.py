@@ -51,9 +51,7 @@ class XinheModel(nn.Module):
                 neo_mlp_depth=config.neo_mlp_depth,
                 neo_mlp_expansion=config.neo_mlp_expansion,
                 hippo_retention=config.hippo_retention,
-                neo_retention=config.neo_retention,
                 hippo_base_lr=config.hippo_base_lr,
-                neo_base_lr=config.neo_base_lr,
                 chunk_size=config.mem_chunk_size,
                 alpha_logit_init=config.alpha_logit_init,
                 alpha_min_clamp=config.alpha_min_clamp,
@@ -62,6 +60,19 @@ class XinheModel(nn.Module):
             )
             for layer_idx in self._hook_layer_indices
         })
+
+        # 把 Neo(普通 MLP,无 vmap+grad)也 compile。Hippo 因 inner SGD 仍走 eager,
+        # 同一 pair forward 内的 Neo 单独 compile 可独立加速。
+        if (getattr(config, "compile_backbone_layers", False)
+                and torch.cuda.device_count() <= 1):
+            try:
+                for pair in self.memory.values():
+                    pair.neocortex = torch.compile(
+                        pair.neocortex, mode="default", fullgraph=False, dynamic=False,
+                    )
+                print(f"[torch.compile] 已编译 {len(self.memory)} 个 Neo 路径")
+            except Exception as e:
+                print(f"[torch.compile neo] 跳过(异常: {e})")
 
         # 投影:d_total ↔ hidden_size(NeuralMemoryPair 在 d_total 子空间工作,
         # backbone 输出是 hidden_size 维度。两者通常相等,但保留投影以备 head_dim 配置不齐)

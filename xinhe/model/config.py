@@ -25,10 +25,9 @@ class XinheConfig:
     hippo_mlp_expansion: float = 2.0
     neo_mlp_depth: int = 4
     neo_mlp_expansion: float = 4.0
-    hippo_retention: float = 0.99    # 每 chunk 保留 99%(自然遗忘)
-    neo_retention: float = 1.0       # 不衰减(靠 anchor 正则约束)
-    hippo_base_lr: float = 1e-2      # 内层 test-time SGD lr 上限
-    neo_base_lr: float = 1e-4        # P-cap 默认小 lr,sleep 切到 5e-4
+    hippo_retention: float = 0.99    # Hippo 每 chunk 保留 99%(自然遗忘)
+    hippo_base_lr: float = 1e-2      # Hippo 内层 test-time SGD lr 上限
+    # NOTE: Neo 走标准 backprop,无 retention 概念;lr = outer learning_rate × plugin_lr_multiplier。
     mem_chunk_size: int = 64
     alpha_logit_init: float = -5.0   # sigmoid(-5)≈0.007 保守起步
     alpha_min_clamp: float = 0.02    # 防 alpha collapse 到 0
@@ -38,6 +37,11 @@ class XinheConfig:
     # v9 freeze flags
     freeze_alpha: bool = False       # 测试基线时可冻 alpha
     freeze_gate_q: bool = False      # 测试基线时可冻 gate
+
+    # 编译加速(只对 backbone 单 transformer 块,不包 NeuralMemoryPair —
+    # Hippo 的 vmap+grad inner SGD 跟 Dynamo 的 saved_tensors_hooks 冲突,
+    # 把 NM 排除在 compile 边界外即可。多卡 device_map="auto" 下不安全,自动跳过)。
+    compile_backbone_layers: bool = False
 
     # --- 训练 ---
     # 单一术语:turn = 一个 user-asst pair(在 conversation.py 内编为 1 个 tensor)
@@ -52,7 +56,7 @@ class XinheConfig:
     grad_clip: float = 1.0
     grad_accum_steps: int = 1
     gradient_checkpointing: bool = False
-    per_segment_checkpoint: bool = True
+    per_segment_checkpoint: bool = False  # v9 必须关:vmap(grad) ↔ checkpoint saved_hooks 冲突
     resume_from: str = ""
     early_stop_loss: float = 0.0
     early_stop_patience: int = 0
@@ -157,9 +161,7 @@ class XinheConfig:
                 "neo_mlp_depth": "neo_mlp_depth",
                 "neo_mlp_expansion": "neo_mlp_expansion",
                 "hippo_retention": "hippo_retention",
-                "neo_retention": "neo_retention",
                 "hippo_base_lr": "hippo_base_lr",
-                "neo_base_lr": "neo_base_lr",
                 "mem_chunk_size": "mem_chunk_size",
                 "alpha_logit_init": "alpha_logit_init",
                 "alpha_min_clamp": "alpha_min_clamp",
@@ -181,6 +183,7 @@ class XinheConfig:
                 "grad_accum_steps": "grad_accum_steps",
                 "gradient_checkpointing": "gradient_checkpointing",
                 "per_segment_checkpoint": "per_segment_checkpoint",
+                "compile_backbone_layers": "compile_backbone_layers",
                 "resume_from": "resume_from",
                 "early_stop_loss": "early_stop_loss",
                 "early_stop_patience": "early_stop_patience",

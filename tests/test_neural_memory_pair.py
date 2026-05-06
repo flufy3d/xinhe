@@ -72,7 +72,8 @@ def test_forward_shape_preserves_residual():
     x_out, new_state, aux = pair(x)
     assert x_out.shape == x.shape
     assert new_state.hippo is not None
-    assert new_state.neo is not None
+    # Neo 是无状态普通 MLP,layer state 里 neo 字段恒为 None
+    assert new_state.neo is None
     assert "gate_entropy_reg_loss" in aux
 
 
@@ -117,7 +118,8 @@ def test_mem_alpha_override_one_full_memory():
 
 
 def test_daytime_plastic_off_freezes_state():
-    """plastic=False 时,跨多次 forward state 的 weights 完全不变(等于入口 state)。"""
+    """Hippo plastic=False 时,跨多次 forward state 不演化(等于入口 state)。
+    Neo 无状态(走标准 backprop),其字段恒为 None。"""
     pair = _build_pair(phase="Operational")
     pair.set_daytime_plastic(hippo=False, neo=False)
     pair.eval()
@@ -125,8 +127,6 @@ def test_daytime_plastic_off_freezes_state():
 
     state0 = LayerMemState(None, None)
     _, state1, _ = pair(x, layer_state=state0)
-    # 入口 state 是 None 的话 forward 内部 lazy init,但因 plastic=False,丢弃 new state
-    # → state1.hippo / state1.neo 应该都是 None(等于入口)
     assert state1.hippo is None
     assert state1.neo is None
 
@@ -180,38 +180,56 @@ def test_gradient_flow_through_pair():
     loss = x_out.pow(2).mean() + aux["gate_entropy_reg_loss"]
     loss.backward()
 
-    # 关键参数都应有 grad
+    # Pair 顶层 gate / alpha
     assert pair.gate_q.weight.grad is not None
     assert pair.alpha_logit.grad is not None
-    # NeuralMemory 内部静态参数(随便取一个)
+    # Hippo NeuralMemory 内部静态参数(meta-params,gate_q-like)
     assert any(p.grad is not None for p in pair.hippocampus.parameters() if p.requires_grad)
-    assert any(p.grad is not None for p in pair.neocortex.parameters() if p.requires_grad)
+    # Neo 是普通 MLP,所有 weight 都该有 grad(走 backbone backprop)
+    for w in pair.neocortex.weights:
+        assert w.grad is not None
 
 
-def test_to_decay_factor_frozen():
-    """retention 静态化 → to_decay_factor 不被 backprop 学走。"""
+def test_neocortex_is_static_mlp():
+    """Neo 走普通 backprop:
+       - 每个 weight 是 (heads, dim_in, dim_out) 形状的 nn.Parameter
+       - 跨 forward 不演化(weights identity 一致)
+       - 不持有 NeuralMemState
+    """
+    pair = _build_pair()
+    pair.eval()
+    # 形状校验:depth=4 exp=4.0(默认)→ dim_head=16 → hidden=64 → 4 个 weight,
+    # 中间 3 个 (heads=2, 16/64, 16/64) 这种结构。
+    for w in pair.neocortex.weights:
+        assert w.ndim == 3
+        assert w.shape[0] == pair.n_heads
+
+    x = torch.randn(2, 16, 32)
+    w_before = [w.detach().clone() for w in pair.neocortex.weights]
+    _ = pair(x)
+    _ = pair(x)
+    # 多次 forward 后 Neo weights 不应改变(只有 outer optimizer.step() 才会改)
+    for w_after, w0 in zip(pair.neocortex.weights, w_before):
+        assert torch.equal(w_after.detach(), w0)
+
+
+def test_hippocampus_to_decay_factor_frozen():
+    """Hippo retention 静态化 → to_decay_factor 不被 backprop 学走。"""
     pair = _build_pair()
     for p in pair.hippocampus.to_decay_factor.parameters():
-        assert not p.requires_grad
-    for p in pair.neocortex.to_decay_factor.parameters():
         assert not p.requires_grad
 
 
 # ── retention bias 验证 ──────────────────────────────────────────
 
 
-def test_retention_init_decay_bias_set():
-    """init_decay_bias = logit(1 - retention) → sigmoid(bias) = 1 - retention"""
-    pair = _build_pair(hippo_retention=0.99, neo_retention=1.0)
+def test_hippo_retention_init_decay_bias_set():
+    """Hippo init_decay_bias = logit(1 - retention) → sigmoid(bias) = 1 - retention。
+    Neo 无 retention(普通 MLP)。"""
+    pair = _build_pair(hippo_retention=0.99)
     h_bias = pair.hippocampus.to_decay_factor[0].bias.detach()
-    # 静态 retention=0.99 → decay = 0.01 → sigmoid(bias) = 0.01 → bias = logit(0.01)
     expected = _logit(0.01)
     assert torch.allclose(h_bias, torch.full_like(h_bias, expected), atol=1e-5)
-
-    n_bias = pair.neocortex.to_decay_factor[0].bias.detach()
-    # retention=1.0 → decay = 0.0 → sigmoid(bias) ≈ 0 → bias = logit(eps) ≈ -13.8
-    expected_neo = _logit(0.0)  # 用 eps clamp
-    assert torch.allclose(n_bias, torch.full_like(n_bias, expected_neo), atol=1e-5)
 
 
 # ── helpers ─────────────────────────────────────────────────────
