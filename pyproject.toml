@@ -35,3 +35,8 @@ build-backend = "setuptools.build_meta"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+    # PyTorch 自己内部 torch/jit/_script.py 用 torch.jit.script_method,Python 3.14+ 触发
+    # deprecation。不是我们代码,等 upstream 适配即可。限定模块来源避免误伤别的 lib。
+    "ignore::DeprecationWarning:torch.jit._script",
+]

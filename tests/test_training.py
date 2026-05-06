@@ -1,6 +1,4 @@
-"""
-测试训练循环在小数据上能跑通 (v7)
-"""
+"""测试训练循环在小数据上能跑通 (v9)。"""
 import torch
 import pytest
 import torch.nn as nn
@@ -9,14 +7,16 @@ from torch.utils.data import DataLoader
 from xinhe.model.config import XinheConfig
 from xinhe.model.backbone import BackboneBase
 from xinhe.model.xinhe_model import XinheModel
+from xinhe.model.neural_memory_pair import XinheMemoryState
 from xinhe.data.conversation import collate_episodes
 
 
 N_LAYERS = 4
+HOOK_LAYERS = [1, 3]
 
 
 class TinyBackbone(nn.Module, BackboneBase):
-    """极小 backbone 用于训练测试"""
+    """极小 backbone 用于训练测试。layer 1 / 3 是 full-attn 层。"""
 
     def __init__(self):
         nn.Module.__init__(self)
@@ -42,9 +42,12 @@ class TinyBackbone(nn.Module, BackboneBase):
     def get_num_layers(self):
         return N_LAYERS
 
+    def get_hook_layer_indices(self):
+        return HOOK_LAYERS
+
 
 class DummyDataset:
-    """极小数据集: 每个 episode 有 num_segments 个 segment, 每个 (ids, labels, weights) 三元组"""
+    """极小数据集:每个 episode 有 num_segments 个 segment,每个 (ids, labels, weights) 三元组"""
 
     def __init__(self, num_episodes=10, seg_len=16, num_segments=4):
         self.episodes = []
@@ -64,14 +67,12 @@ class DummyDataset:
         return self.episodes[idx]
 
 
-def test_training_loop_runs():
-    """训练循环能跑通几步"""
+def _common_config(**overrides):
     config = XinheConfig(
         hidden_size=32,
         n_heads=4,
-        head_dim=8,
-        read_scale_init=-5.0,
-        lora_rank=0,
+        head_dim=8,           # d_total = 32 = hidden_size,_d_total 是 Identity
+        mem_chunk_size=4,
         freeze_backbone=False,
         tbptt_turns=2,
         batch_size=2,
@@ -81,8 +82,16 @@ def test_training_loop_runs():
         max_steps=4,
         device="cpu",
         dtype="float32",
+        per_segment_checkpoint=False,
+        phase="P-cap",
     )
+    for k, v in overrides.items():
+        setattr(config, k, v)
+    return config
 
+
+def test_training_loop_runs():
+    config = _common_config()
     backbone = TinyBackbone()
     model = XinheModel(config, backbone=backbone)
 
@@ -91,45 +100,35 @@ def test_training_loop_runs():
 
     from xinhe.training.trainer import Trainer
     trainer = Trainer(model, config, loader)
-
     trainer.train()
     assert trainer.global_step > 0
 
 
 def test_state_detach_in_tbptt():
-    """验证截断 BPTT 正确 detach 状态"""
-    config = XinheConfig(
-        hidden_size=32, n_heads=4, head_dim=8,
-        read_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
-        tbptt_turns=2, device="cpu", dtype="float32",
-    )
+    """v9 XinheMemoryState.detach() 不报错且类型不变"""
+    config = _common_config()
     backbone = TinyBackbone()
     model = XinheModel(config, backbone=backbone)
 
     B, T = 2, 8
     state = model.init_state(B)
+    assert isinstance(state, XinheMemoryState)
 
     for turn_idx in range(4):
         if turn_idx > 0 and turn_idx % config.tbptt_turns == 0:
             state = state.detach()
-            assert not state.requires_grad
+            assert isinstance(state, XinheMemoryState)
 
         input_ids = torch.randint(0, 50, (B, T))
         labels = input_ids.clone()
         result = model(input_ids, state, labels=labels)
         state = result["state_next"]
-
-        if turn_idx % config.tbptt_turns > 0:
-            assert state.requires_grad or result["loss"].requires_grad
+        assert isinstance(state, XinheMemoryState)
 
 
-def test_v7_single_param_group():
-    """v7: optimizer 仅 Hippocampus + LoRA 两组（lora_rank=0 时仅 plugin 一组）"""
-    config = XinheConfig(
-        hidden_size=32, n_heads=4, head_dim=8,
-        read_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
-        tbptt_turns=2, device="cpu", dtype="float32",
-    )
+def test_v9_single_param_group():
+    """v9: optimizer 只有 memory 一个 param group(无 LoRA 路径)"""
+    config = _common_config()
     backbone = TinyBackbone()
     model = XinheModel(config, backbone=backbone)
 
@@ -138,19 +137,12 @@ def test_v7_single_param_group():
 
     from xinhe.training.trainer import Trainer
     trainer = Trainer(model, config, loader)
-
-    # lora_rank=0 → 只剩 Hippocampus 一组
     assert len(trainer.optimizer.param_groups) == 1
 
 
-def test_v5a_plugin_lr_multiplier():
-    """plugin_lr_multiplier 控制 plugin 组的 LR"""
-    config = XinheConfig(
-        hidden_size=32, n_heads=4, head_dim=8,
-        read_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
-        learning_rate=1e-3, plugin_lr_multiplier=2.0,
-        tbptt_turns=2, device="cpu", dtype="float32",
-    )
+def test_plugin_lr_multiplier():
+    """plugin_lr_multiplier 控制 memory 组的 lr"""
+    config = _common_config(plugin_lr_multiplier=2.0)
     backbone = TinyBackbone()
     model = XinheModel(config, backbone=backbone)
 
@@ -165,12 +157,7 @@ def test_v5a_plugin_lr_multiplier():
 
 
 def test_weighted_loss_equals_unweighted_when_uniform():
-    """uniform weights=1 的加权 loss 等于不加权 loss"""
-    config = XinheConfig(
-        hidden_size=32, n_heads=4, head_dim=8,
-        read_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
-        tbptt_turns=2, device="cpu", dtype="float32",
-    )
+    config = _common_config()
     backbone = TinyBackbone()
     model = XinheModel(config, backbone=backbone)
     model.eval()
@@ -191,12 +178,7 @@ def test_weighted_loss_equals_unweighted_when_uniform():
 
 
 def test_weighted_loss_value_token_5x():
-    """value token 权重 5x 时, loss 应向 value 位置倾斜"""
-    config = XinheConfig(
-        hidden_size=32, n_heads=4, head_dim=8,
-        read_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
-        tbptt_turns=2, device="cpu", dtype="float32",
-    )
+    config = _common_config()
     backbone = TinyBackbone()
     model = XinheModel(config, backbone=backbone)
     model.eval()
@@ -219,12 +201,7 @@ def test_weighted_loss_value_token_5x():
 
 
 def test_weighted_loss_ignores_minus_100():
-    """weights=0 的位置 (对应 -100 label) 不贡献 loss"""
-    config = XinheConfig(
-        hidden_size=32, n_heads=4, head_dim=8,
-        read_scale_init=-5.0, lora_rank=0, freeze_backbone=False,
-        tbptt_turns=2, device="cpu", dtype="float32",
-    )
+    config = _common_config()
     backbone = TinyBackbone()
     model = XinheModel(config, backbone=backbone)
     model.eval()

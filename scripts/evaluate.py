@@ -40,19 +40,11 @@ def load_model_and_tokenizer(config, checkpoint_path, device):
 
     if checkpoint_path:
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-        if "hippocampus_state" not in checkpoint:
+        if "memory_pair_state" not in checkpoint:
             raise RuntimeError(
-                "checkpoint 缺少 'hippocampus_state' 键。仅兼容 v7+ 格式。"
+                "checkpoint 缺少 'memory_pair_state' 键。仅兼容 v9+ 格式。"
             )
-        model.hippocampus.load_state_dict(checkpoint["hippocampus_state"], strict=True)
-        from xinhe.model.lora import LoRALinear
-        lora_state = checkpoint.get("lora_state", {})
-        for name, module in model.backbone.named_modules():
-            if isinstance(module, LoRALinear):
-                if f"{name}.lora_A" in lora_state:
-                    module.lora_A.data = lora_state[f"{name}.lora_A"]
-                if f"{name}.lora_B" in lora_state:
-                    module.lora_B.data = lora_state[f"{name}.lora_B"]
+        model.memory.load_state_dict(checkpoint["memory_pair_state"], strict=True)
 
     model.to(device)
     model.eval()

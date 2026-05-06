@@ -9,23 +9,21 @@ from xinhe.model.config import XinheConfig
 
 
 def test_from_yaml_qwen():
-    """qwen3.5-0.8b.yaml 能正确加载并继承 base (v5c)"""
+    """qwen3.5-0.8b.yaml 能正确加载并继承 base (v9: head_dim=64,d_total=1024)"""
     config, _ = XinheConfig.from_yaml("configs/qwen3.5-0.8b.yaml")
     assert config.backbone_type == "qwen"
     assert config.hidden_size == 1024
     assert config.n_heads == 16
-    assert config.head_dim == 128        # v5c Phase A 第二轮扩容量
-    # 继承自 base.yaml: turn_max_tokens / max_turns_per_episode / tbptt_turns 已删，
-    # 改为 per-stage 显式写（validate_stage_config 校验），dataclass 默认值仍存在
+    assert config.head_dim == 64           # v9: d_total = 16*64 = 1024 = hidden_size
     assert config.learning_rate == 3e-4
 
 
 def test_from_yaml_4b():
-    """qwen3.5-4b.yaml 继承 v5c 默认 n_heads/head_dim"""
+    """qwen3.5-4b.yaml 继承 v9 默认 n_heads/head_dim"""
     config, _ = XinheConfig.from_yaml("configs/qwen3.5-4b.yaml")
     assert config.hidden_size == 2560
     assert config.n_heads == 16
-    assert config.head_dim == 128
+    assert config.head_dim == 64
 
 
 def test_yaml_override():

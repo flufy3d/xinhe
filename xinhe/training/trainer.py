@@ -1,10 +1,10 @@
 """
-Trainer (v7) — 训练循环
+Trainer (v9) — 训练循环
 
 核心特性:
-- state 跨 turn (对话轮次) 传递，state 是单张量 W: (B, H, d_v, d_k)
+- state 跨 turn 传递,state 是 XinheMemoryState(per-layer LayerMemState 字典)
 - 截断 BPTT: 每 tbptt_turns 轮做 detach + backward + step
-- 只训练 Hippocampus + LoRA 参数
+- 只训练 NeuralMemoryPair 参数(backbone 全冻,无 LoRA)
 """
 import math
 from pathlib import Path
@@ -13,8 +13,6 @@ from typing import Optional
 import torch
 from torch.utils.data import DataLoader
 
-# 预加载 torch 子模块 (如果在函数内 import, Python 会把 torch 误作 local 变量,
-# 导致 UnboundLocalError)
 try:
     import torch._dynamo
     import torch._logging
@@ -23,12 +21,6 @@ except Exception:
 
 from ..model.xinhe_model import XinheModel
 from ..model.config import XinheConfig
-from ..model.lora import get_lora_params
-from ..model.delta_kernel import suppress_log as _suppress_delta_log
-
-# 训练进程内静默验证段的 fla 后端 log:训练首次写时仍会打印 backend=torch,
-# 验证段第一次切到 fla 不再噪音。独立运行 evaluate/chat/visualize 脚本不受影响。
-_suppress_delta_log("fla")
 
 
 class Trainer:
@@ -89,53 +81,32 @@ class Trainer:
         self._ema_acc = None
 
     def _apply_freezes(self, config: XinheConfig):
-        """按配置冻结/解冻 LoRA / Hippocampus 参数。
-
-        - freeze_lora: bootstrap 用,强迫 Hippocampus 独立承担
-        - plugin_lr_multiplier=0 也等效冻结整个 Hippocampus
-        """
-        freeze_lora = getattr(config, "freeze_lora", False)
-        for p in get_lora_params(self.model.backbone):
-            p.requires_grad = not freeze_lora
-
+        """按配置冻结 NeuralMemoryPair 内的 alpha / gate_q。
+        plugin_lr_multiplier=0 等效冻结整个 memory。"""
         freeze_plugin = getattr(config, "plugin_lr_multiplier", 1.0) == 0
-        for p in self.model.hippocampus.parameters():
+        for p in self.model.memory.parameters():
             p.requires_grad = not freeze_plugin
 
-        # freeze_beta_weight：reset beta_proj.weight 到零 + 冻结，保留 bias 可训
-        # 让 β = σ(bias) 纯 per-head 静态先验。防止 β 在 W 空态死锁中被压到 0。
-        if getattr(config, "freeze_beta_weight", False):
-            import torch.nn as nn
-            nn.init.zeros_(self.model.hippocampus.beta_proj.weight)
-            self.model.hippocampus.beta_proj.weight.requires_grad = False
-            # bias 保留可训（让模型调节整体写强度）
-            print("  [freeze_beta_weight] beta_proj.weight reset 到零 + 冻结（β=σ(bias) per-head 静态）")
+        if getattr(config, "freeze_alpha", False):
+            for pair in self.model.memory.values():
+                pair.alpha_logit.requires_grad = False
+            print("  [freeze_alpha] alpha_logit 全部冻结")
 
-        # freeze_read_scale_at: 强制 read_scale = logit(x) 并冻结。破 chicken-and-egg
-        scale_val = getattr(config, "freeze_read_scale_at", 0.0)
-        if scale_val > 0.0 and scale_val < 1.0:
-            import math as _math
-            logit = _math.log(scale_val / (1.0 - scale_val))
-            with torch.no_grad():
-                self.model.hippocampus.read_scale.data.fill_(logit)
-            self.model.hippocampus.read_scale.requires_grad = False
-            print(f"  [freeze_read_scale_at] read_scale = {scale_val:.3f} (logit={logit:.3f}) 冻结")
+        if getattr(config, "freeze_gate_q", False):
+            for pair in self.model.memory.values():
+                for p in pair.gate_q.parameters():
+                    p.requires_grad = False
+            print("  [freeze_gate_q] gate_q.weight 全部冻结")
 
     def _build_optimizer(self, config: XinheConfig) -> torch.optim.AdamW:
-        """构建 optimizer: Hippocampus / LoRA 两组独立学习率。"""
+        """构建 optimizer:NeuralMemoryPair 单组 lr × plugin_lr_multiplier。"""
         lr = config.learning_rate
         plugin_mult = getattr(config, "plugin_lr_multiplier", 1.0)
 
-        plugin_params = [p for p in self.model.hippocampus.parameters() if p.requires_grad]
-
+        plugin_params = self.model.get_trainable_params()
         param_groups = []
         if plugin_params:
             param_groups.append({"params": plugin_params, "lr": lr * plugin_mult})
-
-        if not getattr(config, "freeze_lora", False):
-            lora_params = [p for p in get_lora_params(self.model.backbone) if p.requires_grad]
-            if lora_params:
-                param_groups.append({"params": lora_params, "lr": lr})
         return torch.optim.AdamW(param_groups, weight_decay=config.weight_decay)
 
     def _build_scheduler(self):
@@ -201,11 +172,13 @@ class Trainer:
             print(f"  [最终 val @ step {self.global_step}]")
             self._validate()
 
-        read_scale = torch.sigmoid(self.model.hippocampus.read_scale).item()
+        # 取一个 layer 的 alpha 平均当作整体记忆开度指标
+        alphas = [torch.sigmoid(p.alpha_logit).item() for p in self.model.memory.values()]
+        alpha_mean = sum(alphas) / max(len(alphas), 1)
         if self._early_stopped:
-            print(f"训练已收敛, 共 {self.global_step} 步, read_scale={read_scale:.4f}")
+            print(f"训练已收敛, 共 {self.global_step} 步, alpha_mean={alpha_mean:.4f}")
         else:
-            print(f"训练完成, 共 {self.global_step} 步, read_scale={read_scale:.4f}")
+            print(f"训练完成, 共 {self.global_step} 步, alpha_mean={alpha_mean:.4f}")
 
     def _train_epoch(self) -> float:
         """训练一个 epoch (遍历所有 episode)"""
@@ -394,12 +367,12 @@ class Trainer:
 
         if self.global_step % self.config.log_every == 0:
             lr = self.scheduler.get_last_lr()[0]
-            hippo = self.model.hippocampus
-            read_scale = torch.sigmoid(hippo.read_scale).item()
+            alphas = [torch.sigmoid(p.alpha_logit).item() for p in self.model.memory.values()]
+            alpha_mean = sum(alphas) / max(len(alphas), 1)
             print(
                 f"  [Step {self.global_step}] ema_loss={self._ema_loss:.4f} "
                 f"ema_acc={self._ema_acc:.2%} lr={lr:.2e} "
-                f"read_scale={read_scale:.4f}"
+                f"alpha={alpha_mean:.4f}"
             )
 
         if self.global_step % self.config.save_every == 0:
@@ -440,57 +413,39 @@ class Trainer:
         self.optimizer.zero_grad()
 
     def _save_checkpoint(self, path: Optional[str] = None):
-        """保存 checkpoint (只保存可训练参数 + 优化器状态)"""
+        """v9 ckpt: 单键 memory_pair_state(整个 ModuleDict 的 state_dict)。"""
         if path is None:
             path = f"checkpoints/xinhe_step_{self.global_step}.pt"
 
         save_dir = Path(path).parent
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        hippocampus_state = self.model.hippocampus.state_dict()
-
-        # LoRA 参数
-        lora_state = {}
-        for name, module in self.model.backbone.named_modules():
-            from ..model.lora import LoRALinear
-            if isinstance(module, LoRALinear):
-                lora_state[f"{name}.lora_A"] = module.lora_A.data
-                lora_state[f"{name}.lora_B"] = module.lora_B.data
+        memory_pair_state = self.model.memory.state_dict()
 
         checkpoint = {
             "global_step": self.global_step,
-            "hippocampus_state": hippocampus_state,
-            "lora_state": lora_state,
+            "memory_pair_state": memory_pair_state,
             "optimizer_state": self.optimizer.state_dict(),
             "scheduler_state": self.scheduler.state_dict(),
             "config": self.config,
             "curriculum_stage": self.current_stage_name,
+            "version": "v9",
         }
 
         torch.save(checkpoint, path)
         print(f"  [Checkpoint] 保存到 {path}")
 
     def load_checkpoint(self, path: str):
-        """加载 checkpoint（v7 strict=True，不兼容 v5c/v6 旧格式）"""
+        """加载 checkpoint(v9 strict=True,不兼容 v8 hippocampus_state)。"""
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
 
-        if "hippocampus_state" not in checkpoint:
+        if "memory_pair_state" not in checkpoint:
             raise RuntimeError(
-                "checkpoint 缺少 'hippocampus_state' 键。v7 不兼容 v5c/v6 旧格式，"
+                "checkpoint 缺少 'memory_pair_state' 键。v9 不兼容 v8 hippocampus_state,"
                 "请从零重训。"
             )
-        self.model.hippocampus.load_state_dict(checkpoint["hippocampus_state"], strict=True)
+        self.model.memory.load_state_dict(checkpoint["memory_pair_state"], strict=True)
         self.global_step = checkpoint["global_step"]
-
-        # 恢复 LoRA 参数
-        from ..model.lora import LoRALinear
-        lora_state = checkpoint.get("lora_state", {})
-        for name, module in self.model.backbone.named_modules():
-            if isinstance(module, LoRALinear):
-                if f"{name}.lora_A" in lora_state:
-                    module.lora_A.data = lora_state[f"{name}.lora_A"]
-                if f"{name}.lora_B" in lora_state:
-                    module.lora_B.data = lora_state[f"{name}.lora_B"]
 
         if "optimizer_state" in checkpoint:
             self.optimizer.load_state_dict(checkpoint["optimizer_state"])

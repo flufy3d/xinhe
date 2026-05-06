@@ -1,44 +1,65 @@
-"""NovelGenerator:基于真实小说的 regex 伪交互数据生成器,无 LLM 调用。
+"""NovelGenerator (v9 raw chunking) — 长上下文 next-token,支持单文件 or 目录(多本)
 
-设计理念:
-  - user = 引号内纯台词(信息孤立) → 模型只能从 W 拉前后文 anchor
-  - assistant = 上 dialog 段后 → 当前 dialog 段(含原文) → 下 dialog 段前
-  - 起点随机 + episode 长度随机 → 同段 dialog 出多种切分,堵 LoRA 死记
+每 episode = N 个连续章内 chunk(章内不跨,避免 fast-weights 跨章错乱)。
+每 chunk 当一个 turn 的 assistant content,user 留空占位。labels 全部 token
+next-token,无 VALUE 加权。最贴 Titans-MAC 训练任务。
 
-支持 n_samples=-1 自适应: 自动 = len(dialog_idx) × coverage。
-
-novel_path 只能从 CLI (--novel-path) 注入,yaml 配置不持久化路径。
-训练入口 train.py 不会触发生成,数据缺失打 hint 提醒 generate_data.py。
+novel_path 只能从 CLI(--novel-path)注入,可指向单个 .txt 或包含多本的目录。
 """
 from __future__ import annotations
 
+import random
+from pathlib import Path
 from typing import Optional
 
-from collections import defaultdict
-
+from xinhe.data.io import write_jsonl
+from xinhe.data.schema import Sample
 from xinhe.data.generators.base import Generator, GenerateRequest
 from xinhe.data.generators.novel.novel_loader import (
     DEFAULT_CHAPTER_PATTERN,
     NovelIndex,
     load_paragraphs,
 )
-from xinhe.data.generators.novel.runner import generate_novel_dataset
 
 
-def _compute_valid_starts(idx: NovelIndex, *, min_remaining: int) -> list[int]:
-    """章内剩余 dialog 段 ≥ min_remaining 的位置才算合法起点。
+def _chunks_per_chapter(idx: NovelIndex, *, chunk_chars: int) -> dict[int, list[str]]:
+    """把每章段落拼接后按 chunk_chars 切成 raw chunk(字符级)。
 
-    防止起点贴近章末,episode 凑不够 n_turns(章内不可跨)。
+    中文 1 char ≈ 1.5 token,所以 chunk_chars=350 ≈ 500 token/chunk(留 12 token 给
+    ChatML/empty-user prefix,turn_max_tokens=512 时 chunk 净占满)。
+
+    最末不足半 chunk 丢弃;每章必须至少 2 个 chunk 才入选。
     """
-    chap_dialogs: dict[int, list[int]] = defaultdict(list)
-    for d in idx.dialog_idx:
-        chap_dialogs[idx.chapter_id_of[d]].append(d)
-    valid: list[int] = []
-    for dlist in chap_dialogs.values():
-        if len(dlist) >= min_remaining:
-            # 前 (len - min_remaining + 1) 个段:它们后面还有 ≥ min_remaining-1 个 dialog
-            valid.extend(dlist[: len(dlist) - min_remaining + 1])
-    return valid
+    chap_text: dict[int, list[str]] = {}
+    for i, p in enumerate(idx.paragraphs):
+        chap_id = idx.chapter_id_of[i]
+        chap_text.setdefault(chap_id, []).append(p)
+
+    chunks: dict[int, list[str]] = {}
+    for chap_id, paras in chap_text.items():
+        text = "\n".join(paras)
+        out: list[str] = []
+        for i in range(0, len(text), chunk_chars):
+            piece = text[i : i + chunk_chars]
+            if i + chunk_chars >= len(text) and len(piece) < chunk_chars // 2:
+                continue   # 章末不足半 chunk 丢
+            out.append(piece)
+        if len(out) >= 2:
+            chunks[chap_id] = out
+    return chunks
+
+
+def _discover_novels(novel_path: str) -> list[tuple[str, Path]]:
+    """novel_path 是文件或目录。返回 [(novel_name, file_path), ...]。"""
+    p = Path(novel_path)
+    if p.is_file():
+        return [(p.stem, p)]
+    if p.is_dir():
+        files = sorted(p.glob("*.txt"))
+        if not files:
+            raise RuntimeError(f"[novel] 目录 {p} 下无 .txt 文件")
+        return [(f.stem, f) for f in files]
+    raise FileNotFoundError(f"[novel] novel_path 不是文件也不是目录: {novel_path}")
 
 
 class NovelGenerator(Generator):
@@ -48,95 +69,132 @@ class NovelGenerator(Generator):
         self,
         *,
         max_turns: int,
-        novel_path: Optional[str] = None,    # CLI 注入,yaml 不持久化
-        turns_range: tuple[int, int] = (8, 12),
-        coverage: int = 3,
-        leading_paras: int = 2,
-        turn_max_chars: int = 200,
-        min_dialog_density: float = 0.05,
+        novel_path: Optional[str] = None,
+        chunk_chars: int = 350,           # ≈ 500 token/chunk(中文 ~1.5 token/char)
+        turns_per_episode: int = 8,
         chapter_pattern: str = DEFAULT_CHAPTER_PATTERN,
+        chapter_patterns: Optional[dict[str, str]] = None,   # novel_name (stem) → regex
     ):
         self.max_turns = max_turns
         self.novel_path = novel_path
-        self.turns_range = tuple(turns_range)
-        self.coverage = coverage
-        self.leading_paras = leading_paras
-        self.turn_max_chars = turn_max_chars
-        self.min_dialog_density = min_dialog_density
+        self.chunk_chars = chunk_chars
+        self.turns_per_episode = min(turns_per_episode, max_turns)
         self.chapter_pattern = chapter_pattern
-        # 延迟加载: 只有真正生成时才读小说,避免 train.py 启动期就要求路径
-        self._index = None
+        self.chapter_patterns = chapter_patterns or {}
+        # _chunks key 是 (novel_name, chapter_id),跨本不冲突
+        self._chunks: Optional[dict[tuple[str, int], list[str]]] = None
+        self._starts: Optional[list[tuple[tuple[str, int], int]]] = None
 
-    def _ensure_index(self):
-        if self._index is not None:
+    def _ensure_chunks(self):
+        if self._chunks is not None:
             return
         if not self.novel_path:
             raise RuntimeError(
-                "[novel] 缺少 novel_path。\n"
-                "  小说路径只能从 CLI 传入,请运行:\n"
-                "    python scripts/generate_data.py --config configs/novel.yaml "
-                "--stage novel_only --novel-path /path/to/novel.txt"
+                "[novel-v9] 缺少 novel_path。从 CLI 传入:\n"
+                "  python scripts/generate_data.py ... --novel-path /path/to/file.txt\n"
+                "  或 --novel-path /path/to/dir(目录下所有 *.txt 都会扫)"
             )
-        self._index = load_paragraphs(
-            self.novel_path,
-            min_density=self.min_dialog_density,
-            chapter_pattern=self.chapter_pattern,
-        )
-        # 起点预过滤: 章内后续 dialog 段 ≥ turns_range[1] × 1.5 才算合法起点。
-        # × 1.5 给 drop(bad_user/no_lead) 留余量,大幅降低 short_episode。
-        self._valid_starts = _compute_valid_starts(
-            self._index,
-            min_remaining=int(self.turns_range[1] * 1.5),
-        )
-        print(
-            f"  [novel] loaded {self.novel_path}: "
-            f"{self._index.n_paragraphs} paragraphs (after chapter strip), "
-            f"{len(self._index.dialog_idx)} dialog ({self._index.dialog_density:.1%}), "
-            f"{len(self._index.action_idx)} action, "
-            f"{self._index.n_chapters} chapters, "
-            f"{len(self._valid_starts)} valid starts (after end-of-chapter pruning)"
-        )
-        if not self._valid_starts:
+
+        novels = _discover_novels(self.novel_path)
+        self._chunks = {}
+        per_novel_summary: list[str] = []
+
+        for novel_name, path in novels:
+            # 优先用 per-novel pattern(精确匹配 stem),否则用全局默认
+            pattern = self.chapter_patterns.get(novel_name, self.chapter_pattern)
+            try:
+                idx = load_paragraphs(
+                    str(path),
+                    min_density=0.0,
+                    chapter_pattern=pattern,
+                )
+            except Exception as e:
+                print(f"  [novel-v9] {novel_name}: load 失败 ({e}),跳过")
+                continue
+            chunks_for_novel = _chunks_per_chapter(idx, chunk_chars=self.chunk_chars)
+            for chap_id, chunks in chunks_for_novel.items():
+                self._chunks[(novel_name, chap_id)] = chunks
+            total_chunks = sum(len(cs) for cs in chunks_for_novel.values())
+            pat_tag = " [override]" if novel_name in self.chapter_patterns else ""
+            per_novel_summary.append(
+                f"{novel_name}{pat_tag}: {idx.n_chapters} 章 → {len(chunks_for_novel)} 入选, "
+                f"{total_chunks} chunk"
+            )
+
+        # 收集所有合法 ((novel_name, chap_id), start_idx)
+        starts: list[tuple[tuple[str, int], int]] = []
+        for key, chunks in self._chunks.items():
+            n = len(chunks) - self.turns_per_episode + 1
+            if n > 0:
+                starts.extend((key, i) for i in range(n))
+        self._starts = starts
+
+        total_chunks_all = sum(len(cs) for cs in self._chunks.values())
+        print(f"  [novel-v9] {len(novels)} 本小说,共 {total_chunks_all} chunk(≈{self.chunk_chars} 字/chunk)")
+        for line in per_novel_summary:
+            print(f"    - {line}")
+        print(f"  [novel-v9] {len(starts)} 合法 episode 起点(turns_per_episode={self.turns_per_episode})")
+        if not starts:
             raise RuntimeError(
-                f"[novel] 章内 dialog 段不足 {self.turns_range[1]} 个 → 无合法起点。"
-                f"考虑降低 turns_range 上限,或换章节更长的小说。"
+                f"[novel-v9] 没有任何章 ≥ {self.turns_per_episode} chunks。"
+                f"考虑降低 turns_per_episode 或 chunk_chars,或换长章节小说。"
             )
 
     def _resolve_n_samples(self, requested: int) -> int:
-        """n_samples=-1 → 自适应 = dialog_segs × coverage;否则原样。"""
         if requested == -1:
-            self._ensure_index()
-            adaptive = len(self._index.dialog_idx) * self.coverage
-            print(f"  [novel] num_samples=-1 自适应 → {adaptive} "
-                  f"(dialog_segs={len(self._index.dialog_idx)} × coverage={self.coverage})")
+            self._ensure_chunks()
+            adaptive = len(self._starts)
+            print(f"  [novel-v9] num_samples=-1 → 自适应 {adaptive}(覆盖每个起点 1 次)")
             return adaptive
         return requested
 
     def _is_cached(self, req: GenerateRequest) -> bool:
-        # n_samples=-1 时基类 _is_cached 直接返回 False(避免误触发文件读)
-        # 改为先 resolve 自适应数量后再判;但 -1 路径需要先 load 小说,
-        # 若仅做缓存命中检查时不希望强制 load,这里只在缓存文件存在时才 resolve。
         if req.n_samples == -1:
             if not req.out_path.exists():
                 return False
-            # 文件已存在 → 必须 resolve 真实数量才能比对
             from dataclasses import replace
             req2 = replace(req, n_samples=self._resolve_n_samples(-1))
             return super()._is_cached(req2)
         return super()._is_cached(req)
 
     def _generate_impl(self, req: GenerateRequest) -> tuple[int, int]:
-        self._ensure_index()
+        self._ensure_chunks()
         n_samples = self._resolve_n_samples(req.n_samples)
-        return generate_novel_dataset(
-            req.out_path,
-            novel_index=self._index,
-            valid_starts=self._valid_starts,
-            n_samples=n_samples,
-            seed=req.seed,
-            turns_range=self.turns_range,
-            leading_paras=self.leading_paras,
-            turn_max_chars=self.turn_max_chars,
-            rejected_path=req.rejected_path,
-            progress_every=max(1000, n_samples // 10),
-        )
+        rng = random.Random(req.seed)
+
+        def _gen():
+            for sample_idx in range(n_samples):
+                key, start = rng.choice(self._starts)
+                novel_name, chap_id = key
+                chunks = self._chunks[key]
+                episode_chunks = chunks[start : start + self.turns_per_episode]
+
+                conversations: list[dict] = []
+                for chunk in episode_chunks:
+                    conversations.append({"role": "user", "content": ""})
+                    conversations.append({
+                        "role": "assistant",
+                        "content": chunk,
+                        "train_loss": "true",
+                        "value": None,
+                        "value_span": [],
+                        "value_tier": None,
+                        "weight_per_span": 0.0,
+                    })
+
+                yield Sample(
+                    sample_id=f"novel_{sample_idx:08x}",
+                    stage="novel",
+                    skeleton_id=None,
+                    meta={
+                        "novel": novel_name,
+                        "chapter_id": chap_id,
+                        "chunk_start": start,
+                        "n_chunks": len(episode_chunks),
+                        "chunk_chars": self.chunk_chars,
+                    },
+                    conversations=conversations,
+                )
+
+        kept, rejected = write_jsonl(_gen(), req.out_path, rejected_path=req.rejected_path)
+        return kept, rejected

@@ -45,30 +45,26 @@ def load_tokenizer(config: XinheConfig):
     return tokenizer
 
 
-def print_stats(model: XinheModel, state: torch.Tensor):
-    """打印 Hippocampus 状态分析 (单 W,纯 Delta Rule)"""
+def print_stats(model: XinheModel, state):
+    """打印 NeuralMemoryPair 状态简要(per-layer alpha 平均)"""
     stats = model.state_stats(state)
     print(f"\n{'='*50}")
-    print(f"  Hippocampus 状态分析 (W: {tuple(state.shape)})")
+    print(f"  v9 Memory 状态 ({stats['n_layers']} 层 NeuralMemoryPair)")
     print(f"{'='*50}")
-    print(f"  read_scale:        {stats['read_scale']:.4f}")
-    print(f"  W_norm:            {stats['W_norm']:.4f}")
-    print(f"  W_effective_rank:  {stats['W_effective_rank']:.2f}")
+    print(f"  alpha_mean:        {stats['alpha_mean']:.4f}")
     print(f"{'='*50}\n")
 
 
-def save_state(state: torch.Tensor, name: str):
-    """保存状态到文件 (v5c shape: (1,H,d_v,d_k))"""
+def save_state(state, name: str):
+    """保存状态到文件(v9 XinheMemoryState 用 torch.save 序列化整个对象)"""
     STATES_DIR.mkdir(parents=True, exist_ok=True)
     path = STATES_DIR / f"{name}.pt"
-    torch.save(state.cpu(), path)
+    torch.save(state, path)
     print(f"  状态已保存到 {path}")
 
 
-def load_state(name: str, device: torch.device) -> torch.Tensor:
-    """从文件加载状态。
-    注意：v5c 状态形状为 (1,H,d_v,d_k)，与 v5b (1,n_state,state_dim) 不兼容；
-    旧 `.pt` 加载后在 read_layer 内会因形状不匹配报错，需重新 bootstrap。"""
+def load_state(name: str, device: torch.device):
+    """从文件加载状态(v9 XinheMemoryState)。"""
     path = STATES_DIR / f"{name}.pt"
     if not path.exists():
         print(f"  错误: 找不到状态文件 {path}")
@@ -77,7 +73,7 @@ def load_state(name: str, device: torch.device) -> torch.Tensor:
             if files:
                 print(f"  可用的状态: {', '.join(f.stem for f in files)}")
         return None
-    state = torch.load(path, map_location=device, weights_only=True)
+    state = torch.load(path, map_location=device, weights_only=False)
     print(f"  状态已从 {path} 加载")
     return state
 
@@ -122,20 +118,11 @@ def main():
         if config_explicit and isinstance(ckpt_cfg, XinheConfig):
             if (ckpt_cfg.backbone_type != config.backbone_type) or (ckpt_cfg.hidden_size != config.hidden_size):
                 print("  警告: --config 与 checkpoint 不匹配。")
-        if "hippocampus_state" not in checkpoint:
+        if "memory_pair_state" not in checkpoint:
             raise RuntimeError(
-                "checkpoint 缺少 'hippocampus_state' 键。v7 不兼容 v5c/v6 旧格式。"
+                "checkpoint 缺少 'memory_pair_state' 键。v9 不兼容 v8 hippocampus_state。"
             )
-        model.hippocampus.load_state_dict(checkpoint["hippocampus_state"], strict=True)
-        # 恢复 LoRA
-        from xinhe.model.lora import LoRALinear
-        lora_state = checkpoint.get("lora_state", {})
-        for name, module in model.backbone.named_modules():
-            if isinstance(module, LoRALinear):
-                if f"{name}.lora_A" in lora_state:
-                    module.lora_A.data = lora_state[f"{name}.lora_A"]
-                if f"{name}.lora_B" in lora_state:
-                    module.lora_B.data = lora_state[f"{name}.lora_B"]
+        model.memory.load_state_dict(checkpoint["memory_pair_state"], strict=True)
         print(f"  checkpoint 已加载: {args.checkpoint}")
 
     model.to(device)
@@ -298,7 +285,9 @@ def main():
             response = response.strip()
             print(f"\n心核: {response}")
 
-        print(f"  [轮次 {turn_count} | scale={torch.sigmoid(model.hippocampus.read_scale).item():.3f}]")
+        alphas = [torch.sigmoid(p.alpha_logit).item() for p in model.memory.values()]
+        alpha_mean = sum(alphas) / max(len(alphas), 1)
+        print(f"  [轮次 {turn_count} | alpha={alpha_mean:.3f}]")
 
 
 

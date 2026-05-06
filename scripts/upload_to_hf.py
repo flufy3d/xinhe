@@ -41,42 +41,49 @@ SPLIT_NAME_REMAP = {"val": "validation"}
 # ── README 正文（改文案就改这里）──────────────────────────────
 
 README_BODY = """\
-# Xinhe Persona Memory Dataset
+# Xinhe Memory Training Dataset
 
-合成中文人格记忆对话数据集，用于 [Xinhe (心核)](https://github.com/flufy3d/xinhe) 项目研究小型 Transformer 在统一状态中涌现记忆能力。
+中文长上下文 + 多轮对话训练数据,用于 [Xinhe (心核)](https://github.com/flufy3d/xinhe)
+项目让小型 Transformer 在 fast-weights NeuralMemory 中习得长程记忆能力(P-cap 阶段)。
 
-每条样本是一段多轮中文对话，包含：用户陈述/修正/查询自身画像 + 助手回应。中间穿插与画像无关的日常话题作为干扰。辅助字段（`value` / `value_span` / `value_tier` / `weight_per_span`）由 parser 在生成后定位，用于训练时构造 token 级加权损失，可计算召回准确率。
+包含四个 config:
+- **skeleton**:11 种合成骨架对话(needle-in-haystack 写读 / 覆写 / 删除 / stale-read 对抗),用于 sanity probe
+- **dialog**:LLM(DeepSeek / OpenRouter)生成的 5-Beat 自然多轮对话,真实分布代理
+- **novel**:中文长篇小说按 ~350 字 raw chunking,每 episode = 8 个章内连续 chunk,
+  用作长上下文 next-token 压力源(章节切分由 generator 通过多 pattern 自动识别)
+- **longcite**:基于 [zai-org/LongCite-45k](https://huggingface.co/datasets/zai-org/LongCite-45k)
+  的长文档 QA(末轮 question + cited answer),前 7 turn 是文档 chunks,末 1 turn 是 QA 应用
 
-## 数据生成
-
-由 LLM (DeepSeek / OpenRouter 多模型) 在指定骨架 (skeleton) 下合成，再由后处理 parser 在 assistant 回答中定位 value 字符跨度。
+P-cap 训练时通过 `mix_dynamic` 在内存按比例(40% novel / 30% longcite / 20% dialog / 10% skeleton)抽样,
+不预生成 mix 物理文件 — 训练入口直接读这四个 source config。
 
 ## Schema
 
-每行 jsonl 一条样本：
+每行 jsonl 一条样本:
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `sample_id` | str | 样本 hash 短 ID |
-| `stage` | str | 课程阶段编号（与 config_name 对齐） |
-| `skeleton_id` | str | 对话骨架模板 ID |
-| `meta` | object | n_turns / target_turns / distance_bucket (near/mid/far) / memory_snapshot |
-| `conversations` | list | 对话轮次：`role` ∈ {user, assistant} + `content`；assistant 多含 `train_loss` / `value` / `value_span` / `value_tier` / `weight_per_span` |
+| `stage` | str | 数据来源标签(`0`/`1`/`novel`) |
+| `skeleton_id` | str \\| null | 骨架模板 ID(skeleton 专属) |
+| `meta` | object | 来源元数据(skeleton 的 n_turns / dialog 的 canonical_facts / novel 的 chapter_id 等) |
+| `conversations` | list | 对话轮次:`role` ∈ {user, assistant} + `content`;assistant 含 `train_loss` ∈ {true, lm_only, false} 决定是否计 loss |
+
+辅助字段(`value` / `value_span` / `value_tier` / `weight_per_span`)由 skeleton/dialog 的 parser 定位 VALUE token,
+用于训练时构造 token 级加权损失。novel config 不带 VALUE 标记(纯长上下文 next-token)。
 
 ## 加载
 
 ```python
 from datasets import load_dataset
 
-ds = load_dataset("flufy3d/xinhe-dataset", "skeleton", split="train")
-print(ds[0]["conversations"])
+ds = load_dataset("flufy3d/xinhe-dataset", "novel", split="train")
+print(ds[0]["conversations"][1]["content"][:100])
 ```
 
-config_name 直接用 kind 名(`skeleton` / `dialog` / `mix`)。每个 config 含 `train` / `validation`,部分还含 `train_codex`(codex-flavored 变体)。
+config_name 直接用 kind 名(`skeleton` / `dialog` / `novel` / `longcite`)。每个 config 含 `train` / `validation`。
 
 ## 国内镜像
-
-国内访问可走 [hf-mirror.com](https://hf-mirror.com)：
 
 ```bash
 export HF_ENDPOINT=https://hf-mirror.com
@@ -85,7 +92,8 @@ huggingface-cli download --repo-type dataset flufy3d/xinhe-dataset --local-dir d
 
 ## 许可证 & 引用
 
-CC-BY-4.0。由 [@flufy3d](https://github.com/flufy3d) 维护，学术使用请引用 Xinhe 项目。
+CC-BY-4.0。由 [@flufy3d](https://github.com/flufy3d) 维护,学术使用请引用 Xinhe 项目。
+仅用于研究目的(fast-weights 长上下文学习能力底座),不作商业用途;原文著作权归各自作者所有。
 """
 
 

@@ -27,7 +27,8 @@ from xinhe.config import validate_stage_config
 from xinhe.model.config import XinheConfig
 from xinhe.model.xinhe_model import XinheModel
 from xinhe.data.conversation import (
-    ConversationDataset, collate_episodes, ensure_chat_template,
+    ConversationDataset, MixedConversationDataset,
+    collate_episodes, ensure_chat_template,
 )
 from xinhe.training.trainer import Trainer
 
@@ -45,20 +46,59 @@ def load_tokenizer(config: XinheConfig):
     return tokenizer
 
 
-def make_dataloaders(config, tokenizer):
-    """根据 config 创建 train/val DataLoader"""
-    train_dataset = ConversationDataset(
-        data_path=config.train_path,
-        tokenizer=tokenizer,
-        turn_max_tokens=config.turn_max_tokens,
-        max_turns_per_episode=config.max_turns_per_episode,
-    )
-    val_dataset = ConversationDataset(
-        data_path=config.val_path,
-        tokenizer=tokenizer,
-        turn_max_tokens=config.turn_max_tokens,
-        max_turns_per_episode=config.max_turns_per_episode,
-    ) if Path(config.val_path).exists() else None
+def make_dataloaders(config, tokenizer, stage_data: dict | None = None):
+    """根据 config 创建 train/val DataLoader。
+
+    stage_data: stage["data"] 段。kind="mix_dynamic" 时走 MixedConversationDataset
+                动态从多源抽样,不落 mix 物理文件;否则走 ConversationDataset 单文件。
+    v9 mode 默认 value_weight_cap=1.0(NeuralMemory fast-weights 不靠 weight reinforcement)。
+    """
+    cap = getattr(config, "value_weight_cap", 1.0)
+    is_mix_dynamic = bool(stage_data) and stage_data.get("kind") == "mix_dynamic"
+
+    if is_mix_dynamic:
+        sources = stage_data["sources"]
+        val_sources = stage_data.get("val_sources", sources)
+        seed = int(stage_data.get("seed", 42))
+        n_train = int(stage_data.get("num_train", 5000))
+        n_val = int(stage_data.get("num_val", 50))
+
+        train_dataset = MixedConversationDataset(
+            sources=sources,
+            n_samples=n_train,
+            seed=seed,
+            tokenizer=tokenizer,
+            turn_max_tokens=config.turn_max_tokens,
+            max_turns_per_episode=config.max_turns_per_episode,
+            value_weight_cap=cap,
+        )
+        val_dataset = (
+            MixedConversationDataset(
+                sources=val_sources,
+                n_samples=n_val,
+                seed=seed + 1,
+                tokenizer=tokenizer,
+                turn_max_tokens=config.turn_max_tokens,
+                max_turns_per_episode=config.max_turns_per_episode,
+                value_weight_cap=cap,
+            )
+            if n_val > 0 else None
+        )
+    else:
+        train_dataset = ConversationDataset(
+            data_path=config.train_path,
+            tokenizer=tokenizer,
+            turn_max_tokens=config.turn_max_tokens,
+            max_turns_per_episode=config.max_turns_per_episode,
+            value_weight_cap=cap,
+        )
+        val_dataset = ConversationDataset(
+            data_path=config.val_path,
+            tokenizer=tokenizer,
+            turn_max_tokens=config.turn_max_tokens,
+            max_turns_per_episode=config.max_turns_per_episode,
+            value_weight_cap=cap,
+        ) if Path(config.val_path).exists() else None
 
     train_loader = DataLoader(
         train_dataset, batch_size=config.batch_size,
@@ -90,10 +130,9 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
         "gradient_checkpointing": "gradient_checkpointing",
         "learning_rate": "learning_rate",
         "plugin_lr_multiplier": "plugin_lr_multiplier",
-        "freeze_lora": "freeze_lora",
-        "freeze_beta_weight": "freeze_beta_weight",
-        "freeze_read_scale_at": "freeze_read_scale_at",
-        "lora_reset": "lora_reset",
+        "freeze_alpha": "freeze_alpha",
+        "freeze_gate_q": "freeze_gate_q",
+        "value_weight_cap": "value_weight_cap",
         "weight_decay": "weight_decay",
         "grad_clip": "grad_clip",
         "warmup_steps": "warmup_steps",
@@ -107,11 +146,14 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
         "log_every": "log_every",
         "save_every": "save_every",
         "eval_every": "eval_every",
-        # v7: 每阶段可调 Hippocampus 配置
+        # v9: 每阶段可调 NeuralMemoryPair 配置
         "n_heads": "n_heads",
         "head_dim": "head_dim",
-        "read_scale_init": "read_scale_init",
-        "beta_bias_init": "beta_bias_init",
+        "hippo_retention": "hippo_retention",
+        "neo_retention": "neo_retention",
+        "hippo_base_lr": "hippo_base_lr",
+        "neo_base_lr": "neo_base_lr",
+        "phase": "phase",
     }
     for yaml_key, field_name in field_map.items():
         if yaml_key in training:
@@ -130,12 +172,26 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
 def generate_stage_data(stage: dict, stage_name: str) -> tuple[str, str]:
     """通过 generate_data.run_stage 调用对应 kind 的 generator/mix。
 
-    Returns: (train_path, val_path) — 由 stage.data.out_dir 推导。
+    Returns: (train_path, val_path) — 由 stage.data.out_dir 推导;
+             kind=mix_dynamic 时返回 sentinel,实际抽样在 make_dataloaders 内做。
 
     特例:kind=novel 不在训练时触发生成(novel_path 必须从 CLI 传给
     generate_data.py)。仅检查文件存在,缺失打 hint 后 sys.exit。
     """
     kind = stage["data"].get("kind", "skeleton")
+
+    if kind == "mix_dynamic":
+        # 动态混合:不预生成文件,sources 在 MixedConversationDataset 内读
+        # 仅校验所有 source 文件存在
+        for src in stage["data"].get("sources", []):
+            if not Path(src["path"]).exists():
+                print(
+                    f"\n[mix_dynamic] source 文件不存在: {src['path']}\n"
+                    f"  Hint:先生成对应 source(eg. novel/dialog/skeleton)。\n"
+                )
+                sys.exit(1)
+        return "<MIX_DYNAMIC>", "<MIX_DYNAMIC>"
+
     out_dir = Path(stage["data"].get("out_dir", f"data/{kind}"))
     train_path = out_dir / "train.jsonl"
     val_path = out_dir / "val.jsonl"
@@ -225,28 +281,11 @@ def train_curriculum(base_config, stages, args):
 
     if init_ckpt:
         ckpt = torch.load(init_ckpt, map_location=base_config.device, weights_only=False)
-        if "hippocampus_state" not in ckpt:
+        if "memory_pair_state" not in ckpt:
             raise RuntimeError(
-                f"checkpoint {init_ckpt} 缺少 'hippocampus_state' 键。v7 不兼容 v5c/v6 旧格式，请从零重训。"
+                f"checkpoint {init_ckpt} 缺少 'memory_pair_state' 键。v9 不兼容 v8 hippocampus_state,请从零重训。"
             )
-        model.hippocampus.load_state_dict(ckpt["hippocampus_state"], strict=True)
-
-        # persona 统一训练: 可以加载 plugin 但 reset LoRA（新 LoRA 从随机 kaiming_A + zero_B 开始）
-        first_stage = stages[start_idx]
-        first_stage_training = first_stage.get("training", {})
-        lora_reset = first_stage_training.get("lora_reset", False)
-
-        if lora_reset:
-            print(f"[课程学习] lora_reset=True，跳过 LoRA 加载（保持新随机初始化）")
-        else:
-            from xinhe.model.lora import LoRALinear
-            lora_state = ckpt.get("lora_state", {})
-            for name, module in model.backbone.named_modules():
-                if isinstance(module, LoRALinear):
-                    if f"{name}.lora_A" in lora_state:
-                        module.lora_A.data = lora_state[f"{name}.lora_A"]
-                    if f"{name}.lora_B" in lora_state:
-                        module.lora_B.data = lora_state[f"{name}.lora_B"]
+        model.memory.load_state_dict(ckpt["memory_pair_state"], strict=True)
         print(f"[课程学习] 从 {init_ckpt} 加载权重")
 
     trainer = None
@@ -272,8 +311,10 @@ def train_curriculum(base_config, stages, args):
         stage_config = apply_stage_overrides(base_config, stage)
         stage_config = replace(stage_config, train_path=train_path, val_path=val_path)
 
-        # 创建 DataLoader
-        train_loader, val_loader, n_train, n_val = make_dataloaders(stage_config, tokenizer)
+        # 创建 DataLoader(mix_dynamic 时把 stage["data"] 传进去走 MixedConversationDataset)
+        train_loader, val_loader, n_train, n_val = make_dataloaders(
+            stage_config, tokenizer, stage_data=stage.get("data"),
+        )
         print(f"[数据] 训练集: {n_train} | 验证集: {n_val}")
         print(f"[参数] lr={stage_config.learning_rate} batch={stage_config.batch_size} "
               f"max_turns={stage_config.max_turns_per_episode} max_steps={stage_config.max_steps}")
@@ -319,10 +360,10 @@ def main():
     config, curriculum = XinheConfig.from_yaml(args.config)
     print(f"=== 心核 (Xinhe) 训练 ===")
     print(f"Backbone: {config.backbone_type} ({config.backbone_model_path}) | 设备: {config.device} | 精度: {config.dtype}")
-    mem_size = config.n_heads * config.head_dim * config.head_dim
-    print(f"状态 W: H={config.n_heads} d_k=d_v={config.head_dim} "
-          f"(每样本 {mem_size} floats) | hidden↔proj: {config.hidden_size}")
-    print(f"LoRA rank: {config.lora_rank} | 目标模块: {config.lora_target_modules}")
+    print(f"NeuralMemoryPair: H={config.n_heads} d_head={config.head_dim} "
+          f"chunk={config.mem_chunk_size} phase={config.phase}")
+    print(f"  Hippo: depth={config.hippo_mlp_depth} retention={config.hippo_retention} lr={config.hippo_base_lr}")
+    print(f"  Neo:   depth={config.neo_mlp_depth} retention={config.neo_retention} lr={config.neo_base_lr}")
 
     if curriculum:
         print(f"课程学习: {len(curriculum)} 个阶段")

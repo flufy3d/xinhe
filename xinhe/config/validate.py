@@ -19,10 +19,7 @@ from xinhe.config.errors import ConfigError
 
 logger = logging.getLogger(__name__)
 
-# 每条 dialog episode 前置 world_qa warmup 的 K 最大值(与 generators.dialog.driver_core._WARMUP_K_DIST 一致)
-_DIALOG_WARMUP_K_MAX = 2
-
-# turn_max_tokens 合理区间（防呆，避免 8192 / 64 这种异常值）
+# turn_max_tokens 合理区间(防呆,避免 8192 / 64 这种异常值)
 _TURN_MAX_TOKENS_MIN = 128
 _TURN_MAX_TOKENS_MAX = 4096
 
@@ -37,8 +34,8 @@ def validate_stage_config(stage_name: str, stage_cfg: dict[str, Any]) -> dict[st
     可选字段：
       - tbptt_turns (int)：默认派生 = max_turns_per_episode；显式给小值会 warning
 
-    依据 stage_cfg["data"]["kind"] 触发额外规则：
-      - dialog: n_turns_range[1] + warmup_K_max <= max_turns_per_episode
+    依据 stage_cfg["data"]["kind"] 触发额外规则:
+      - dialog: n_turns_range[1] <= max_turns_per_episode
       - dialog: beat3_min_chars × 1.5 (zh→token 估算) <= turn_max_tokens
     """
     errors: list[str] = []
@@ -108,7 +105,7 @@ def validate_stage_config(stage_name: str, stage_cfg: dict[str, Any]) -> dict[st
                 f"Hint: lower turn_count_hi to ≤{max_turns} or raise max_turns_per_episode."
             )
 
-    # ── dialog: n_turns_range + warmup_K_max <= max_turns ──
+    # ── dialog: n_turns_range[1] <= max_turns ──
     if kind == "dialog":
         n_turns_range = data.get("n_turns_range")
         if n_turns_range is not None and max_turns is not None:
@@ -120,13 +117,11 @@ def validate_stage_config(stage_name: str, stage_cfg: dict[str, Any]) -> dict[st
                     f"Hint: use 'n_turns_range: [10, 14]'."
                 )
             else:
-                total_max = n_turns_hi + _DIALOG_WARMUP_K_MAX
-                if total_max > max_turns:
+                if n_turns_hi > max_turns:
                     errors.append(
-                        f"dialog n_turns_range={tuple(n_turns_range)} + warmup K_max={_DIALOG_WARMUP_K_MAX} "
-                        f"= {total_max} > max_turns_per_episode={max_turns}. "
-                        f"Hint: reduce n_turns_range upper bound to ≤{max_turns - _DIALOG_WARMUP_K_MAX} "
-                        f"or raise max_turns_per_episode to ≥{total_max}."
+                        f"dialog n_turns_range={tuple(n_turns_range)} > max_turns_per_episode={max_turns}. "
+                        f"Hint: reduce n_turns_range upper bound to ≤{max_turns} "
+                        f"or raise max_turns_per_episode."
                     )
 
         # NOTE: beat3_min_chars 是"beat3 段(多 turn 累计)的总字数门槛"，

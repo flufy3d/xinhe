@@ -108,28 +108,28 @@ def test_tbptt_turns_less_than_max_turns_warns_no_raise(caplog):
 
 
 # ────────────────────────────────────────────────────────────
-# 规则 5: dialog n_turns_range + warmup K_max > max_turns
+# 规则 5: dialog n_turns_range[1] > max_turns
 # ────────────────────────────────────────────────────────────
 
-def test_dialog_n_turns_range_plus_warmup_exceeds_max_turns():
+def test_dialog_n_turns_range_exceeds_max_turns():
     cfg = _stage(
         "dialog",
-        training={"max_turns_per_episode": 12, "turn_max_tokens": 512},
-        data={"n_turns_range": [10, 14]},
+        training={"max_turns_per_episode": 10, "turn_max_tokens": 512},
+        data={"n_turns_range": [8, 14]},
     )
     with pytest.raises(ConfigError) as exc:
         validate_stage_config("s1", cfg)
-    assert "warmup K_max" in str(exc.value)
+    assert "n_turns_range" in str(exc.value)
     assert "Hint:" in str(exc.value)
 
 
 def test_dialog_n_turns_range_within_budget_ok():
     cfg = _stage(
         "dialog",
-        training={"max_turns_per_episode": 16, "turn_max_tokens": 512},
+        training={"max_turns_per_episode": 14, "turn_max_tokens": 512},
         data={"n_turns_range": [10, 14]},
     )
-    validate_stage_config("s1", cfg)  # 14 + 2 = 16 ≤ 16，OK
+    validate_stage_config("s1", cfg)  # 14 ≤ 14,OK
 
 
 # NOTE: 旧 plan 曾加过 "beat3_min_chars × 1.5 > turn_max_tokens 抛错" 规则,

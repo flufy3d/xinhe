@@ -1,0 +1,23 @@
+# LongCite 数据生成入口
+#
+# 前置:下载 1 个 parquet(~240 MB)
+#   python -c "
+#   import os; os.environ['HF_ENDPOINT']='https://hf-mirror.com'
+#   from huggingface_hub import hf_hub_download
+#   hf_hub_download(repo_id='zai-org/LongCite-45k', repo_type='dataset',
+#     revision='refs/convert/parquet',
+#     filename='default/partial-train/0000.parquet',
+#     local_dir='data/longcite_parquet')
+#   "
+#
+# 然后:
+#   python scripts/generate_data.py --config configs/longcite.yaml \
+#     --stage longcite_only \
+#     --parquet-path data/longcite_parquet/default/partial-train/0000.parquet
+base: qwen3.5-0.8b.yaml
+
+curriculum_file: curriculum_longcite.yaml
+
+training:
+  grad_accum_steps: 1
+  dtype: bfloat16

@@ -1,7 +1,8 @@
 """
-XinheConfig — 心核配置
+XinheConfig — 心核配置 (v9)
 
-Hippocampus:大一统单 W,纯 Delta Rule(无 γ 衰减)。
+v9: 双 NeuralMemory(Hippocampus 浅 MLP + Neocortex 深 MLP),挂在每个 full-attn 层。
+v8 的 read_scale / beta_proj / Delta-Rule W 已废弃;LoRA 已抛弃,backbone 全冻。
 """
 from dataclasses import dataclass, field
 from typing import Optional
@@ -17,55 +18,48 @@ class XinheConfig:
     hidden_size: int = 1024
     freeze_backbone: bool = True
 
-    # --- Hippocampus (v7: 单一 W, Delta Rule + per-head γ) ---
+    # --- v9 NeuralMemoryPair ---
     n_heads: int = 16               # 头数
-    head_dim: int = 64              # d_k = d_v = head_dim
-    read_scale_init: float = -5.0   # sigmoid(-5) ≈ 0.007，空态几乎无影响
-    beta_bias_init: float = 0.0     # sigmoid(0)=0.5，初始 Delta Rule 学习率
+    head_dim: int = 64              # d_head(d_total = n_heads * head_dim)
+    hippo_mlp_depth: int = 2
+    hippo_mlp_expansion: float = 2.0
+    neo_mlp_depth: int = 4
+    neo_mlp_expansion: float = 4.0
+    hippo_retention: float = 0.99    # 每 chunk 保留 99%(自然遗忘)
+    neo_retention: float = 1.0       # 不衰减(靠 anchor 正则约束)
+    hippo_base_lr: float = 1e-2      # 内层 test-time SGD lr 上限
+    neo_base_lr: float = 1e-4        # P-cap 默认小 lr,sleep 切到 5e-4
+    mem_chunk_size: int = 64
+    alpha_logit_init: float = -5.0   # sigmoid(-5)≈0.007 保守起步
+    alpha_min_clamp: float = 0.02    # 防 alpha collapse 到 0
+    gate_entropy_lambda: float = 0.01  # gate 熵正则,防单边塌缩
+    phase: str = "P-cap"             # "P-cap" | "Operational",决定 Neo 默认 daytime_plastic
 
-    # 写 kernel 后端: auto (Linux+FLA → fla, 否则 torch) / fla / torch
-    delta_backend: str = "auto"
-    # 是否冻结 beta_proj.weight（保留 bias 可训，β 回归 per-head 静态先验）
-    # 用于防止 β 在 W 空态死锁中被梯度压到 0
-    freeze_beta_weight: bool = False
-    # 冻结 read_scale 在指定 σ 值（0<x<1）。0 = 不冻（默认）
-    # 破 chicken-and-egg: read_scale 自然稳态 0.04 太弱，强制 0.3+ 让 W 必须参与 output
-    freeze_read_scale_at: float = 0.0
-
-    # --- LoRA ---
-    lora_rank: int = 16
-    lora_alpha: int = 32
-    lora_dropout: float = 0.0
-    lora_target_modules: list = field(default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj"])
+    # v9 freeze flags
+    freeze_alpha: bool = False       # 测试基线时可冻 alpha
+    freeze_gate_q: bool = False      # 测试基线时可冻 gate
 
     # --- 训练 ---
-    # 单一术语：turn = 一个 user-asst pair（在 conversation.py 内编为 1 个 tensor）
-    # 不再用 segment / episode_length / tbptt_steps —— 历史踩坑过 segment 单位混淆。
-    turn_max_tokens: int = 256       # 单 turn token 上限（旧 segment_length）
-    max_turns_per_episode: int = 16  # 单 episode 最多几个 turn（旧 episode_length）
-    tbptt_turns: int = 4             # 每多少个 turn backward 一次（旧 tbptt_steps）
+    # 单一术语:turn = 一个 user-asst pair(在 conversation.py 内编为 1 个 tensor)
+    value_weight_cap: float = 1.0    # v9 默认 cap 到 1.0,等价取消 v8 的 VALUE 5x 加权
+    turn_max_tokens: int = 256       # 单 turn token 上限
+    max_turns_per_episode: int = 16  # 单 episode 最多几个 turn
+    tbptt_turns: int = 4             # 每多少个 turn backward 一次
     batch_size: int = 4
     learning_rate: float = 3e-4
-    plugin_lr_multiplier: float = 1.0   # plugin 学习率 = learning_rate × multiplier
-    freeze_lora: bool = False           # 冻结 LoRA，只训练 plugin (bootstrap 阶段用)
-    lora_reset: bool = False            # persona 重训: 加载 plugin 但重新零初始化 LoRA
+    plugin_lr_multiplier: float = 1.0   # memory 学习率 = learning_rate × multiplier
     weight_decay: float = 0.01
     grad_clip: float = 1.0
-    grad_accum_steps: int = 1           # 梯度累积步数 (模拟更大 batch)
-    gradient_checkpointing: bool = False  # 用计算换显存 (重算激活值)
-    # 外层 per-segment ckpt: 把整个 model.forward(segment, W_in) 包进 checkpoint,
-    # 跨 N 个 segment BPTT 显存从 N×L_turn 降到 ~1×L_turn（默认开）
+    grad_accum_steps: int = 1
+    gradient_checkpointing: bool = False
     per_segment_checkpoint: bool = True
-    resume_from: str = ""               # checkpoint 路径 (为空则不恢复)
-    # v5c: 早停基于 val VALUE，不再看 loss；下面两项保留字段避免破坏 YAML 兼容但实际无效
-    early_stop_loss: float = 0.0        # (deprecated) 早停 loss 阈值 (0=不启用)
-    early_stop_patience: int = 0        # (deprecated) 早停耐心
-    early_stop_value: float = 0.995     # 早停 VALUE 阈值 (val breakdown 跨过即切下一 stage)
-    early_stop_tell: float = 0.0        # 早停 TELL 阈值（整段 exact-match 率）；0 = 不查 TELL
-    # 联合早停: 通用 dict 形式(key 必须与 event_eval 输出指标名一致)
+    resume_from: str = ""
+    early_stop_loss: float = 0.0
+    early_stop_patience: int = 0
+    early_stop_value: float = 0.995
+    early_stop_tell: float = 0.0
     use_joint_early_stop: bool = False
     early_stop: dict = field(default_factory=dict)
-    # val 集合: list[{"name": str, "path": str}],由 event_eval.eval_joint 消费
     val_sets: list = field(default_factory=list)
     warmup_steps: int = 100
     max_steps: int = 10000
@@ -86,7 +80,7 @@ class XinheConfig:
 
     @classmethod
     def _load_and_merge(cls, path: str) -> dict:
-        """递归加载 yaml，支持链式 base 继承"""
+        """递归加载 yaml,支持链式 base 继承"""
         from pathlib import Path
 
         with open(path, "r", encoding="utf-8") as f:
@@ -95,7 +89,6 @@ class XinheConfig:
         if "base" in raw:
             base_path = Path(path).parent / raw.pop("base")
             base_raw = cls._load_and_merge(str(base_path))
-            # 深度合并: raw 覆盖 base_raw
             for section, values in raw.items():
                 if isinstance(values, dict) and section in base_raw and isinstance(base_raw[section], dict):
                     base_raw[section].update(values)
@@ -107,43 +100,30 @@ class XinheConfig:
 
     @classmethod
     def _resolve_curriculum(cls, raw: dict, config_path: str) -> list[dict]:
-        """
-        解析课程配置，支持两种方式:
-          1. curriculum: [...] — 内联 (旧格式，向后兼容)
-          2. curriculum_file: curriculum.yaml — 引用共享课程文件
-             + training_defaults: 自动合并到每个阶段
-             + stage_overrides: 硬件相关覆盖 (如 batch_size)
-        """
+        """解析课程配置(同 v8)"""
         from pathlib import Path
 
-        # 方式 1: 内联
         curriculum = raw.pop("curriculum", []) or []
         curriculum_file = raw.pop("curriculum_file", None)
         stage_overrides = raw.pop("stage_overrides", {})
 
-        # 方式 2: 引用外部文件
         if curriculum_file:
             cur_path = Path(config_path).parent / curriculum_file
             with open(cur_path, "r", encoding="utf-8") as f:
                 cur_raw = yaml.safe_load(f)
             training_defaults = cur_raw.get("training_defaults", {})
             curriculum = cur_raw.get("stages", [])
-
-            # 合并 training_defaults → 每个阶段
             for stage in curriculum:
                 merged = dict(training_defaults)
                 merged.update(stage.get("training", {}))
                 stage["training"] = merged
 
-        # 合并 stage_overrides (硬件相关，优先级最高)
-        # training 字段 → stage["training"], data 字段 → stage["data"]
         if stage_overrides:
             default_ov = stage_overrides.get("default", {})
             for stage in curriculum:
                 name = stage["name"]
                 specific_ov = stage_overrides.get(name, {})
                 merged_ov = {**default_ov, **specific_ov}
-                # data_ 前缀的 key 覆盖到 data 字段
                 data_ov = {k[5:]: v for k, v in merged_ov.items() if k.startswith("data_")}
                 training_ov = {k: v for k, v in merged_ov.items() if not k.startswith("data_")}
                 if training_ov:
@@ -157,18 +137,9 @@ class XinheConfig:
 
     @classmethod
     def from_yaml(cls, path: str) -> tuple["XinheConfig", list[dict]]:
-        """
-        从 yaml 配置文件加载，支持链式 base 继承。
-
-        返回: (config, curriculum_stages)
-            curriculum_stages: 课程学习阶段列表，无 curriculum 段时为空列表
-        """
         raw = cls._load_and_merge(path)
-
-        # 解析课程配置
         curriculum = cls._resolve_curriculum(raw, path)
 
-        # 将嵌套的 yaml 扁平化到 dataclass 字段
         flat = {}
         mapping = {
             "backbone": {
@@ -181,27 +152,30 @@ class XinheConfig:
             "state": {
                 "n_heads": "n_heads",
                 "head_dim": "head_dim",
-                "read_scale_init": "read_scale_init",
-                "beta_bias_init": "beta_bias_init",
-                "delta_backend": "delta_backend",
-            },
-            "lora": {
-                "rank": "lora_rank",
-                "alpha": "lora_alpha",
-                "dropout": "lora_dropout",
-                "target_modules": "lora_target_modules",
+                "hippo_mlp_depth": "hippo_mlp_depth",
+                "hippo_mlp_expansion": "hippo_mlp_expansion",
+                "neo_mlp_depth": "neo_mlp_depth",
+                "neo_mlp_expansion": "neo_mlp_expansion",
+                "hippo_retention": "hippo_retention",
+                "neo_retention": "neo_retention",
+                "hippo_base_lr": "hippo_base_lr",
+                "neo_base_lr": "neo_base_lr",
+                "mem_chunk_size": "mem_chunk_size",
+                "alpha_logit_init": "alpha_logit_init",
+                "alpha_min_clamp": "alpha_min_clamp",
+                "gate_entropy_lambda": "gate_entropy_lambda",
+                "phase": "phase",
             },
             "training": {
+                "value_weight_cap": "value_weight_cap",
                 "turn_max_tokens": "turn_max_tokens",
                 "max_turns_per_episode": "max_turns_per_episode",
                 "tbptt_turns": "tbptt_turns",
                 "batch_size": "batch_size",
                 "learning_rate": "learning_rate",
                 "plugin_lr_multiplier": "plugin_lr_multiplier",
-                "freeze_lora": "freeze_lora",
-                "freeze_beta_weight": "freeze_beta_weight",
-                "freeze_read_scale_at": "freeze_read_scale_at",
-                "lora_reset": "lora_reset",
+                "freeze_alpha": "freeze_alpha",
+                "freeze_gate_q": "freeze_gate_q",
                 "weight_decay": "weight_decay",
                 "grad_clip": "grad_clip",
                 "grad_accum_steps": "grad_accum_steps",

@@ -39,7 +39,8 @@ def run_stage(stage_cfg: dict, *,
               out_suffix: str = "",
               seed_offset: int = 0,
               workers: int | None = None,
-              novel_path: str | None = None) -> None:
+              novel_path: str | None = None,
+              parquet_path: str | None = None) -> None:
     name = stage_cfg.get("name", "?")
     validate_stage_config(name, stage_cfg)
 
@@ -73,6 +74,13 @@ def run_stage(stage_cfg: dict, *,
                     "(配置文件不持久化路径)"
                 )
             gen_cfg["novel_path"] = novel_path
+        if kind == "longcite":
+            if not parquet_path:
+                raise ValueError(
+                    f"stage {name!r}: kind=longcite 需要从 CLI 传入 --parquet-path /path/to/0000.parquet "
+                    "(配置文件不持久化路径)"
+                )
+            gen_cfg["parquet_path"] = parquet_path
 
         gen = GENERATORS[kind](**gen_cfg)
 
@@ -143,6 +151,8 @@ def main():
                         help="覆写 yaml 里 workers(仅 dialog 生效)。OR 限流时一键降并发。")
     parser.add_argument("--novel-path", type=str, default=None,
                         help="小说 txt 路径(仅 kind=novel 生效)。配置文件不持久化此路径。")
+    parser.add_argument("--parquet-path", type=str, default=None,
+                        help="parquet 路径(仅 kind=longcite 生效)。配置文件不持久化此路径。")
     args = parser.parse_args()
 
     from xinhe.model.config import XinheConfig
@@ -176,6 +186,7 @@ def main():
             seed_offset=args.seed_offset,
             workers=args.workers,
             novel_path=args.novel_path,
+            parquet_path=args.parquet_path,
         )
 
 

@@ -1,0 +1,19 @@
+# v9 P-cap mini run 入口 — fast-weights 长上下文能力底座
+#
+# 用法(2 步):
+#   1. 生成 novel raw chunking 数据:
+#      python scripts/generate_data.py --config configs/novel.yaml \
+#        --stage novel_only --novel-path "C:/path/to/novel.txt"
+#
+#   2. 跑 P-cap mini 训练(novel + dialog + skeleton 混合):
+#      python scripts/generate_data.py --config configs/pcap.yaml --stage pcap_mini   # mix 数据
+#      python scripts/train.py --config configs/pcap.yaml
+#
+# 现 dialog/skeleton 数据已存在 data/{dialog,skeleton}/,直接复用。
+base: qwen3.5-0.8b.yaml
+
+curriculum_file: curriculum_pcap.yaml
+
+training:
+  grad_accum_steps: 1
+  dtype: bfloat16

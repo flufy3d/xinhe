@@ -1,0 +1,54 @@
+# v9 P-cap mini run — fast-weights 长上下文学习能力底座
+#
+# 数据混比:novel 40% + longcite 30% + dialog 20% + skeleton 10%
+#   - novel:长篇小说 raw chunking(章内连续 8 chunks)
+#   - longcite:LongCite-45k 长文档 + 末轮 QA(7 chunks 长上下文 + 1 QA turn)
+#   - dialog:LLM 5-Beat 多轮自然对话
+#   - skeleton:合成 needle-in-haystack 写读 / 覆写 / stale-read sanity
+#
+# kind="mix_dynamic":训练时按比例从 sources 在内存抽样,不落 mix 物理文件
+# (节约 data 目录大小,4 个 source 各自 push 到 HF dataset)。
+#
+# 前置:
+#   1. novel:python scripts/generate_data.py --config configs/novel.yaml --stage novel_only --novel-path "..."
+#   2. longcite:先下 1 个 parquet(~240 MB),再
+#      python scripts/generate_data.py --config configs/longcite.yaml --stage longcite_only --parquet-path "..."
+
+training_defaults:
+  learning_rate: 3.0e-4
+  grad_clip: 1.0
+  gradient_checkpointing: false       # vmap(grad) 跟 saved_tensors_hooks 冲突,必须关
+  log_every: 5
+  eval_every: 200
+  save_every: 500
+
+stages:
+  - name: "pcap_mini"
+    data:
+      kind: "mix_dynamic"
+      sources:
+        - {path: "data/novel/train.jsonl",     ratio: 0.40, tag: "novel"}
+        - {path: "data/longcite/train.jsonl",  ratio: 0.30, tag: "longcite"}
+        - {path: "data/dialog/train.jsonl",    ratio: 0.20, tag: "dialog"}
+        - {path: "data/skeleton/train.jsonl",  ratio: 0.10, tag: "skeleton"}
+      val_sources:
+        - {path: "data/novel/val.jsonl",       ratio: 0.40, tag: "novel"}
+        - {path: "data/longcite/val.jsonl",    ratio: 0.30, tag: "longcite"}
+        - {path: "data/dialog/val.jsonl",      ratio: 0.20, tag: "dialog"}
+        - {path: "data/skeleton/val.jsonl",    ratio: 0.10, tag: "skeleton"}
+      num_train: 50000          # 全量 P-cap 试水
+      num_val: 200
+      seed: 42
+    training:
+      max_turns_per_episode: 8
+      turn_max_tokens: 512
+      plugin_lr_multiplier: 1.0
+      value_weight_cap: 1.0
+      phase: "P-cap"
+      per_segment_checkpoint: false   # 同 gradient_checkpointing,关
+      max_steps: 1000
+      warmup_steps: 50
+      use_joint_early_stop: false
+    val_sets:
+      - {name: "skeleton_val", path: "data/skeleton/val.jsonl"}
+      - {name: "novel_val",    path: "data/novel/val.jsonl"}

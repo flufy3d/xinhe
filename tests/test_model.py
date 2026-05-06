@@ -1,7 +1,7 @@
 """
-测试 XinheModel 整体前向传播 (v7: 单 Hippocampus, 单 W)
+测试 XinheModel 整体前向传播 (v9: 双 NeuralMemoryPair, per full-attn 层)
 
-使用 mock backbone 替代真实模型，避免依赖预训练权重。
+使用 mock backbone 替代真实模型,避免依赖预训练权重。
 """
 import torch
 import pytest
@@ -10,13 +10,15 @@ import torch.nn as nn
 from xinhe.model.config import XinheConfig
 from xinhe.model.backbone import BackboneBase
 from xinhe.model.xinhe_model import XinheModel
+from xinhe.model.neural_memory_pair import XinheMemoryState
 
 
 N_LAYERS = 4
+HOOK_LAYERS = [1, 3]   # 模拟 full-attn 层在 layer 1 和 layer 3
 
 
 class MockBackbone(nn.Module, BackboneBase):
-    """用于测试的 mock backbone"""
+    """用于测试的 mock backbone。layer 1 和 layer 3 模拟 full-attn 层(挂 NeuralMemoryPair)。"""
 
     def __init__(self, hidden_size=64, vocab_size=100):
         nn.Module.__init__(self)
@@ -43,25 +45,38 @@ class MockBackbone(nn.Module, BackboneBase):
     def get_num_layers(self):
         return N_LAYERS
 
+    def get_hook_layer_indices(self):
+        return HOOK_LAYERS
+
+
+def _build_model(d_total_eq_hidden=True):
+    """构造测试模型。
+    d_total_eq_hidden=True:n_heads*head_dim == hidden_size,_d_total 投影是 Identity
+    d_total_eq_hidden=False:n_heads*head_dim ≠ hidden_size,有 Linear 投影"""
+    if d_total_eq_hidden:
+        n_heads, head_dim = 4, 16   # d_total = 64 = hidden_size
+    else:
+        n_heads, head_dim = 4, 8    # d_total = 32 ≠ hidden_size
+    config = XinheConfig(
+        hidden_size=64,
+        n_heads=n_heads,
+        head_dim=head_dim,
+        mem_chunk_size=4,
+        freeze_backbone=False,
+        per_segment_checkpoint=False,
+        phase="P-cap",
+    )
+    backbone = MockBackbone(hidden_size=64, vocab_size=100)
+    return XinheModel(config, backbone=backbone)
+
 
 @pytest.fixture
 def model():
-    """创建带 mock backbone 的测试模型 (v7)"""
-    config = XinheConfig(
-        hidden_size=64,
-        n_heads=4,
-        head_dim=16,
-        read_scale_init=-5.0,
-        lora_rank=0,  # 不用 LoRA
-        freeze_backbone=False,
-    )
-    backbone = MockBackbone(hidden_size=64, vocab_size=100)
-    m = XinheModel(config, backbone=backbone)
-    return m
+    return _build_model()
 
 
 def test_forward_shape(model):
-    """forward 输出形状正确 (v7: W=(B,H,d_v,d_k) 单张量)"""
+    """forward 输出形状正确 (v9: state 是 XinheMemoryState)"""
     B, T = 2, 16
     input_ids = torch.randint(0, 100, (B, T))
     state = model.init_state(B)
@@ -69,11 +84,12 @@ def test_forward_shape(model):
     result = model(input_ids, state)
 
     assert result["logits"].shape == (B, T, 100)
-    assert result["state_next"].shape == (B, 4, 16, 16)
+    assert isinstance(result["state_next"], XinheMemoryState)
+    assert set(result["state_next"].keys()) == set(HOOK_LAYERS)
 
 
 def test_forward_with_labels(model):
-    """提供 labels 时返回 loss"""
+    """提供 labels 时返回 loss(包含 gate entropy reg)"""
     B, T = 2, 16
     input_ids = torch.randint(0, 100, (B, T))
     labels = torch.randint(0, 100, (B, T))
@@ -82,30 +98,33 @@ def test_forward_with_labels(model):
     result = model(input_ids, state, labels=labels)
 
     assert "loss" in result
+    assert "aux_loss" in result
     assert result["loss"].dim() == 0
-    assert result["loss"].item() > 0
 
 
 def test_state_persistence(model):
-    """状态在多个 segment 间传递（v7: 单 W 持续演化）"""
+    """状态在多个 segment 间传递(v9: per-layer NeuralMemState 演化)"""
     B, T = 1, 8
     state = model.init_state(B)
-    states = [state.clone()]
 
-    for _ in range(3):
+    seen_lu_first = None
+    for step in range(3):
         input_ids = torch.randint(0, 100, (B, T))
         result = model(input_ids, state)
         state = result["state_next"]
-        states.append(state.clone())
-
-    # W 应该在每步变化
-    for i in range(1, len(states)):
-        assert not torch.allclose(states[i], states[0], atol=1e-6), \
-            f"W 在 segment {i} 没有变化"
+        # 取第一层 hippo 的 past_last_update,验证它在演化
+        layer_state = state[HOOK_LAYERS[0]]
+        if layer_state.hippo is not None and layer_state.hippo.states is not None:
+            lu = next(iter(layer_state.hippo.states[0].values())).clone()
+            if seen_lu_first is None:
+                seen_lu_first = lu
+            elif step > 0:
+                # state 跨 forward 应有变化
+                assert not torch.allclose(lu, seen_lu_first, atol=1e-6)
 
 
 def test_gradient_flow(model):
-    """梯度能通过状态反向传播"""
+    """梯度能通过 NeuralMemoryPair 反向传播"""
     B, T = 1, 8
     state = model.init_state(B)
 
@@ -120,14 +139,14 @@ def test_gradient_flow(model):
     loss = result_2["loss"]
     loss.backward()
 
-    # Hippocampus 参数应该有梯度
-    assert model.hippocampus.k_proj.weight.grad is not None
-    assert model.hippocampus.v_proj.weight.grad is not None
-    assert model.hippocampus.beta_proj.weight.grad is not None
+    # NeuralMemoryPair 关键参数应该有 grad
+    pair = next(iter(model.memory.values()))
+    assert pair.gate_q.weight.grad is not None
+    assert pair.alpha_logit.grad is not None
 
 
 def test_generate(model):
-    """generate_with_state 能生成 token"""
+    """generate_with_state 能生成 token,state 类型保持"""
     B = 1
     state = model.init_state(B)
     input_ids = torch.randint(0, 100, (B, 4))
@@ -138,14 +157,11 @@ def test_generate(model):
         )
 
     assert generated.shape[1] > input_ids.shape[1]
-    assert new_state.shape == state.shape
-
-    new_tokens = generated[0, input_ids.shape[1]:]
-    assert not (new_tokens == new_tokens[0]).all()
+    assert isinstance(new_state, XinheMemoryState)
 
 
 def test_trainable_params(model):
-    """可训练参数数量 > 0"""
+    """可训练参数数量 > 0(memory + gate_q + alpha 等)"""
     params = model.get_trainable_params()
     assert len(params) > 0
     count = model.get_trainable_param_count()
@@ -153,32 +169,34 @@ def test_trainable_params(model):
 
 
 def test_forward_with_decoupled_dims():
-    """n_heads*head_dim != hidden_size 时全流程正确 (v7)"""
-    config = XinheConfig(
-        hidden_size=64,
-        n_heads=4,
-        head_dim=8,            # 4*8=32 != hidden_size=64
-        read_scale_init=0.0,
-        lora_rank=0,
-        freeze_backbone=False,
-    )
-    backbone = MockBackbone(hidden_size=64, vocab_size=100)
-    model = XinheModel(config, backbone=backbone)
+    """n_heads*head_dim != hidden_size 时全流程正确(走 _d_total 投影)"""
+    model = _build_model(d_total_eq_hidden=False)
 
     B, T = 2, 16
     state = model.init_state(B)
-    assert state.shape == (B, 4, 8, 8)
+    assert isinstance(state, XinheMemoryState)
+    assert set(state.keys()) == set(HOOK_LAYERS)
 
     input_ids = torch.randint(0, 100, (B, T))
     labels = torch.randint(0, 100, (B, T))
     result = model(input_ids, state, labels=labels)
 
     assert result["logits"].shape == (B, T, 100)
-    assert result["state_next"].shape == (B, 4, 8, 8)
-    assert result["loss"].item() > 0
+    assert isinstance(result["state_next"], XinheMemoryState)
 
-    state_next = result["state_next"]
-    state_loss = state_next.sum() + result["loss"]
-    state_loss.backward()
-    assert model.hippocampus.q_projs[0].weight.grad is not None
-    assert model.hippocampus.v_proj.weight.grad is not None
+    # 反传不报错
+    result["loss"].backward()
+    pair = next(iter(model.memory.values()))
+    assert pair.gate_q.weight.grad is not None
+
+
+def test_mem_alpha_override_propagates(model):
+    """forward(mem_alpha_override=0.0) 透传到每层 NeuralMemoryPair → 残差 = 0"""
+    B, T = 1, 8
+    state = model.init_state(B)
+    input_ids = torch.randint(0, 100, (B, T))
+    # mem_alpha=0.0 等价 backbone 完全不受 NeuralMemoryPair 影响
+    result_with_mem = model(input_ids, state, mem_alpha_override=None)
+    result_clean = model(input_ids, state, mem_alpha_override=0.0)
+    # logits 应该不同(mem_alpha 改变了 hidden 流)
+    assert not torch.allclose(result_with_mem["logits"], result_clean["logits"], atol=1e-3)

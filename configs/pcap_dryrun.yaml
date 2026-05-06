@@ -1,0 +1,28 @@
+# P-cap dry-run 5 步(继承 pcap.yaml,只覆写 training 几个字段)
+# 验证 v9 端到端 pipeline 跑通:模型加载 + dataloader + NeuralMemoryPair forward + backward
+#
+# 注意:gradient_checkpointing 必须关。NeuralMemory 用 vmap(grad) 跑 test-time SGD,
+# 跟 checkpoint(use_reentrant=False)的 saved_tensors_hooks 冲突。
+base: pcap.yaml
+
+training:
+  max_steps: 5
+  warmup_steps: 2
+  log_every: 1
+  eval_every: 999
+  save_every: 999
+  gradient_checkpointing: false
+  per_segment_checkpoint: false
+
+stage_overrides:
+  pcap_mini:
+    max_steps: 5
+    warmup_steps: 2
+    log_every: 1
+    eval_every: 999
+    save_every: 999
+    gradient_checkpointing: false
+    per_segment_checkpoint: false
+    turn_max_tokens: 256                  # 缩小 turn 长度
+    max_turns_per_episode: 2              # 缩短 episode
+    tbptt_turns: 2                        # = max_turns_per_episode

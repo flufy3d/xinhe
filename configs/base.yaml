@@ -7,24 +7,23 @@ backbone:
   hidden_size: 1024
   freeze: true
 
-# Hippocampus: 纯 Delta Rule, W=(B,H,d_v,d_k)
+# v9 NeuralMemoryPair: Hippocampus(浅 MLP, awake plastic) + Neocortex(深 MLP, sleep only)
 state:
   n_heads: 16
-  head_dim: 128
-  read_scale_init: -3.0
-  beta_bias_init: -2.0
-  delta_backend: "auto"   # 训练强制 torch;推理 auto→FLA on Linux+CUDA
-
-# 全仓库 LoRA 唯一定义点。子 config 只重写 rank/alpha,target_modules 不再 per-config 覆盖。
-lora:
-  rank: 16
-  alpha: 32
-  dropout: 0.0
-  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
-
-# 注意力层 ["q_proj", "k_proj", "v_proj", "o_proj"]
-# 线性注意力层 ["in_proj_qkv", "in_proj_a", "in_proj_b", "in_proj_z", "out_proj"]
-# MLP层 ["gate_proj", "up_proj", "down_proj"]
+  head_dim: 64                    # d_total = 16*64 = 1024 = hidden_size
+  hippo_mlp_depth: 2
+  hippo_mlp_expansion: 2.0
+  neo_mlp_depth: 4
+  neo_mlp_expansion: 4.0
+  hippo_retention: 0.99           # 每 chunk 保留 99% 自然遗忘
+  neo_retention: 1.0              # 不衰减(靠 anchor 正则)
+  hippo_base_lr: 1.0e-2
+  neo_base_lr: 1.0e-4             # P-cap 默认小 lr,sleep 切到 5e-4
+  mem_chunk_size: 64
+  alpha_logit_init: -5.0          # sigmoid(-5)≈0.007 保守起步
+  alpha_min_clamp: 0.02
+  gate_entropy_lambda: 0.01
+  phase: "P-cap"                  # P-cap | Operational
 
 
 

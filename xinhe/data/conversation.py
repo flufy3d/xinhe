@@ -193,10 +193,16 @@ class ConversationDataset(Dataset):
         tokenizer,
         turn_max_tokens: int = 256,
         max_turns_per_episode: int = 16,
+        value_weight_cap: Optional[float] = None,
     ):
+        """value_weight_cap: 把 weight_per_span 上限 cap 到这个值。
+        v8 旧数据里 VALUE token weight 常是 5.0(强化记忆);v9 fast-weights 数学
+        可学,不靠 weighted loss → 训练入口传 1.0 让所有 VALUE token 退化为普通 token。
+        None = 不 cap(沿用 jsonl 原值)。"""
         self.tokenizer = tokenizer
         self.turn_max_tokens = turn_max_tokens
         self.max_turns_per_episode = max_turns_per_episode
+        self.value_weight_cap = value_weight_cap
 
         ensure_chat_template(tokenizer)
 
@@ -281,6 +287,8 @@ class ConversationDataset(Dataset):
             train_loss = asst_entry.get("train_loss", "true")
             value_spans = asst_entry.get("value_span") or []
             weight_per_span = float(asst_entry.get("weight_per_span", 0.0) or 0.0)
+            if self.value_weight_cap is not None:
+                weight_per_span = min(weight_per_span, self.value_weight_cap)
 
             turn_tensor = tokenize_turn(
                 self.tokenizer, user_msg, assistant_msg, self.turn_max_tokens,
@@ -322,6 +330,85 @@ class ConversationDataset(Dataset):
 
     def __getitem__(self, idx: int) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         return self.episodes[idx]
+
+
+class MixedConversationDataset(ConversationDataset):
+    """动态多源混合(不落 mix 文件,节约 data 目录大小)。
+
+    sources: list of {path, ratio, tag}。按 ratio 抽样到内存 pool,然后整体 shuffle,
+    最后调 _process_conversation 转 turn tensor。源不足时循环抽样保比例。
+    """
+
+    def __init__(
+        self,
+        sources: list[dict],
+        n_samples: int,
+        seed: int,
+        tokenizer,
+        turn_max_tokens: int = 256,
+        max_turns_per_episode: int = 16,
+        value_weight_cap: Optional[float] = None,
+    ):
+        self.tokenizer = tokenizer
+        self.turn_max_tokens = turn_max_tokens
+        self.max_turns_per_episode = max_turns_per_episode
+        self.value_weight_cap = value_weight_cap
+        ensure_chat_template(tokenizer)
+
+        self._stats = {
+            "turns_total": 0,
+            "turns_truncated": 0,
+            "episodes_total": 0,
+            "episodes_truncated": 0,
+            "max_turn_tokens_seen": 0,
+            "max_turns_in_episode_seen": 0,
+        }
+
+        import random as _random
+        rng = _random.Random(seed)
+
+        total_ratio = sum(float(s.get("ratio", 0)) for s in sources)
+        if total_ratio <= 0:
+            raise ValueError("MixedConversationDataset: sources 比例总和必须 > 0")
+
+        pool: list[dict] = []
+        for src in sources:
+            path = Path(src["path"])
+            ratio = float(src.get("ratio", 0)) / total_ratio
+            tag = src.get("tag", path.parent.name)
+            n_take = int(round(n_samples * ratio))
+            if n_take <= 0:
+                continue
+            if not path.exists():
+                raise FileNotFoundError(f"MixedConversationDataset: source 不存在 {path}")
+            with open(path, "r", encoding="utf-8") as f:
+                items = [json.loads(ln) for ln in f if ln.strip()]
+            if not items:
+                raise ValueError(f"MixedConversationDataset: source 空 {path}")
+            rng.shuffle(items)
+            if len(items) >= n_take:
+                taken = items[:n_take]
+            else:
+                # 循环抽样保比例
+                taken = (items * (1 + n_take // len(items)))[:n_take]
+            for s in taken:
+                meta = dict(s.get("meta", {}))
+                meta["mix_source"] = tag
+                s["meta"] = meta
+            pool.extend(taken)
+            print(f"  [mix-dyn] {tag}: 抽 {len(taken)} 条 (源 {len(items)} 条, ratio={ratio:.3f})")
+
+        rng.shuffle(pool)
+        pool = pool[:n_samples]
+
+        self.episodes = []
+        for item in pool:
+            episode = self._process_conversation(item)
+            if episode and len(episode) >= 2:
+                self.episodes.append(episode)
+
+        tag_summary = ",".join(s.get("tag", "?") for s in sources)
+        self._report_truncation_stats(f"mix_dynamic[{tag_summary}](n={n_samples})")
 
 
 def collate_episodes(

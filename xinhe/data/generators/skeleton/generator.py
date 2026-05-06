@@ -17,13 +17,11 @@ class SkeletonGenerator(Generator):
         skeleton_weights: Optional[dict[str, float]] = None,
         distance_bucket: Optional[dict[str, float]] = None,
         force_relation: Optional[str] = None,
-        inject_warmup: bool = True,
     ):
         self.max_turns = max_turns
         self.skeleton_weights = skeleton_weights
         self.distance_bucket = distance_bucket
         self.force_relation = force_relation
-        self.inject_warmup = inject_warmup
 
     def _generate_impl(self, req: GenerateRequest) -> tuple[int, int]:
         return generate_stage0_dataset(
@@ -37,5 +35,4 @@ class SkeletonGenerator(Generator):
             rejected_path=req.rejected_path,
             progress_every=max(1, req.n_samples // 10),
             max_turns=req.max_turns,
-            inject_warmup=self.inject_warmup,
         )
