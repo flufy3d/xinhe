@@ -294,18 +294,22 @@ class XinheModel(nn.Module):
         # 用输入 state 做 forward，获取首个 logits
         # 注意：生成过程中 state 保持不变，模拟训练时一个 segment 一次 forward 的行为
         result = self.forward(input_ids, state)
-        next_logits = result["logits"][:, -1, :]  # (B, V)
+        next_logits = result["logits"][:, -1, :].clone()   # (B, V),clone 让 result 可释放
+        del result   # 显式释放 (B, T, V) ~ 数百 MB,避免 forward 内存累积导致 OOM
 
         for _ in range(max_new_tokens):
-            # 重复惩罚: 降低已出现 token 的概率
+            # 重复惩罚:矢量化版 — 直接 gather/scatter 已出现 token 的 logits,
+            # 移掉 unique() + Python token_id loop(老版本在长序列 + OOM 边缘 GPU 上是元凶)
             if repetition_penalty != 1.0:
-                for b in range(B):
-                    prev_tokens = generated[b].unique()
-                    for token_id in prev_tokens:
-                        if next_logits[b, token_id] > 0:
-                            next_logits[b, token_id] /= repetition_penalty
-                        else:
-                            next_logits[b, token_id] *= repetition_penalty
+                # generated: (B, T_cur),next_logits: (B, V)
+                seen_logits = next_logits.gather(1, generated)         # (B, T_cur)
+                penalized = torch.where(
+                    seen_logits > 0,
+                    seen_logits / repetition_penalty,
+                    seen_logits * repetition_penalty,
+                )
+                # 多次出现的 token 会被 scatter 重复写入 → 与原版 unique loop 等价
+                next_logits.scatter_(1, generated, penalized)
 
             # 温度缩放
             next_logits = next_logits / temperature
@@ -333,8 +337,10 @@ class XinheModel(nn.Module):
 
             # 用完整已生成序列 + 原始 state 重新 forward
             # state 不在生成循环中更新，避免信息被反复覆盖
+            del next_logits, probs   # 释放上一轮中间张量,降低长序列累积压力
             result = self.forward(generated, state)
-            next_logits = result["logits"][:, -1, :]
+            next_logits = result["logits"][:, -1, :].clone()
+            del result
 
         # 最终用完整序列 + 原始 state 做一次 forward，得到本轮结束后的 state
         result = self.forward(generated, state)
