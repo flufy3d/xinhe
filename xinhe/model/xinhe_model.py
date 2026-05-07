@@ -106,9 +106,10 @@ class XinheModel(nn.Module):
                 * (config.hidden_size ** -0.5)
             )
             # MAC 注入强度的可学缩放:fresh_mem 位置 hidden += inject · NM mem_out
-            # 起步 sigmoid(-3) ≈ 0.047(~5% 注入,不冲;模型逐步学开度)
+            # init 走 config.mac_inject_logit_init(默认 -3 ≈ 0.05,可调到 -1 ≈ 0.27 给更强初始信号)
             # 这不是 MAL 的 alpha(全位置加),只在 fresh_mem 一处,不破 MAC 架构
-            self.mac_inject_logit = nn.Parameter(torch.tensor(-3.0))
+            init_val = float(getattr(config, "mac_inject_logit_init", -3.0))
+            self.mac_inject_logit = nn.Parameter(torch.tensor(init_val))
         else:
             self.register_parameter("mem_token_init", None)
             self.register_parameter("mac_inject_logit", None)

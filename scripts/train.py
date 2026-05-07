@@ -22,6 +22,7 @@ from torch.utils.data import DataLoader
 # 添加项目根目录到 path
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
+# import xinhe(包 init 里关掉 JIT fuser,见 xinhe/__init__.py)
 
 from xinhe.config import validate_stage_config
 from xinhe.model.config import XinheConfig

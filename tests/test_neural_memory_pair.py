@@ -213,11 +213,33 @@ def test_neocortex_is_static_mlp():
         assert torch.equal(w_after.detach(), w0)
 
 
-def test_hippocampus_to_decay_factor_frozen():
-    """Hippo retention 静态化 → to_decay_factor 不被 backprop 学走。"""
+def test_hippocampus_to_decay_factor_trainable():
+    """Hippo to_decay_factor 必须是 trainable(paper input-dependent forget gate)。
+    冻结会导致 retention 永远是 init 值,违反 paper Table 5 ablation 中最大贡献项。
+
+    注意:read_before_write=True 模式下,单 forward 内 decay 不影响 r_h(因为 retrieve
+    走入口 weights)。decay 只通过 state 跨 forward 影响下一次 read。所以测试需要至少 2
+    次 forward + state 传递,才能让 decay_factor 进入 loss 的梯度路径。
+    """
+    from xinhe.model.neural_memory_pair import LayerMemState
+
     pair = _build_pair()
     for p in pair.hippocampus.to_decay_factor.parameters():
-        assert not p.requires_grad
+        assert p.requires_grad
+
+    # 跨两次 forward 传 state:forward 1 的 decay 决定 W_T,forward 2 read W_T → 梯度回流
+    state = LayerMemState(None, None)
+    x1 = torch.randn(2, 16, 32)
+    x2 = torch.randn(2, 16, 32)
+    out1, state, _ = pair(x1, layer_state=state)
+    out2, _, _ = pair(x2, layer_state=state)
+    (out1.sum() + out2.sum()).backward()
+
+    has_grad = any(
+        p.grad is not None and p.grad.abs().sum() > 0
+        for p in pair.hippocampus.to_decay_factor.parameters()
+    )
+    assert has_grad, "to_decay_factor 解冻后跨 forward 必须收到梯度"
 
 
 # ── retention bias 验证 ──────────────────────────────────────────

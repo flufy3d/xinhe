@@ -330,6 +330,28 @@ class Trainer:
             print(f"  [val breakdown] 跳过: {e}")
         self.model.train()
 
+    def _capture_mac_grads(self) -> dict:
+        """诊断:捕获 MAC 三组 + Hippo to_decay_factor 的梯度 norm。
+        在 optimizer.step() 前调用(grad 已 clip)。grad 为 None 表示该参数本步无梯度。
+        """
+        out = {}
+        for name in ("persistent_mem", "mem_token_init", "mac_inject_logit"):
+            p = getattr(self.model, name, None)
+            out[name] = (
+                p.grad.detach().float().norm().item()
+                if (p is not None and p.grad is not None) else None
+            )
+        # to_decay_factor 是 per-layer Hippo NeuralMemory 内部参数,聚合 norm
+        decay_norms = []
+        for pair in self.model.memory.values():
+            for p in pair.hippocampus.to_decay_factor.parameters():
+                if p.grad is not None:
+                    decay_norms.append(p.grad.detach().float().norm().item())
+        out["to_decay_factor"] = (
+            sum(decay_norms) / len(decay_norms) if decay_norms else None
+        )
+        return out
+
     def _maybe_optimizer_step(self, last_loss: float, last_acc: float):
         """梯度累积: 累积够 grad_accum_steps 次后执行一次 optimizer step.
 
@@ -344,6 +366,8 @@ class Trainer:
             self.model.get_trainable_params(),
             self.config.grad_clip,
         )
+        # 诊断:在 step 前捕获 grad norm(随后 zero_grad 会清掉)
+        self._last_mac_grads = self._capture_mac_grads()
         self.optimizer.step()
         self.scheduler.step()
         self.optimizer.zero_grad()
@@ -374,10 +398,27 @@ class Trainer:
                 torch.sigmoid(self.model.mac_inject_logit).item()
                 if getattr(self.model, "mac_inject_logit", None) is not None else 0.0
             )
+            # 诊断:MAC + decay 梯度 norm + mem_out norm(NM 输出强度)
+            grads = getattr(self, "_last_mac_grads", None) or {}
+            def _fg(k): return grads.get(k)
+            def _fmt(v): return f"{v:.1e}" if isinstance(v, float) else "—"
+            mem_out_norms = []
+            for pair in self.model.memory.values():
+                t = pair.last_mem_out_norm
+                if torch.is_tensor(t):
+                    v = t.item()
+                    if v > 0:
+                        mem_out_norms.append(v)
+            mem_norm_avg = sum(mem_out_norms) / len(mem_out_norms) if mem_out_norms else 0.0
             print(
                 f"  [Step {self.global_step}] ema_loss={self._ema_loss:.4f} "
                 f"ema_acc={self._ema_acc:.2%} lr={lr:.2e} "
-                f"inject={inject:.3f} pmem={pmem_norm:.3f} mtok={mtok_norm:.3f}"
+                f"inject={inject:.3f} pmem={pmem_norm:.3f} mtok={mtok_norm:.3f} "
+                f"|g_inj|={_fmt(_fg('mac_inject_logit'))} "
+                f"|g_pm|={_fmt(_fg('persistent_mem'))} "
+                f"|g_mt|={_fmt(_fg('mem_token_init'))} "
+                f"|g_dec|={_fmt(_fg('to_decay_factor'))} "
+                f"mem_norm={mem_norm_avg:.3f}"
             )
 
         if self.global_step % self.config.save_every == 0:

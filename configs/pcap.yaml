@@ -23,6 +23,11 @@ state:
   # Ablation: 关掉 cross-turn snapshots(只保 persistent_mem 全局 + fresh_mem 本 turn)
   # 测试 cross-turn hidden carry 是不是真有贡献
   max_mem_snapshots: 0
+  # N_p 32 → 16:短数据下 prefix 占比畸形,且 N_p 通路梯度本来就 ~0;减半释放 attention 计算预算给 real
+  n_persistent_mem: 16
+  # MAC 注入开度 init:-3 (sigmoid≈0.05) → -1 (sigmoid≈0.27),给更强初始信号
+  # 失败信号:step 5-30 loss > 6 持续上扬 → 回退 -2.0 或 -3.0
+  mac_inject_logit_init: -1.0
 
 training:
   grad_accum_steps: 4

@@ -30,8 +30,9 @@ class XinheConfig:
     #     存到 episode state,下一 turn 拼到序列开头(在 persistent_mem 之后),让 attention
     #     看到所有历史 turn 的 mem 摘要 → 等效"跨 turn KV 持久化"。
     #     state.mem_snapshots: list[(B, N_mem, hidden_size)],turn 0 空,第 t turn 后含 t 个。
-    n_persistent_mem: int = 32      # 0 禁用;>0 prepend N 个跨 session 学习 token
+    n_persistent_mem: int = 16      # 0 禁用;>0 prepend N 个跨 session 学习 token
     n_mem_tokens: int = 16          # 0 禁用;>0 每 turn 末插 N_mem 个,跨 turn 累积 hidden
+    mac_inject_logit_init: float = -3.0  # MAC fresh_mem 注入开度 init(sigmoid):-3≈0.05;-1≈0.27
     # mem_snapshots FIFO 上限。0 表示完全不跨 turn 累积(只本 turn fresh_mem,等价 MAC ablation),
     # >0 保留最近 K 个 turn 的 snapshot,长 episode 不爆 sequence
     max_mem_snapshots: int = 8
@@ -183,6 +184,7 @@ class XinheConfig:
                 "alpha_logit_init": "alpha_logit_init",
                 "alpha_min_clamp": "alpha_min_clamp",
                 "gate_entropy_lambda": "gate_entropy_lambda",
+                "mac_inject_logit_init": "mac_inject_logit_init",
                 "phase": "phase",
             },
             "training": {

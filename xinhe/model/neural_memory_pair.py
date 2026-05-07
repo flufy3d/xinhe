@@ -272,6 +272,10 @@ class NeuralMemoryPair(nn.Module):
         self._daytime_plastic_hippo: bool = True
         self._daytime_plastic_neo: bool = (phase == "P-cap")
 
+        # 旁路诊断:存 detached scalar tensor,trainer log 时才 .item()
+        # 不用 .item() 进 forward,否则每层每 turn 一次 CPU sync,GPU 利用率从 ~80% 跌到 ~10%
+        self.last_mem_out_norm = torch.zeros(1)
+
         # Hippo NeuralMemory 内部仍是普通 nn.RMSNorm(γ fp32),autocast 下仍报警告。
         # 升级它们到 AdaptiveRMSNorm:weight 保留 fp32 不动 Adam,forward 即时 cast 走 fused。
         _upgrade_rmsnorms_to_adaptive(self.hippocampus)
@@ -293,8 +297,13 @@ class NeuralMemoryPair(nn.Module):
             dim_head=d_head,
             heads=n_heads,
             chunk_size=chunk_size,
+            # batch_size = chunk_size:每个 chunk 边界触发 update_after_final_store,
+            # 把 last_update(decay-dep)拷回 state.weights → 跨 forward 时下一次 read 能看见
+            # 不设此项时 state.weights 永远是 input 权重,decay 不进 read 通路 → to_decay_factor
+            # 永远收不到梯度,paper 的 input-dependent forget gate 失效。
+            batch_size=chunk_size,
             model=mlp,
-            init_decay_bias=_logit(1.0 - retention),  # decay = 1 - retention 静态
+            init_decay_bias=_logit(1.0 - retention),  # init retention = 1 - sigmoid(bias)
             default_step_transform_max_lr=base_lr,
             qk_rmsnorm=True,
             per_head_learned_parameters=True,
@@ -303,9 +312,10 @@ class NeuralMemoryPair(nn.Module):
             pre_rmsnorm=True,
             post_rmsnorm=False,
         )
-        # freeze to_decay_factor → 静态 retention(不被外层 backprop 学走)
-        for p in nm.to_decay_factor.parameters():
-            p.requires_grad = False
+        # to_decay_factor: input-dependent forget gate(paper Table 5 ablation 中单一最大贡献项)。
+        # init bias 已用 _logit(1 - retention) 设(Hippo retention=0.99 → bias≈-4.6),
+        # 让外层 backprop 从 init 起步学习,模型可学"什么时候忘什么"。
+        # 旧版冻结 → Hippo 永远是常数 retention,违反 paper 核心设计。
         # NeuralMemory 用 `repeat(p, '... -> h ...', h=heads)` 把单 head 参数广播成
         # (H, ...) 后塞进 nn.Parameter,这是 expanded view → 同一物理内存被 H 个位置共享。
         # Adam 等 in-place optimizer 会触发 "more than one element refers to single memory location"
@@ -375,6 +385,8 @@ class NeuralMemoryPair(nn.Module):
         # 4. mem_out + RMSNorm
         mem_out = gate[..., 0:1] * r_h + gate[..., 1:2] * r_n
         mem_out = self.mem_rmsnorm(mem_out)
+        # 旁路诊断:存 scalar tensor,延迟 .item() 到 trainer log block(避免 forward 里 CPU sync)
+        self.last_mem_out_norm = mem_out.detach().float().norm()
 
         # 5. alpha 开度。reparam 保证 alpha ∈ [alpha_min, 1] 且全程可导:
         #    alpha = alpha_min + (1 - alpha_min) * sigmoid(alpha_logit)
