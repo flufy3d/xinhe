@@ -38,3 +38,4 @@ outputs/
 *.safetensors
 *.bin
 /data/
+.cache

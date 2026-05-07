@@ -21,6 +21,11 @@ dependencies = [
     "assoc-scan>=0.0.4",
     "einops>=0.8.0",
     "einx>=0.3.0",
+    # Hippo inner SGD Triton kernel (xinhe/model/inner_sgd_triton.py)
+    # Linux: torch 已传递依赖 triton,显式声明保证 uv sync 不漏装
+    # Windows: woct0rdho/triton-windows fork(sm_120 Blackwell 官方支持)
+    "triton ; sys_platform == 'linux'",
+    "triton-windows<3.7 ; sys_platform == 'win32'",
 ]
 
 [[tool.uv.index]]

@@ -24,6 +24,7 @@ from .memory_models import(
     MemoryMLP,
     ResidualNorm
 )
+from .inner_sgd_triton import HippoInnerSGD
 
 import einx
 from einops import einsum, rearrange, repeat, reduce, pack, unpack
@@ -409,6 +410,17 @@ class NeuralMemory(Module):
 
         self.per_sample_grad_fn = vmap(grad_fn, in_dims = (0, 0, 0, 0))
 
+        # 检查 memory_model 是否能走 HippoInnerSGD fast path:
+        # ResidualNorm(MemoryMLP(depth=2)) + 默认 MSE loss(eq 12)
+        # 满足时:vmap+grad → Triton fwd + PyTorch bmm bwd,
+        # BHN ~= 96 sample 的 ~1000 small kernel 风暴 →  ~10 大 kernel,GPU util 上来。
+        self._fast_path_eligible = (
+            isinstance(self.memory_model, ResidualNorm)
+            and isinstance(self.memory_model.model, MemoryMLP)
+            and len(self.memory_model.model.weights) == 2
+            and store_memory_loss_fn is default_loss_fn
+        )
+
         # queries for retrieving from the model
 
         self.to_queries = Sequential(LinearNoBias(dim, dim_inner), activation)
@@ -707,9 +719,34 @@ class NeuralMemory(Module):
 
         # get grads and extra auxiliary loss (for backwarding through qkv projection in base neural memory module)
 
-        grads, unweighted_mem_model_loss = self.per_sample_grad_fn(dict(weights_for_surprise), keys, adaptive_lr, values)
-
-        grads = TensorDict(grads)
+        # Fast path:ResidualNorm(MemoryMLP(depth=2)) + default MSE → HippoInnerSGD
+        # 等价于 vmap+grad,Triton fwd + PyTorch bmm bwd 大幅减少 small kernel 风暴。
+        # Triton tl.dot 要求 inner dim >= 16(fp32 IEEE);chunk_size/D/DH 小于 16 时
+        # 退回 vmap+grad(常见于 unit test 的 mock 配置 chunk_size=4)。
+        ws_dict = dict(weights_for_surprise)
+        keys_C = keys.shape[-2]
+        keys_D = keys.shape[-1]
+        W1_DH = ws_dict["model.weights.0"].shape[-1] if "model.weights.0" in ws_dict else 0
+        shapes_ok = (keys_C >= 16 and keys_D >= 16 and W1_DH >= 16)
+        if self._fast_path_eligible and shapes_ok:
+            # weights_for_surprise keys 来自 ResidualNorm(MemoryMLP) named_parameters:
+            #   'norm.gamma'        (BHN, D)
+            #   'model.weights.0'   (BHN, D, DH)
+            #   'model.weights.1'   (BHN, DH, D)
+            gamma_p = ws_dict["norm.gamma"]
+            W1_p = ws_dict["model.weights.0"]
+            W2_p = ws_dict["model.weights.1"]
+            g_gamma, g_W1, g_W2, unweighted_mem_model_loss = HippoInnerSGD.apply(
+                keys, values, adaptive_lr, gamma_p, W1_p, W2_p,
+            )
+            grads = TensorDict({
+                "norm.gamma": g_gamma,
+                "model.weights.0": g_W1,
+                "model.weights.1": g_W2,
+            })
+        else:
+            grads, unweighted_mem_model_loss = self.per_sample_grad_fn(ws_dict, keys, adaptive_lr, values)
+            grads = TensorDict(grads)
 
         # surprises
 
@@ -984,23 +1021,34 @@ class NeuralMemory(Module):
         # determine split sizes and when to update
 
         if need_update_weights:
+            # 纯整数算 chunk 边界 — 等价于(更早版本的)torch.arange + masked_select 路径,
+            # 但避开 Dynamo 的 nonzero / .tolist() graph break(detail: 这两个 op 输出 shape
+            # 取决于 input data,Inductor 不能 trace,会强制 fallback eager)。
+            #
+            # 数学:把 store_seq 切成若干段,每段结尾都是 batch_size 整数倍 token 全局位置;
+            # 段长 = batch_size 段 + 末端非整段(如有)。
+            #   global positions = [seq_index+1, ..., seq_index+store_seq_len]
+            #   boundary p ∈ [1, store_seq_len] 满足 (seq_index+p) % batch_size == 0
+            #   indices(local)= [0, p_1, p_2, ..., (store_seq_len 若非边界则也加)]
+            #   split_sizes = consecutive diffs
             update_after_final_store = divisible_by(seq_index + store_seq_len, batch_size)
 
-            seq_range = torch.arange(store_seq_len) + seq_index + 1
-            batch_boundary = divisible_by(seq_range, batch_size)
+            rem = seq_index % batch_size
+            first_p = batch_size - rem if rem != 0 else batch_size
 
-            indices = seq_range[batch_boundary] - seq_index
-
-            indices = F.pad(indices, (1, 0), value = 0)
-
+            indices = [0]
+            p = first_p
+            while p <= store_seq_len:
+                indices.append(p)
+                p += batch_size
             if indices[-1] != store_seq_len:
-                indices = F.pad(indices, (0, 1), value = store_seq_len)
+                indices.append(store_seq_len)
 
-            split_sizes = (indices[1:] - indices[:-1]).tolist()
+            split_sizes = [indices[i + 1] - indices[i] for i in range(len(indices) - 1)]
 
             assert sum(split_sizes) == store_seq_len
         else:
-            split_sizes = (store_seq_len,)
+            split_sizes = [store_seq_len]
             update_after_final_store = False
 
         # accumulate updates

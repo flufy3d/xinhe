@@ -134,10 +134,15 @@ class Trainer:
         # TF32 加速
         torch.set_float32_matmul_precision('high')
 
-        # NOTE: 不开 torch.compile。NeuralMemoryPair 内 store_memories 走 vmap(grad)
-        # 做 test-time SGD,Dynamo 编译路径会强制 disable_saved_tensors_hooks,
-        # 但 vmap(grad) 自己也用同一机制 → 冲突直接 InternalTorchDynamoError。
-        # 而且 backbone 是 frozen 的,只 fwd 不 bwd,compile 收益只剩 ~20%,不值。
+        # NOTE: trainer 顶层不开 torch.compile(整个 model 包起来)。
+        # 历史原因:NeuralMemoryPair.hippocampus 内 store_memories 走 vmap(grad) 做 test-time
+        # SGD 时,Dynamo 编译路径会强制 disable_saved_tensors_hooks,而 vmap(grad) 自己也用
+        # 同一机制 → InternalTorchDynamoError。
+        # 现状:Hippo inner SGD 已切到 HippoInnerSGD(autograd.Function 包 Triton fwd kernel +
+        # PyTorch bmm 二阶 bwd),vmap+grad 不再在 hot path。compile 兼容性已具备,但顶层
+        # compile 仍可能踩到 Dynamo 对 NeuralMemState namedtuple / TensorDict 的边角行为 →
+        # 当前用 `compile_backbone_layers=True` 局部 compile(qwen layer body + Neo MLP),
+        # Hippo Triton kernel 是 black box,Dynamo 无需进入。
 
         total_params = self.model.get_total_param_count()
         trainable_params = self.model.get_trainable_param_count()

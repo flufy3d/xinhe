@@ -2638,6 +2638,18 @@ wheels = [
 ]
 
 [[package]]
+name = "triton-windows"
+version = "3.6.0.post26"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c1/56/1028998fbad2eaff607ad682cedbcd006ddd326bb0f19ddf18461155b900/triton_windows-3.6.0.post26-cp310-cp310-win_amd64.whl", hash = "sha256:7a2ad7e8414a581c9d3c58991f86fa49af70d9f7ef464d9349e6c0e8e23af9f5", size = 47399782, upload-time = "2026-03-10T02:51:26.808Z" },
+    { url = "https://files.pythonhosted.org/packages/5e/20/acab7b4f50abe68d93f632b2e29cfb9e76284eaf9b4041a6eabbbd4afdc7/triton_windows-3.6.0.post26-cp311-cp311-win_amd64.whl", hash = "sha256:369a47ed3ca25f6d405387a058b8fbc62e6ff4592bbf87b0c5f6de372ab68931", size = 47401354, upload-time = "2026-03-10T02:51:33.9Z" },
+    { url = "https://files.pythonhosted.org/packages/62/1e/8d9814e67ba3f20094cf3c69e7815a491f20beb86469a647550ba86728b0/triton_windows-3.6.0.post26-cp312-cp312-win_amd64.whl", hash = "sha256:189d8c57911aa9d2ff983a715e5c967b325f576307db60924cab22b501a36515", size = 47402104, upload-time = "2026-03-10T02:51:40.997Z" },
+    { url = "https://files.pythonhosted.org/packages/2e/69/7579a5da5d8c5372711bb4b99a185ad35eae6c7549d85b9f75171e06832b/triton_windows-3.6.0.post26-cp313-cp313-win_amd64.whl", hash = "sha256:033f3d50c6a0e4539a3ccfa042304dbf76bf79155f382f9c09d010323d5a9a32", size = 47402101, upload-time = "2026-03-10T02:51:47.669Z" },
+    { url = "https://files.pythonhosted.org/packages/7e/27/3d272c154c00c044e0f113d053650d6faf56258789dcdc1e5e3e4a91d86d/triton_windows-3.6.0.post26-cp314-cp314-win_amd64.whl", hash = "sha256:c8029386813d6df4ec700bbff050c1e308fd24d66be3d8848274fc5d97bad396", size = 48580269, upload-time = "2026-03-10T02:51:54.665Z" },
+]
+
+[[package]]
 name = "typer"
 version = "0.24.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2733,6 +2745,8 @@ dependencies = [
     { name = "tensordict" },
     { name = "torch" },
     { name = "transformers" },
+    { name = "triton", marker = "sys_platform == 'linux'" },
+    { name = "triton-windows", marker = "sys_platform == 'win32'" },
     { name = "wandb" },
 ]
 
@@ -2753,6 +2767,8 @@ requires-dist = [
     { name = "tensordict" },
     { name = "torch", specifier = ">=2.0", index = "https://download.pytorch.org/whl/cu130" },
     { name = "transformers", specifier = ">=5.4.0" },
+    { name = "triton", marker = "sys_platform == 'linux'" },
+    { name = "triton-windows", marker = "sys_platform == 'win32'", specifier = "<3.7" },
     { name = "wandb" },
 ]
 
