@@ -419,3 +419,245 @@ def hippo_inner_sgd(
 ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     """便利 wrapper,等价 `HippoInnerSGD.apply(...)`。"""
     return HippoInnerSGD.apply(K, V, lr, gamma, W1, W2, eps, force_pytorch)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 2: Fused chunk-update —— inner SGD + momentum scan + decay scan 合并
+#
+# 替换 NM `store_memories` 中 lines 806-849 的 PyTorch 路径(对每 param 跑两次
+# `AssocScan`,n=1 时 assoc_scan 内部 pack/scan/unpack 仍会展成 ~5-10 ops)。
+#
+# 数学:per-param,沿 inner-chunk dim n 串行:
+#   surprise[n] = -∇_W L(K[n], V[n], lr[n], W_init, γ_init)   # HippoInnerSGD
+#   m[n]        = adaptive_momentum[n] · m[n-1] + surprise[n]
+#   W[n+1]      = (1 - decay_factor[n]) · W[n] + m[n]          # remove_prev=False:
+#                                                                # 第 0 项 = prev_W (last_update),
+#                                                                # 第 n+1 项 = scan_output[n]
+#
+# 注:inner SGD 用的是 `W_init / γ_init`(NM 入口 init weights),不是累积 W;
+# 这是 paper-faithful TTT 的设计 —— 整个 batch 的 surprise 都参考同一个 init,
+# 然后用 momentum + decay 累积 update。
+#
+# 实现策略:
+#   - forward 走 PyTorch direct ops(替换 assoc_scan,saves ~6 ops × 3 params × 2 scans)
+#   - 内部调 HippoInnerSGD.apply:Triton fwd 已经在,bwd 自带 recomputation autograd
+#   - HippoChunkUpdate.forward 在 no_grad 下跑 PyTorch ref(避免 fwd 建图开销),
+#     bwd 在重新建图的副本上跑 autograd backward(recomputation pattern)
+#   - SRAM 估算装不下 production config(D=64, DH=128)的全 fused Triton kernel —
+#     m + WD + W_init 三套权重 ~192KB > sm_120 100KB 限。先不写新 Triton kernel,
+#     依赖 HippoInnerSGD 的 Triton fwd + PyTorch 标量 ops
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _pytorch_chunk_update_fwd_autograd(
+    K: Tensor,                  # (BHO, T, D)  T = num_inner * c_inner;BHO = B*H
+    V: Tensor,                  # (BHO, T, D)
+    lr: Tensor,                 # (BHO, T)
+    gamma_init: Tensor,         # (BHO, D)
+    W1_init: Tensor,            # (BHO, D, DH)
+    W2_init: Tensor,            # (BHO, DH, D)
+    adaptive_momentum: Tensor,  # (BHO, num_inner)  per-inner-chunk momentum factor
+    decay_factor: Tensor,       # (BHO, num_inner)  per-inner-chunk weight decay
+    prev_m_gamma: Tensor,       # (BHO, D)
+    prev_m_W1: Tensor,          # (BHO, D, DH)
+    prev_m_W2: Tensor,          # (BHO, DH, D)
+    prev_W_gamma: Tensor,       # (BHO, D)  past_last_update gamma (用于 weight decay scan 的 prev)
+    prev_W_W1: Tensor,          # (BHO, D, DH)
+    prev_W_W2: Tensor,          # (BHO, DH, D)
+    chunk_size_inner: int,
+    eps: float = 1e-5,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """fully-autograd PyTorch 实现:HippoInnerSGD.apply + 直接 PyTorch 标量 ops。
+
+    输出:
+        updates_gamma : (BHO, num_inner+1, D)
+        updates_W1    : (BHO, num_inner+1, D, DH)
+        updates_W2    : (BHO, num_inner+1, DH, D)
+        next_m_gamma  : (BHO, D)
+        next_m_W1     : (BHO, D, DH)
+        next_m_W2     : (BHO, DH, D)
+        L_c           : (BHO, T)  unweighted MSE per token
+    """
+    BHO, T, D = K.shape
+    DH = W1_init.shape[-1]
+    num_inner = T // chunk_size_inner
+    assert num_inner * chunk_size_inner == T, (
+        f"T={T} must be divisible by chunk_size_inner={chunk_size_inner}"
+    )
+
+    # Reshape to (BHO * num_inner, c_inner, *) 给 HippoInnerSGD.apply
+    K_flat = K.view(BHO, num_inner, chunk_size_inner, D).reshape(BHO * num_inner, chunk_size_inner, D)
+    V_flat = V.view(BHO, num_inner, chunk_size_inner, D).reshape(BHO * num_inner, chunk_size_inner, D)
+    lr_flat = lr.view(BHO, num_inner, chunk_size_inner).reshape(BHO * num_inner, chunk_size_inner)
+
+    # Repeat init weights:(BHO, *) -> (BHO * num_inner, *);.expand 走 stride trick 不复制
+    gamma_rep = gamma_init.unsqueeze(1).expand(BHO, num_inner, D).reshape(BHO * num_inner, D).contiguous()
+    W1_rep = W1_init.unsqueeze(1).expand(BHO, num_inner, D, DH).reshape(BHO * num_inner, D, DH).contiguous()
+    W2_rep = W2_init.unsqueeze(1).expand(BHO, num_inner, DH, D).reshape(BHO * num_inner, DH, D).contiguous()
+
+    # Inner SGD:返回 grads(per-param)+ unweighted MSE per token
+    g_gamma_flat, g_W1_flat, g_W2_flat, L_c_flat = HippoInnerSGD.apply(
+        K_flat, V_flat, lr_flat, gamma_rep, W1_rep, W2_rep, eps,
+    )
+
+    # Reshape back to (BHO, num_inner, *param)
+    g_gamma = g_gamma_flat.view(BHO, num_inner, D)
+    g_W1 = g_W1_flat.view(BHO, num_inner, D, DH)
+    g_W2 = g_W2_flat.view(BHO, num_inner, DH, D)
+    L_c = L_c_flat.view(BHO, T)
+
+    # surprise = -grad
+    s_gamma = -g_gamma
+    s_W1 = -g_W1
+    s_W2 = -g_W2
+
+    # Momentum scan(沿 num_inner 串行;n=1 时单步)
+    m_gamma_cur = prev_m_gamma
+    m_W1_cur = prev_m_W1
+    m_W2_cur = prev_m_W2
+    m_gamma_list = []
+    m_W1_list = []
+    m_W2_list = []
+    for n in range(num_inner):
+        am_n = adaptive_momentum[:, n:n+1]                          # (BHO, 1)
+        am_n_3d = am_n.unsqueeze(-1)                                 # (BHO, 1, 1)
+        m_gamma_cur = am_n * m_gamma_cur + s_gamma[:, n]
+        m_W1_cur = am_n_3d * m_W1_cur + s_W1[:, n]
+        m_W2_cur = am_n_3d * m_W2_cur + s_W2[:, n]
+        m_gamma_list.append(m_gamma_cur)
+        m_W1_list.append(m_W1_cur)
+        m_W2_list.append(m_W2_cur)
+
+    next_m_gamma = m_gamma_cur
+    next_m_W1 = m_W1_cur
+    next_m_W2 = m_W2_cur
+
+    # Weight decay scan with remove_prev=False:输出第 0 项 = prev_W,后续 = scan outputs
+    WD_gamma_cur = prev_W_gamma
+    WD_W1_cur = prev_W_W1
+    WD_W2_cur = prev_W_W2
+    upd_gamma_list = [WD_gamma_cur]
+    upd_W1_list = [WD_W1_cur]
+    upd_W2_list = [WD_W2_cur]
+    for n in range(num_inner):
+        gate_n = 1.0 - decay_factor[:, n:n+1]                       # (BHO, 1)
+        gate_n_3d = gate_n.unsqueeze(-1)                             # (BHO, 1, 1)
+        WD_gamma_cur = gate_n * WD_gamma_cur + m_gamma_list[n]
+        WD_W1_cur = gate_n_3d * WD_W1_cur + m_W1_list[n]
+        WD_W2_cur = gate_n_3d * WD_W2_cur + m_W2_list[n]
+        upd_gamma_list.append(WD_gamma_cur)
+        upd_W1_list.append(WD_W1_cur)
+        upd_W2_list.append(WD_W2_cur)
+
+    updates_gamma = torch.stack(upd_gamma_list, dim=1)               # (BHO, num_inner+1, D)
+    updates_W1 = torch.stack(upd_W1_list, dim=1)
+    updates_W2 = torch.stack(upd_W2_list, dim=1)
+
+    return updates_gamma, updates_W1, updates_W2, next_m_gamma, next_m_W1, next_m_W2, L_c
+
+
+class HippoChunkUpdate(torch.autograd.Function):
+    """Hippo NM 单 outer-chunk 的 fused chunk-update 算子。
+
+    包装 inner SGD + momentum scan + weight decay scan,替换 NM `store_memories`
+    里 lines 806-849 的 per-param assoc_scan 双扫描。
+
+    forward 在 no_grad 下跑 PyTorch ref(避免双重 autograd graph 开销);
+    backward 在重新建图的副本上跑 autograd backward(recomputation pattern,
+    bwd 跟 inner SGD 自己的 manual bwd 自然衔接)。
+    """
+
+    @staticmethod
+    def forward(  # type: ignore[override]
+        ctx,
+        K: Tensor,
+        V: Tensor,
+        lr: Tensor,
+        gamma: Tensor,
+        W1: Tensor,
+        W2: Tensor,
+        adaptive_momentum: Tensor,
+        decay_factor: Tensor,
+        prev_m_gamma: Tensor,
+        prev_m_W1: Tensor,
+        prev_m_W2: Tensor,
+        prev_W_gamma: Tensor,
+        prev_W_W1: Tensor,
+        prev_W_W2: Tensor,
+        chunk_size_inner: int,
+        eps: float = 1e-5,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        with torch.no_grad():
+            outputs = _pytorch_chunk_update_fwd_autograd(
+                K, V, lr, gamma, W1, W2,
+                adaptive_momentum, decay_factor,
+                prev_m_gamma, prev_m_W1, prev_m_W2,
+                prev_W_gamma, prev_W_W1, prev_W_W2,
+                chunk_size_inner, eps,
+            )
+
+        ctx.save_for_backward(
+            K, V, lr, gamma, W1, W2,
+            adaptive_momentum, decay_factor,
+            prev_m_gamma, prev_m_W1, prev_m_W2,
+            prev_W_gamma, prev_W_W1, prev_W_W2,
+        )
+        ctx.chunk_size_inner = chunk_size_inner
+        ctx.eps = eps
+        return outputs
+
+    @staticmethod
+    def backward(ctx, *grad_outputs) -> tuple:  # type: ignore[override]
+        saved = ctx.saved_tensors
+        chunk_size_inner = ctx.chunk_size_inner
+        eps = ctx.eps
+
+        # Re-create grad-required copies(detach + clone + requires_grad_)
+        inputs_grad = [t.detach().clone().requires_grad_(t.is_floating_point()) for t in saved]
+
+        # autograd.Function.backward 默认 grad 关闭(避免无意中累 grad);
+        # recomputation 需要 enable_grad 重新建图,内部 HippoInnerSGD.apply 才会跟踪
+        with torch.enable_grad():
+            outputs = _pytorch_chunk_update_fwd_autograd(
+                *inputs_grad, chunk_size_inner, eps,
+            )
+            torch.autograd.backward(outputs, grad_outputs)
+
+        # Collect grads in input order;非 floating inputs(无)/ 非 Tensor inputs(int/float)= None
+        grads = tuple(t.grad for t in inputs_grad)
+
+        # forward 入参顺序:
+        #   K, V, lr, gamma, W1, W2,
+        #   adaptive_momentum, decay_factor,
+        #   prev_m_gamma, prev_m_W1, prev_m_W2,
+        #   prev_W_gamma, prev_W_W1, prev_W_W2,
+        #   chunk_size_inner, eps
+        return (*grads, None, None)
+
+
+def hippo_chunk_update(
+    K: Tensor,
+    V: Tensor,
+    lr: Tensor,
+    gamma: Tensor,
+    W1: Tensor,
+    W2: Tensor,
+    adaptive_momentum: Tensor,
+    decay_factor: Tensor,
+    prev_m_gamma: Tensor,
+    prev_m_W1: Tensor,
+    prev_m_W2: Tensor,
+    prev_W_gamma: Tensor,
+    prev_W_W1: Tensor,
+    prev_W_W2: Tensor,
+    chunk_size_inner: int,
+    eps: float = 1e-5,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """便利 wrapper,等价 `HippoChunkUpdate.apply(...)`。"""
+    return HippoChunkUpdate.apply(
+        K, V, lr, gamma, W1, W2,
+        adaptive_momentum, decay_factor,
+        prev_m_gamma, prev_m_W1, prev_m_W2,
+        prev_W_gamma, prev_W_W1, prev_W_W2,
+        chunk_size_inner, eps,
+    )

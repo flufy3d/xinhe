@@ -24,7 +24,7 @@ from .memory_models import(
     MemoryMLP,
     ResidualNorm
 )
-from .inner_sgd_triton import HippoInnerSGD
+from .inner_sgd_triton import HippoInnerSGD, HippoChunkUpdate
 
 import einx
 from einops import einsum, rearrange, repeat, reduce, pack, unpack
@@ -728,6 +728,104 @@ class NeuralMemory(Module):
         keys_D = keys.shape[-1]
         W1_DH = ws_dict["model.weights.0"].shape[-1] if "model.weights.0" in ws_dict else 0
         shapes_ok = (keys_C >= 16 and keys_D >= 16 and W1_DH >= 16)
+
+        # Stage 2 fast path:HippoChunkUpdate fuse inner SGD + momentum scan + decay scan
+        # 把 lines 806-849 整个 per-param assoc_scan 双扫替换成单 autograd.Function。
+        # 适用前提:no max_grad_norm / no layer_modulation / no learned_combine /
+        # no spectral_norm / momentum_order==1 / no prev_weights / no lookahead /
+        # num_chunks>0(num_chunks==0 special path 形状不同,留给原路径)。
+        # production v9.5 / NeuralMemoryPair 默认配置全满足。
+        fast_path_chunk_update = (
+            self._fast_path_eligible
+            and shapes_ok
+            and num_chunks > 0
+            and has_momentum
+            and self.momentum_order == 1
+            and not exists(self.to_learned_momentum_combine)
+            and not self.spectral_norm_surprises
+            and not exists(self.max_grad_norm)
+            and not need_layer_lr_mod
+            and not exists(prev_weights)
+            and not self.store_with_lookahead_value
+        )
+        if fast_path_chunk_update:
+            BHO = batch * heads
+            chunk_inner_size = keys_C   # = chunk_size * num_kv_per_token
+            D_kv = keys_D
+
+            # Reshape (BHN, C, D) → (BHO, num_inner * C, D);BHN = BHO * num_chunks
+            K_full = keys.reshape(BHO, num_chunks * chunk_inner_size, D_kv)
+            V_full = values.reshape(BHO, num_chunks * chunk_inner_size, D_kv)
+            lr_full = adaptive_lr.reshape(BHO, num_chunks * chunk_inner_size)
+
+            # Init weights:用 `weights`(single set per (b,h))而非 weights_for_surprise(repeated)
+            init_w = dict(weights)
+            gamma_init = init_w["norm.gamma"]              # (BHO, D)
+            W1_init = init_w["model.weights.0"]            # (BHO, D, DH)
+            W2_init = init_w["model.weights.1"]            # (BHO, DH, D)
+
+            # adaptive_momentum (1, BHO, num_inner, 1) → (BHO, num_inner);
+            # decay_factor    (BHO, num_inner, 1)        → (BHO, num_inner)
+            am_2d = adaptive_momentum[0].squeeze(-1)
+            df_2d = decay_factor.squeeze(-1)
+
+            # past_state init(若 caller 没传)
+            if not exists(past_state):
+                _init_mom = self.init_momentum(batch)
+                past_state_local = (weights, _init_mom)
+            else:
+                past_state_local = past_state
+            past_lu_dict, past_lm_dict = past_state_local
+
+            prev_m_gamma = past_lm_dict["norm.gamma"][0]
+            prev_m_W1 = past_lm_dict["model.weights.0"][0]
+            prev_m_W2 = past_lm_dict["model.weights.1"][0]
+
+            prev_W_gamma = past_lu_dict["norm.gamma"]
+            prev_W_W1 = past_lu_dict["model.weights.0"]
+            prev_W_W2 = past_lu_dict["model.weights.1"]
+
+            upd_g, upd_W1, upd_W2, next_m_g, next_m_W1, next_m_W2, L_c = HippoChunkUpdate.apply(
+                K_full, V_full, lr_full,
+                gamma_init, W1_init, W2_init,
+                am_2d, df_2d,
+                prev_m_gamma, prev_m_W1, prev_m_W2,
+                prev_W_gamma, prev_W_W1, prev_W_W2,
+                chunk_inner_size,
+            )
+
+            updates = TensorDict({
+                "norm.gamma": upd_g,
+                "model.weights.0": upd_W1,
+                "model.weights.1": upd_W2,
+            })
+            next_last_update = TensorDict({
+                "norm.gamma": upd_g[:, -1],
+                "model.weights.0": upd_W1[:, -1],
+                "model.weights.1": upd_W2[:, -1],
+            })
+            # next_last_momentum 形状 (n_orders=1, BHO, *param) 与 init_momentum 一致
+            next_last_momentum = TensorDict({
+                "norm.gamma": next_m_g.unsqueeze(0),
+                "model.weights.0": next_m_W1.unsqueeze(0),
+                "model.weights.1": next_m_W2.unsqueeze(0),
+            })
+            next_state = (next_last_update, next_last_momentum)
+
+            # L_c (BHO, num_inner * C) → (BHN, C) 等价 inner SGD 路径的输出
+            unweighted_mem_model_loss = L_c.reshape(BHO * num_chunks, chunk_inner_size)
+
+            # 与原路径 line 753-754 同样 rearrange 成 (B, H, T) 形再返回
+            adaptive_lr = rearrange(adaptive_lr, '(b h n) c -> b h (n c)', b = batch, h = heads)
+            unweighted_mem_model_loss = rearrange(unweighted_mem_model_loss, '(b h n) c -> b h (n c)', b = batch, h = heads)
+
+            next_store_state = NeuralMemState(next_seq_len_index, weights, remainder, next_state, updates)
+
+            if not return_surprises:
+                return updates, next_store_state
+
+            return updates, next_store_state, (unweighted_mem_model_loss, adaptive_lr)
+
         if self._fast_path_eligible and shapes_ok:
             # weights_for_surprise keys 来自 ResidualNorm(MemoryMLP) named_parameters:
             #   'norm.gamma'        (BHN, D)
