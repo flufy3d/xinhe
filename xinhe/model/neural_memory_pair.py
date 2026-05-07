@@ -3,7 +3,7 @@
 两条路径**训练机制完全不同**(这是 v9 的核心架构选择):
 
   - Hippocampus(海马):浅 MLP(默认 depth=2 exp=2.0),**TTT inner SGD** 路径。
-    每 token 当作一次 SGD 例子,vmap(grad) 内层算 ∇W,W ← W - lr·∇W。
+    每 token 当作一次 SGD 例子,vmap(grad) 内层算 grad_W,W ← W - lr·grad_W。
     每 episode 内 fast weights 演化,不带跨 episode 持久状态。
     走 NeuralMemory.forward,xinhe 内 patch 了 `read_before_write=True`。
 

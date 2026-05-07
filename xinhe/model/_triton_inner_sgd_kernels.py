@@ -1,19 +1,23 @@
-"""Triton kernel:Hippo NM inner SGD per-sample 梯度。
+"""Triton kernel: Hippo NM inner SGD per-sample gradients.
 
-公式 / 反向链推导见 docs/inner_sgd_triton_math.md。
-本文件提供两个 `@triton.jit` kernel + Python wrapper:
+See docs/inner_sgd_triton_math.md for derivations of the forward formulas
+and reverse chain.
+
+Two @triton.jit kernels + Python wrappers:
 
     triton_inner_sgd_fwd(K, V, lr, gamma, W1, W2, eps)
-        → (g_gamma, g_W1, g_W2, L_c, saved_dict)
+        -> (g_gamma, g_W1, g_W2, L_c, saved_dict)
 
     triton_inner_sgd_bwd(saved_dict, d_g_gamma, d_g_W1, d_g_W2, d_L_c)
-        → (dK, dV, dlr, dgamma, dW1, dW2)
+        -> (dK, dV, dlr, dgamma, dW1, dW2)
 
-设计:
-    grid = (BHN,),1 program / 1 (b,h,n) sample
-    沿 C 维 tile(BLOCK_C 默认 32),累加器(g_gamma / g_W1 / g_W2)在 SRAM 持久,
-    W1/W2/γ 也持久(per-sample 输入)。其余每个 tile 独立。
-    内部全 fp32 + `input_precision="ieee"`(关掉 TF32,精度对齐 vmap+grad)
+Design:
+    grid = (BHN,), 1 program per (b, h, n) sample.
+    Tile along C (BLOCK_C=32 default). Accumulators (g_gamma / g_W1 / g_W2)
+    persistent in SRAM along with W1/W2/gamma per-sample inputs. All other
+    per-tile state is recomputed.
+    Internal fp32 accumulation + input_precision="ieee" (TF32 disabled,
+    matching vmap+grad numerics).
 """
 from __future__ import annotations
 
@@ -24,44 +28,44 @@ import triton
 import triton.language as tl
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# device 函数:GeLU exact + 一阶 / 二阶导
-# ─────────────────────────────────────────────────────────────────────────────
+# ----------------------------------------------------------------------------
+# Device functions: GeLU exact + 1st / 2nd derivative
+# ----------------------------------------------------------------------------
 
 
 @triton.jit
 def _gelu_phi(x):
-    """Φ(x) = 0.5·(1 + erf(x/√2))"""
+    """Phi(x) = 0.5 * (1 + erf(x / sqrt(2)))"""
     return 0.5 * (1.0 + tl.erf(x * 0.7071067811865475))
 
 
 @triton.jit
 def _gelu_pdf(x):
-    """φ(x) = exp(-x²/2)/√(2π)"""
+    """phi(x) = exp(-x^2 / 2) / sqrt(2 * pi)"""
     return 0.3989422804014327 * tl.exp(-0.5 * x * x)
 
 
 @triton.jit
 def _gelu_exact(x):
-    """G(x) = x · Φ(x)"""
+    """G(x) = x * Phi(x)"""
     return x * _gelu_phi(x)
 
 
 @triton.jit
 def _gelu_prime(x):
-    """G'(x) = Φ(x) + x · φ(x)"""
+    """G'(x) = Phi(x) + x * phi(x)"""
     return _gelu_phi(x) + x * _gelu_pdf(x)
 
 
 @triton.jit
 def _gelu_pprime(x):
-    """G''(x) = (2 - x²) · φ(x)"""
+    """G''(x) = (2 - x^2) * phi(x)"""
     return (2.0 - x * x) * _gelu_pdf(x)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ----------------------------------------------------------------------------
 # Forward kernel
-# ─────────────────────────────────────────────────────────────────────────────
+# ----------------------------------------------------------------------------
 
 
 @triton.jit
@@ -139,7 +143,7 @@ def _hippo_inner_sgd_fwd_kernel(
 
         err_t = (2.0 * inv_D) * lr_t[:, None] * r_t                                        # (BLOCK_C, D)
 
-        # ∇γ contribution
+        # grad_gamma contribution
         acc_g_gamma += tl.sum(err_t * ln_t, axis=0)                                        # (D,)
 
         # g_raw
@@ -148,15 +152,15 @@ def _hippo_inner_sgd_fwd_kernel(
         m_gln_t = tl.sum(g_ln_t * ln_t, axis=1) * inv_D                                     # (BLOCK_C,)
         g_raw_t = (g_ln_t - m_g_t[:, None] - ln_t * m_gln_t[:, None]) * inv_sigma_t[:, None]   # (BLOCK_C, D)
 
-        # ∇W2 += h_t.T @ g_raw_t
+        # grad_W2 += h_t.T @ g_raw_t
         acc_g_W2 += tl.dot(tl.trans(h_t), g_raw_t, out_dtype=tl.float32, input_precision="ieee")
 
-        # g_h = g_raw_t @ W2.T;g_h_pre = g_h * G'(h_pre)
+        # g_h = g_raw_t @ W2.T; g_h_pre = g_h * G'(h_pre)
         g_h_t = tl.dot(g_raw_t, tl.trans(W2), out_dtype=tl.float32, input_precision="ieee")    # (BLOCK_C, DH)
         G_p_t = _gelu_prime(h_pre_t)                                                              # (BLOCK_C, DH)
         g_h_pre_t = g_h_t * G_p_t                                                                  # (BLOCK_C, DH)
 
-        # ∇W1 += K_t.T @ g_h_pre_t
+        # grad_W1 += K_t.T @ g_h_pre_t
         acc_g_W1 += tl.dot(tl.trans(K_t), g_h_pre_t, out_dtype=tl.float32, input_precision="ieee")
 
     # Final stores
@@ -165,25 +169,22 @@ def _hippo_inner_sgd_fwd_kernel(
     tl.store(g_W2_base + offs_dh[:, None] * D + offs_d[None, :], acc_g_W2)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Backward kernel
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Backward kernel — **当前不在 production 路径**
+# ----------------------------------------------------------------------------
+# Backward kernel -- NOT in production path
 #
-# 状态密度:30+ adjoint tensors per tile,加 W2/d_g_W1/d_g_W2 即使 tile 内载入,
-# sm_120 100KB SRAM 仍装不下(实测 production 大小 BHN=96/C=128/D=64/DH=128 需
-# ~118KB)。已经把 dW1/dW2/dK_R20 移到 Python 外用 bmm 算,但仍超限。
+# State density: 30+ adjoint tensors per tile. Even pulling W2/d_g_W1/d_g_W2
+# inside the tile loop (instead of persistent), sm_120 100KB SRAM still does
+# not fit (production size BHN=96/C=128/D=64/DH=128 needs ~118KB). dW1/dW2/
+# dK_R20 already moved to Python bmm fallback, still over budget.
 #
-# `HippoInnerSGD.backward` 永走 PyTorch bmm 链(`_pytorch_inner_sgd_bwd`)—
-# ~10 kernel 启动,vs vmap+grad 的 ~1000 仍是大幅减少;forward Triton 已捕获
-# launch overhead 大头(实测 7.78× 加速)。
+# HippoInnerSGD.backward always uses the PyTorch bmm chain (_pytorch_inner
+# _sgd_bwd) -- ~10 kernel launches vs ~1000 for vmap+grad, still a big win.
+# Forward Triton path captures the launch-overhead bulk (measured 7.78x).
 #
-# kernel 留着供未来分裂多 sub-kernel 重启;小 shape(C ≤ 16)compile OK,可作
-# 数值正确性参考。
-# ─────────────────────────────────────────────────────────────────────────────
+# Kept here as a reference / future starting point if split into multiple
+# sub-kernels. Numerically validated on small shapes (C <= 16) as a ground
+# truth.
+# ----------------------------------------------------------------------------
 @triton.jit
 def _hippo_inner_sgd_bwd_kernel(
     K_ptr, V_ptr, lr_ptr, gamma_ptr, W2_ptr,
@@ -192,11 +193,11 @@ def _hippo_inner_sgd_bwd_kernel(
     # outputs
     dK_ptr, dV_ptr, dlr_ptr, dgamma_ptr,
     # save for outside-bmm
-    adj_h_pre_save_ptr,   # (BHN, C, DH) — 用于 dW1 = K.T @ adj_h_pre
-    adj_raw_save_ptr,     # (BHN, C, D)  — 用于 dW2 R18 部分 = h.T @ adj_raw
-    adj_g_h_save_ptr,     # (BHN, C, DH) — 用于 dW2 R6 部分  = adj_g_h.T @ g_raw
-    g_raw_save_ptr,       # (BHN, C, D)  — 同上
-    h_save_ptr,           # (BHN, C, DH) — 同上
+    adj_h_pre_save_ptr,   # (BHN, C, DH) - used for dW1 = K.T @ adj_h_pre
+    adj_raw_save_ptr,     # (BHN, C, D)  - used for dW2 R18 part = h.T @ adj_raw
+    adj_g_h_save_ptr,     # (BHN, C, DH) - used for dW2 R6 part  = adj_g_h.T @ g_raw
+    g_raw_save_ptr,       # (BHN, C, D)  - same
+    h_save_ptr,           # (BHN, C, DH) - same
     C: tl.constexpr,
     D: tl.constexpr,
     DH: tl.constexpr,
@@ -233,9 +234,9 @@ def _hippo_inner_sgd_bwd_kernel(
     g_raw_save_base     = g_raw_save_ptr     + pid * C * D
     h_save_base         = h_save_ptr         + pid * C * DH
 
-    # 持久量极简:仅 gamma / d_g_gamma / acc_dgamma(总计 < 1KB)
-    # W2 / d_g_W1 / d_g_W2 全部移到 tile 内加载 — 每 tile 重复 HBM load,
-    # 但 sm_120 SRAM 100KB 装不下大于 64KB 的持久 + 60KB 的 per-tile 工作集
+    # Persistent state minimised: only gamma / d_g_gamma / acc_dgamma (< 1KB).
+    # W2 / d_g_W1 / d_g_W2 reload per tile -- repeats HBM loads but lets the
+    # 30+ adjoint tensors fit in the per-tile working set.
     gamma = tl.load(gamma_base + offs_d)
     gp1 = gamma + 1.0
     d_g_gamma = tl.load(d_g_gamma_base + offs_d)
@@ -254,12 +255,12 @@ def _hippo_inner_sgd_bwd_kernel(
         d_L_c_t = tl.load(d_L_c_base + c_idx)
         inv_sigma_t = 1.0 / sigma_t
 
-        # 大 tensor 移到 tile 内 load(节省 persistent SRAM)
+        # Reload large persistent tensors per tile to free SRAM
         W2 = tl.load(W2_base + offs_dh[:, None] * D + offs_d[None, :])                    # (DH, D)
         d_g_W1 = tl.load(d_g_W1_base + offs_d[:, None] * DH + offs_dh[None, :])           # (D, DH)
         d_g_W2 = tl.load(d_g_W2_base + offs_dh[:, None] * D + offs_d[None, :])            # (DH, D)
 
-        # ── 重算可推量
+        # Recompute forward intermediates
         h_t = _gelu_exact(h_pre_t)
         G_p_t = _gelu_prime(h_pre_t)
         G_pp_t = _gelu_pprime(h_pre_t)
@@ -273,97 +274,92 @@ def _hippo_inner_sgd_bwd_kernel(
         g_h_t = tl.dot(g_raw_t, tl.trans(W2), out_dtype=tl.float32, input_precision="ieee")
         g_h_pre_t = g_h_t * G_p_t
 
-        # ── R1
+        # R1
         adj_ln = d_g_gamma[None, :] * err_t
         adj_err = d_g_gamma[None, :] * ln_t
 
-        # ── R2
+        # R2
         adj_K_p1 = tl.dot(g_h_pre_t, tl.trans(d_g_W1), out_dtype=tl.float32, input_precision="ieee")
         adj_g_h_pre = tl.dot(K_t, d_g_W1, out_dtype=tl.float32, input_precision="ieee")
 
-        # ── R3
+        # R3
         adj_h_p1 = tl.dot(g_raw_t, tl.trans(d_g_W2), out_dtype=tl.float32, input_precision="ieee")
         adj_g_raw_p1 = tl.dot(h_t, d_g_W2, out_dtype=tl.float32, input_precision="ieee")
 
-        # ── R4
+        # R4
         adj_r_part_L = d_L_c_t[:, None] * (2.0 * inv_D) * r_t
 
-        # ── R5
+        # R5
         adj_g_h = adj_g_h_pre * G_p_t
         adj_h_pre = adj_g_h_pre * g_h_t * G_pp_t
 
-        # ── R6
+        # R6 -- adj_g_h, g_raw_t saved to HBM; Python computes dW2 R6 portion
         adj_g_raw = adj_g_raw_p1 + tl.dot(adj_g_h, W2, out_dtype=tl.float32, input_precision="ieee")
-        # 把 adj_g_h, g_raw_t 写到 HBM,Python 算 dW2 R6 部分
         tl.store(adj_g_h_save_base + c_idx[:, None] * DH + offs_dh[None, :], adj_g_h)
         tl.store(g_raw_save_base + c_idx[:, None] * D + offs_d[None, :], g_raw_t)
 
-        # ── R7
+        # R7
         adj_g_ln_R7 = adj_g_raw * inv_sigma_t[:, None]
         adj_m_g = -tl.sum(adj_g_raw, axis=1) * inv_sigma_t
         adj_ln += -adj_g_raw * m_gln_t[:, None] * inv_sigma_t[:, None]
         adj_m_gln = -tl.sum(adj_g_raw * ln_t, axis=1) * inv_sigma_t
         adj_sigma_p1 = -tl.sum(adj_g_raw * g_raw_t, axis=1) * inv_sigma_t
 
-        # ── R8, R9
+        # R8, R9
         adj_g_ln_R8 = adj_m_gln[:, None] * ln_t * inv_D
         adj_ln += adj_m_gln[:, None] * g_ln_t * inv_D
         adj_g_ln_R9 = adj_m_g[:, None] * inv_D + 0.0 * ln_t
         adj_g_ln = adj_g_ln_R7 + adj_g_ln_R8 + adj_g_ln_R9
 
-        # ── R10
+        # R10
         adj_err += adj_g_ln * gp1[None, :]
         acc_dgamma += tl.sum(adj_g_ln * err_t, axis=0)
 
-        # ── R11
+        # R11
         adj_lr_t = (2.0 * inv_D) * tl.sum(adj_err * r_t, axis=1)
         adj_r_R11 = (2.0 * inv_D) * lr_t[:, None] * adj_err
         adj_r = adj_r_part_L + adj_r_R11
 
-        # ── R12
+        # R12
         tl.store(dV_base + c_idx[:, None] * D + offs_d[None, :], -adj_r)
         tl.store(dlr_base + c_idx, adj_lr_t)
         adj_pred = adj_r
 
-        # ── R13
+        # R13
         adj_ln += adj_pred * gp1[None, :]
         acc_dgamma += tl.sum(adj_pred * ln_t, axis=0)
         adj_K_R13 = adj_pred
 
-        # ── R14
+        # R14
         adj_raw = adj_ln * inv_sigma_t[:, None]
         adj_mu = -tl.sum(adj_ln, axis=1) * inv_sigma_t
         adj_sigma_p2 = -tl.sum(adj_ln * ln_t, axis=1) * inv_sigma_t
 
         adj_sigma = adj_sigma_p1 + adj_sigma_p2
 
-        # ── R15
+        # R15
         adj_var = adj_sigma * 0.5 * inv_sigma_t
 
-        # ── R16, R17
+        # R16, R17
         adj_raw += adj_var[:, None] * (2.0 * inv_D) * sigma_t[:, None] * ln_t
         adj_raw += adj_mu[:, None] * inv_D + 0.0 * ln_t
 
-        # 把 adj_raw, h_t 写出 HBM,Python 算 dW2 R18 部分
+        # adj_raw, h_t saved to HBM; Python computes dW2 R18 portion
         tl.store(adj_raw_save_base + c_idx[:, None] * D + offs_d[None, :], adj_raw)
         tl.store(h_save_base + c_idx[:, None] * DH + offs_dh[None, :], h_t)
 
-        # ── R18
+        # R18
         adj_h_R18 = tl.dot(adj_raw, tl.trans(W2), out_dtype=tl.float32, input_precision="ieee")
         adj_h = adj_h_p1 + adj_h_R18
 
-        # ── R19
+        # R19
         adj_h_pre += adj_h * G_p_t
 
-        # 把 adj_h_pre 写到 HBM,Python 算 dW1 = K.T @ adj_h_pre
+        # adj_h_pre saved to HBM; Python computes dW1 = K.T @ adj_h_pre
         tl.store(adj_h_pre_save_base + c_idx[:, None] * DH + offs_dh[None, :], adj_h_pre)
 
-        # ── R20:仅算 dK 的 R20 贡献(无需 W1!直接靠 adj_h_pre 在 Python 里 bmm)
-        # 但 dK 自己需要 R20:dK += adj_h_pre @ W1.T
-        # 我们这里 SRAM 装不下 W1。把 adj_h_pre 已经写出去了,Python 端算 dK_R20 = bmm(adj_h_pre, W1.T) 然后 add。
-        # → dK 在 Python 里汇总 R2(adj_K_p1)+R13(adj_K_R13)+R20(从 adj_h_pre 和 W1 算)
-        # 因此这里只写 dK_part = adj_K_p1 + adj_K_R13;Python add R20 部分
-
+        # R20: dK only -- W1 not in SRAM. dK = adj_K_p1 + adj_K_R13 + (adj_h_pre @ W1.T).
+        # The latter is computed by Python after the kernel (bmm with adj_h_pre + W1).
         dK_partial = adj_K_p1 + adj_K_R13
         tl.store(dK_base + c_idx[:, None] * D + offs_d[None, :], dK_partial)
 
@@ -371,9 +367,9 @@ def _hippo_inner_sgd_bwd_kernel(
     tl.store(dgamma_base + offs_d, acc_dgamma)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Python wrapper
-# ─────────────────────────────────────────────────────────────────────────────
+# ----------------------------------------------------------------------------
+# Python wrappers
+# ----------------------------------------------------------------------------
 
 
 def _ensure_contig_fp32(t: Tensor) -> Tensor:
@@ -381,14 +377,15 @@ def _ensure_contig_fp32(t: Tensor) -> Tensor:
 
 
 def _pick_block_c(C: int, kernel: str = "fwd") -> int:
-    """根据 C 选 BLOCK_C。fwd/bwd 区分:bwd persistent 多半,需更小 tile。"""
+    """Pick BLOCK_C based on C. fwd/bwd differ: bwd has dense persistent
+    state requiring smaller tiles."""
     if kernel == "bwd":
-        # bwd 状态密集,即使 W1/W2/d_g_W1/d_g_W2 都移到 tile 内,
-        # 30+ 个 8KB adjoint 张量同时 live,SRAM 极紧 → BLOCK_C=16
+        # bwd: 30+ ~8KB adjoint tensors live simultaneously; SRAM is tight even
+        # with W1/W2/d_g_W1/d_g_W2 reloaded per tile -> BLOCK_C=16
         if C >= 16:
             return 16
         return C
-    # fwd 持久状态多 (W1/W2/acc 共 128KB),per-tile 简单,BLOCK_C=32 OK
+    # fwd persistent state ~128KB (W1/W2/acc), per-tile work simple, BLOCK_C=32
     if C >= 32:
         return 32
     if C >= 16:
@@ -446,7 +443,7 @@ def triton_inner_sgd_fwd(
         "K": K_f, "V": V_f, "lr": lr_f, "gamma": gamma_f, "W1": W1_f, "W2": W2_f,
         "h_pre": h_pre_save,
         "ln": ln_save,
-        # 与 _pytorch_inner_sgd_fwd 形状对齐:bwd 期待 (BHN, C, 1) 用于广播
+        # Match _pytorch_inner_sgd_fwd shape: bwd expects (BHN, C, 1) for broadcast.
         "sigma": sigma_save.unsqueeze(-1),
         "eps": eps,
     }
@@ -492,8 +489,8 @@ def triton_inner_sgd_bwd(
     dlr = torch.empty((BHN, C), device=device, dtype=torch.float32)
     dgamma = torch.empty((BHN, D), device=device, dtype=torch.float32)
 
-    # Triton kernel 内部 SRAM 装不下 W1 + d_g_W1 + d_g_W2 + acc_dW1 + acc_dW2
-    # → 把 dW1 / dW2 / dK_R20 三块 bmm 移到 Python 外算
+    # Triton kernel SRAM cannot hold W1 + d_g_W1 + d_g_W2 + acc_dW1 + acc_dW2
+    # all at once -- dW1 / dW2 / dK_R20 are computed via Python bmm post-kernel.
     adj_h_pre_save = torch.empty((BHN, C, DH), device=device, dtype=torch.float32)
     adj_raw_save = torch.empty((BHN, C, D), device=device, dtype=torch.float32)
     adj_g_h_save = torch.empty((BHN, C, DH), device=device, dtype=torch.float32)
@@ -512,10 +509,10 @@ def triton_inner_sgd_bwd(
         num_warps=4, num_stages=1,
     )
 
-    # ── Python bmm 收尾(已 fp32):
-    #   dW1 = K.T @ adj_h_pre                            (D, DH)
-    #   dW2 = adj_g_h.T @ g_raw + h.T @ adj_raw           (DH, D)
-    #   dK 还差 R20 部分:adj_h_pre @ W1.T  → 加到 dK
+    # Python bmm post-pass (already fp32):
+    #   dW1 = K.T @ adj_h_pre                                  (D, DH)
+    #   dW2 = adj_g_h.T @ g_raw + h.T @ adj_raw                (DH, D)
+    #   dK gets R20 portion: adj_h_pre @ W1.T -> add to dK.
     dW1 = torch.bmm(K.transpose(-2, -1), adj_h_pre_save)                                   # (BHN, D, DH)
     dW2 = (
         torch.bmm(adj_g_h_save.transpose(-2, -1), g_raw_save)
