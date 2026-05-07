@@ -1051,15 +1051,46 @@ class NeuralMemory(Module):
             split_sizes = [store_seq_len]
             update_after_final_store = False
 
-        # accumulate updates
+        # accumulate updates — Stage 1: 预分配 buffer + 切片 in-place 写入,数学等价于
+        # 原 `accum_updates(past, future) = cat((past[:, :-1], future), dim=1)`:
+        # 每 outer chunk 写到 `updates[name][:, ofs : ofs + n_i]`;下个 chunk 从
+        # `ofs + n_i - 1` 开始(覆盖前 chunk 最后一项),整体 == 原 cat 结果。
+        #
+        # 收益:每 step 节省 ~K-1 次 cat allocation + memcopy(K = num_outer chunks),
+        # 复杂度从 O(N²) memcopy 降到 O(N);shape 静态,为 Stage 3 CUDA Graph 铺路。
+        #
+        # n_i(每 outer chunk 的 next_updates.shape[1]):
+        #   - 正常路径(num_chunks = s // store_chunk_size > 0):assoc_scan 在
+        #     line 846 用 `remove_prev=False`,output 拼上 prev 在最前 →
+        #     长度 = num_chunks + 1
+        #   - special 路径(num_chunks == 0,即 s < store_chunk_size):
+        #     line 788 直接 `rearrange_dict_values(weights, 'bh ... -> bh 1 ...')` →
+        #     长度 = 1
+        # total_n = sum(n_i) - max(K - 1, 0)(K = num_outer chunks)
 
-        updates = None
+        chunk_size_inner = self.store_chunk_size
+        n_per_outer = []
+        for _s in split_sizes:
+            _nc = _s // chunk_size_inner
+            n_per_outer.append(_nc + 1 if _nc > 0 else 1)
+        num_outer_chunks = len(split_sizes)
+        total_n = sum(n_per_outer) - max(num_outer_chunks - 1, 0)
 
-        def accum_updates(past_updates, future_updates):
-            if not exists(past_updates):
-                return future_updates
+        # 需要 init weights 推导 buffer shape (B*H, total_n, *param_shape)。
+        # caller 可能传 weights=None(initial state),此处 lazy 初始化;后续传给
+        # store_memories 避免内部重复 init_weights。
+        if not exists(weights):
+            if self.qkv_receives_diff_views:
+                _batch_for_init = store_seq.shape[1]
+            else:
+                _batch_for_init = store_seq.shape[0]
+            weights = self.init_weights(_batch_for_init)
 
-            return TensorDict({param_name: cat((past_update[:, :-1], future_update), dim = 1) for (param_name, past_update), (_, future_update) in zip(past_updates.items(), future_updates.items())})
+        _init_weights_td = weights if isinstance(weights, TensorDict) else TensorDict(weights)
+        updates = TensorDict({
+            name: w.new_zeros(w.shape[0], total_n, *w.shape[1:])
+            for name, w in _init_weights_td.items()
+        })
 
         # loop through chunks of store sequences
 
@@ -1077,6 +1108,8 @@ class NeuralMemory(Module):
 
         if exists(self.transition_gate):
             gate = self.transition_gate.sigmoid()
+
+        write_offset = 0  # 累计 buffer 写入位置;每 chunk 后 += n_i - 1(非末端)/+= n_i(末端)
 
         for ind, (store_seq_chunk, maybe_store_mask) in enumerate(zip(store_seqs, store_masks)):
             is_last = ind == (len(store_seqs) - 1)
@@ -1097,7 +1130,17 @@ class NeuralMemory(Module):
             seq_index = next_neural_mem_state.seq_index
             past_state = next_neural_mem_state.states
 
-            updates = accum_updates(updates, next_updates)
+            # 写入 updates buffer。next_updates 实际 n_chunk 由 store_memories 决定
+            # (num_chunks>0 时 == num_chunks;num_chunks==0 走 special path 返回 1)。
+            n_chunk = next(iter(next_updates.values())).shape[1]
+            for name, t in next_updates.items():
+                updates[name][:, write_offset : write_offset + n_chunk] = t
+
+            # 下个 chunk overlap 覆盖最后一项(等价 past[:, :-1]);末端 chunk 不 overlap
+            if is_last:
+                write_offset = write_offset + n_chunk
+            else:
+                write_offset = write_offset + n_chunk - 1
 
             surprises = tuple(safe_cat(args, dim = -1) for args in zip(surprises, chunk_surprises))
 
