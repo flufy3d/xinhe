@@ -87,12 +87,17 @@ def validate_stage_config(stage_name: str, stage_cfg: dict[str, Any]) -> dict[st
                 f"Hint: tbptt window cannot exceed episode length; remove tbptt_turns to default to max_turns_per_episode."
             )
         elif tbptt_turns < max_turns:
-            warns.append(
-                f"tbptt_turns={tbptt_turns} < max_turns_per_episode={max_turns}. "
-                f"Will introduce detach boundary at turn {tbptt_turns} — "
-                f"long-range Beat 1↔Beat 4 gradients will be cut. "
-                f"Hint: set tbptt_turns={max_turns} or remove field for no-truncation default."
-            )
+            # v9 Titans 架构下 tbptt < max_turns 是常规配置,不报警:
+            # - Hippo fast weights 是 per-token inner SGD,不依赖跨 turn 的 BPTT
+            # - gate_q / alpha_logit 是 per-turn 局部决策,本就不需要长程梯度
+            # - state.detach() 只切梯度不切数值,推理时跨 turn recall 不受影响
+            # 只在配反了或扣得过狠时才提示
+            if tbptt_turns < 2:
+                warns.append(
+                    f"tbptt_turns={tbptt_turns} < 2. "
+                    f"Hint: TBPTT window of 1 forfeits even the local 2-turn write→read gradient signal. "
+                    f"建议 tbptt_turns ≥ 2(memory write→read 至少能见到一对相邻 turn)。"
+                )
 
     # ── skeleton: turn_count_hi（可选 yaml 字段，future-proof）──
     if kind == "skeleton" and max_turns is not None:

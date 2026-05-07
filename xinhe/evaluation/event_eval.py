@@ -60,7 +60,9 @@ def _forward_episode(
         )
         ids_dev = ids.unsqueeze(0).to(device)
         labels_dev = labels.unsqueeze(0).to(device)
-        out = model(ids_dev, state, labels=labels_dev, pad_token_id=tokenizer.pad_token_id)
+        # 与训练一致用 bf16 autocast,避免 weight bf16 vs input fp32 mat1/mat2 dtype 错
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+            out = model(ids_dev, state, labels=labels_dev, pad_token_id=tokenizer.pad_token_id)
         state = out["state_next"]
         logits = out["logits"][0]
         shift_logits = logits[:-1]
@@ -199,6 +201,9 @@ def eval_event_jsonl(
                     model, tokenizer, ep, device=device, seg_len=seg_len,
                 )
             except Exception as e:
+                # 第一条就 raise,避免静默全 skip 隐藏 bug;后续 skip 单 ep
+                if n_eps == 0:
+                    raise
                 continue
 
             n_eps += 1

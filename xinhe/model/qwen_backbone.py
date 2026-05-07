@@ -42,21 +42,27 @@ class QwenBackbone(nn.Module, BackboneBase):
             for param in self.model.parameters():
                 param.requires_grad = False
 
-        # 局部 torch.compile:只编每个 transformer block(attn+FFN body)。
-        # NeuralMemoryPair 的 hook 在 forward_blocks 里调,不进 compile 边界 →
-        # 不会触发 Dynamo ↔ vmap+grad 的 saved_tensors_hooks 冲突。
-        # 多卡 device_map="auto" 时跳过(compile + 跨设备 layer 不稳定)。
+        # 局部 torch.compile:只编 full_attention 层(我们挂 NeuralMemoryPair 的层)。
+        # 跳过 linear_attention 层 — 它们用 fla.modules.FusedRMSNormGated(Triton),
+        # 让 Dynamo 在 backward 时遭遇 fla.utils.get_multiprocessor_count(@functools.cache)
+        # 和 triton 的 cuda_utils.get_device_properties(C 扩展)→ Dynamo warn_once 噪音。
+        # 让 linear_attention 走 eager 反而能享受 FLA Triton 内核的原生加速。
+        # NeuralMemoryPair 的 hook 也不进 compile 边界 → 不触发 Dynamo ↔ vmap+grad 的
+        # saved_tensors_hooks 冲突。多卡 device_map="auto" 时跳过(compile 跨设备不稳)。
         if (getattr(config, "compile_backbone_layers", False)
                 and torch.cuda.device_count() <= 1):
             try:
                 compiled_count = 0
                 for i, layer in enumerate(self.model.model.layers):
+                    if getattr(layer, "layer_type", None) != "full_attention":
+                        continue
                     self.model.model.layers[i] = torch.compile(
                         layer, mode="default", fullgraph=False, dynamic=False,
                     )
                     compiled_count += 1
-                print(f"[torch.compile] 已编译 {compiled_count} 个 backbone block "
-                      f"(NeuralMemoryPair 不在 compile 边界内)")
+                total_layers = len(self.model.model.layers)
+                print(f"[torch.compile] 已编译 {compiled_count}/{total_layers} 个 full_attention "
+                      f"层(linear_attention 走 eager 享受 FLA Triton 内核)")
             except Exception as e:
                 print(f"[torch.compile] 跳过(异常: {e})")
 

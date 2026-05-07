@@ -360,6 +360,15 @@ def main():
           f"chunk={config.mem_chunk_size} phase={config.phase}")
     print(f"  Hippo: depth={config.hippo_mlp_depth} retention={config.hippo_retention} lr={config.hippo_base_lr} (TTT inner SGD)")
     print(f"  Neo:   depth={config.neo_mlp_depth} expansion={config.neo_mlp_expansion} (普通 MLP + 标准 backprop)")
+    n_pmem = getattr(config, "n_persistent_mem", 0)
+    n_mem = getattr(config, "n_mem_tokens", 0)
+    if n_pmem > 0 or n_mem > 0:
+        bits = []
+        if n_pmem > 0:
+            bits.append(f"persistent_mem={n_pmem}")
+        if n_mem > 0:
+            bits.append(f"mem_tokens/turn={n_mem} (跨 turn hidden 累积)")
+        print(f"  MAC: " + " | ".join(bits))
 
     if curriculum:
         print(f"课程学习: {len(curriculum)} 个阶段")

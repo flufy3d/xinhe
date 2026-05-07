@@ -18,7 +18,7 @@ training_defaults:
   learning_rate: 3.0e-4
   grad_clip: 1.0
   gradient_checkpointing: false       # vmap(grad) 跟 saved_tensors_hooks 冲突,必须关
-  log_every: 5
+  log_every: 10
   eval_every: 200
   save_every: 500
 

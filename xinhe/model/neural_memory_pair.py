@@ -106,20 +106,37 @@ class LayerMemState:
 
 
 class XinheMemoryState:
-    """模型级 state 容器,per-layer LayerMemState。替代 v8 的单 W 张量。"""
+    """模型级 state 容器,per-layer LayerMemState + 跨 turn mem token snapshots。
 
-    def __init__(self, layers: Optional[dict[int, LayerMemState]] = None):
+    mem_snapshots: list of (B, N_mem, hidden_size) tensors,turn 间累积 ——
+    模拟 MAC 的"跨 turn KV 持久化"(用 hidden-state passing 等效)。第 t turn 末
+    forward 取 fresh mem 位置 hidden state 追加进 snapshots,下 turn 在序列起头
+    重放,让 attention 看到所有历史 turn 的 mem 摘要。
+    """
+
+    def __init__(
+        self,
+        layers: Optional[dict[int, LayerMemState]] = None,
+        mem_snapshots: Optional[list] = None,
+    ):
         self.layers: dict[int, LayerMemState] = layers if layers is not None else {}
+        self.mem_snapshots: list = mem_snapshots if mem_snapshots is not None else []
 
     @classmethod
     def init(cls, layer_indices: list[int]) -> "XinheMemoryState":
-        return cls({l: LayerMemState(None, None) for l in layer_indices})
+        return cls({l: LayerMemState(None, None) for l in layer_indices}, [])
 
     def detach(self) -> "XinheMemoryState":
-        return XinheMemoryState({l: s.detach() for l, s in self.layers.items()})
+        return XinheMemoryState(
+            {l: s.detach() for l, s in self.layers.items()},
+            [s.detach() for s in self.mem_snapshots],
+        )
 
     def to(self, device) -> "XinheMemoryState":
-        return XinheMemoryState({l: s.to(device) for l, s in self.layers.items()})
+        return XinheMemoryState(
+            {l: s.to(device) for l, s in self.layers.items()},
+            [s.to(device) for s in self.mem_snapshots],
+        )
 
     def __getitem__(self, l: int) -> LayerMemState:
         return self.layers[l]
@@ -377,6 +394,7 @@ class NeuralMemoryPair(nn.Module):
             "alpha_eff": (alpha.detach() if torch.is_tensor(alpha) else torch.tensor(alpha)),
             "gate_mean_h": gate[..., 0].mean().detach(),
             "gate_mean_n": gate[..., 1].mean().detach(),
+            "mem_out": mem_out,   # MAC 模式下 caller 从这里取原 mem 输出去填 fresh_mem 位置
         }
 
         return x_out, LayerMemState(hippo=h_new, neo=None), aux

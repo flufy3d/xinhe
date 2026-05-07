@@ -87,6 +87,32 @@ class XinheModel(nn.Module):
 
         self.lm_head = self.backbone.get_lm_head()
 
+        # MAC: persistent_memory soft prompt(input-level prefix,跨所有层共享)
+        self.n_persistent_mem = int(getattr(config, "n_persistent_mem", 0))
+        if self.n_persistent_mem > 0:
+            self.persistent_mem = nn.Parameter(
+                torch.randn(self.n_persistent_mem, config.hidden_size)
+                * (config.hidden_size ** -0.5)
+            )
+        else:
+            self.register_parameter("persistent_mem", None)
+
+        # MAC: cross-turn mem tokens(hidden-state passing,跨 turn 累积)
+        # mem_token_init:每 turn 末插 N_mem 个 fresh 位置的初始 embedding
+        self.n_mem_tokens = int(getattr(config, "n_mem_tokens", 0))
+        if self.n_mem_tokens > 0:
+            self.mem_token_init = nn.Parameter(
+                torch.randn(self.n_mem_tokens, config.hidden_size)
+                * (config.hidden_size ** -0.5)
+            )
+            # MAC 注入强度的可学缩放:fresh_mem 位置 hidden += inject · NM mem_out
+            # 起步 sigmoid(-3) ≈ 0.047(~5% 注入,不冲;模型逐步学开度)
+            # 这不是 MAL 的 alpha(全位置加),只在 fresh_mem 一处,不破 MAC 架构
+            self.mac_inject_logit = nn.Parameter(torch.tensor(-3.0))
+        else:
+            self.register_parameter("mem_token_init", None)
+            self.register_parameter("mac_inject_logit", None)
+
         self._pad_token_id: Optional[int] = None
 
     def forward(
@@ -135,9 +161,44 @@ class XinheModel(nn.Module):
 
         content_emb = self.backbone.embed(input_ids)  # (B, T, hidden_size)
 
-        # Memory hook:每个 full-attn 层调 NeuralMemoryPair forward
+        # Pure MAC sequence 布局(从前到后):
+        #   [persistent_mem (N_p), past_snapshots (N_m × past_turns), fresh_mem (N_m), real (T)]
+        # 关键:fresh_mem 在 real 前面 → 因果 mask 让 real 能 attend 到 fresh_mem
+        # NeuralMemory 在每层只把 mem_out 写到 fresh_mem 位置,其他位置 hidden 不动
+        # → memory 信息唯一通过 attention(real → fresh_mem)进入 real 表示
+        # → 论文 MAC 设计,无 MAL 残差并存
+        N_p = self.n_persistent_mem if self.persistent_mem is not None else 0
+        N_m = self.n_mem_tokens if self.mem_token_init is not None else 0
+        past_snaps = list(state.mem_snapshots) if hasattr(state, "mem_snapshots") else []
+        past_turns = len(past_snaps)
+
+        prefix_parts = []
+        if N_p > 0:
+            pmem = self.persistent_mem.to(content_emb.dtype).unsqueeze(0).expand(B, -1, -1)
+            prefix_parts.append(pmem)
+        for snap in past_snaps:
+            # 上 turn 末层 fresh_mem hidden state(TBPTT 已 detach)
+            prefix_parts.append(snap.to(content_emb.dtype))
+        if N_m > 0:
+            fresh = self.mem_token_init.to(content_emb.dtype).unsqueeze(0).expand(B, -1, -1)
+            prefix_parts.append(fresh)
+
+        seq_parts = prefix_parts + [content_emb]
+        content_emb = torch.cat(seq_parts, dim=1) if len(seq_parts) > 1 else content_emb
+
+        # 关键索引(loss 切片 + 跨 turn snapshot 截取 + 每层 NM 写入定位用)
+        fresh_start = N_p + N_m * past_turns
+        fresh_end = fresh_start + N_m
+        real_start = fresh_end
+        real_end = real_start + T
+
+        # Memory hook(pure MAC):
+        #   1. NM forward:得 mem_out (full sequence,所有位置都有)
+        #   2. 只把 mem_out[fresh_start:fresh_end] 加到 hidden 同位置
+        #   3. real 位置不变 — 它们通过 attention 自己去 query fresh_mem
+        # 注意 NM 仍读全序列(包括 fresh_mem 自己的 init),所以 fresh_mem 位置的 mem_out
+        #   = "NM 对当前 query=mem_init 的回应",物理意义:memory 把检索结果写进笔记本
         hook_layer_set = self._hook_layer_set
-        # 用闭包 mut 收集 next_state + aux
         new_layers: dict[int, LayerMemState] = {}
         aux_loss_terms: list[torch.Tensor] = []
 
@@ -147,39 +208,73 @@ class XinheModel(nn.Module):
             pair: NeuralMemoryPair = self.memory[str(layer_idx)]
             old_state = state.get(layer_idx, LayerMemState(None, None))
             x_in = self._d_total_in(hidden_states)
-            x_out, new_state, aux = pair(x_in, layer_state=old_state,
-                                         mem_alpha_override=mem_alpha_override)
+            _x_out, new_state, aux = pair(x_in, layer_state=old_state,
+                                          mem_alpha_override=mem_alpha_override)
             new_layers[layer_idx] = new_state
             aux_loss_terms.append(aux["gate_entropy_reg_loss"])
-            return hidden_states + self._d_total_out(x_out - x_in)
+            if N_m == 0:
+                return hidden_states  # 没启 mem tokens → memory 通路无写入点(纯 baseline)
+            mem_proj = self._d_total_out(aux["mem_out"])  # (B, T_ext, hidden)
+            # 注入强度:override 走干净路径(learning_session phase 1 用 0.0),
+            # 否则 sigmoid(mac_inject_logit) 可学。起步 ~0.05 给模型 warmup 缓冲。
+            if mem_alpha_override is not None:
+                inject = torch.tensor(float(mem_alpha_override),
+                                      device=hidden_states.device,
+                                      dtype=hidden_states.dtype)
+            else:
+                inject = torch.sigmoid(self.mac_inject_logit).to(hidden_states.dtype)
+            delta = torch.zeros_like(hidden_states)
+            delta[:, fresh_start:fresh_end, :] = inject * mem_proj[:, fresh_start:fresh_end, :]
+            return hidden_states + delta
 
-        # 标准因果 mask
+        # 标准因果 mask(含 persistent + past_snapshots 前缀 + fresh_mem 后缀)
+        T_ext = content_emb.shape[1]
         causal = torch.triu(
-            torch.full((T, T), float("-inf"), device=device, dtype=content_emb.dtype),
+            torch.full((T_ext, T_ext), float("-inf"), device=device, dtype=content_emb.dtype),
             diagonal=1,
         )
         if pad_token_id is not None:
-            padding_mask = (input_ids != pad_token_id)
-            pad_col = torch.zeros(B, 1, T, device=device, dtype=content_emb.dtype)
+            padding_mask = (input_ids != pad_token_id)             # (B, T)
+            # 顺序: [persistent(N_p) | past_snaps(N_m × past_turns) | fresh_mem(N_m) | real(T)]
+            # 前三段(real 之前)永远 valid;real 段按 input_ids 判 pad
+            pre_valid = torch.ones(B, real_start, dtype=torch.bool, device=device)
+            padding_mask = torch.cat([pre_valid, padding_mask], dim=1)
+            pad_col = torch.zeros(B, 1, T_ext, device=device, dtype=content_emb.dtype)
             pad_col.masked_fill_(~padding_mask.unsqueeze(1), float("-inf"))
             mask = causal.unsqueeze(0).unsqueeze(0) + pad_col.unsqueeze(2)
         else:
             mask = causal.unsqueeze(0).unsqueeze(0)
 
-        position_ids = torch.arange(T, dtype=torch.long, device=device).unsqueeze(0)
+        position_ids = torch.arange(T_ext, dtype=torch.long, device=device).unsqueeze(0)
 
         content_output = self.backbone.forward_blocks(
             content_emb, attention_mask=mask, position_ids=position_ids,
             layer_hook=memory_hook,
         )
 
+        # 截 fresh_mem 段 hidden 作为下 turn 的 snapshot;FIFO 上限防长 episode 爆序列
+        max_snaps = int(getattr(self.config, "max_mem_snapshots", 8))
+        new_mem_snapshots = list(past_snaps)
+        if N_m > 0:
+            new_snap = content_output[:, fresh_start:fresh_end, :].contiguous()
+            new_mem_snapshots.append(new_snap)
+            # 上限 0:完全不 carry(ablation,只本 turn 用 fresh_mem)
+            # 上限 K>0:保留最近 K 个 turn 的 snapshot,丢最老
+            if max_snaps == 0:
+                new_mem_snapshots = []
+            elif len(new_mem_snapshots) > max_snaps:
+                new_mem_snapshots = new_mem_snapshots[-max_snaps:]
+
+        # 切回真实 token 段(loss 只在 T 上)
+        content_output = content_output[:, real_start:real_end, :]
+
         logits = self.lm_head(content_output)
 
-        # 聚合 state next
+        # 聚合 state next:per-layer NM state + 跨 turn mem_snapshots
         # 没经过 hook 的 layer_idx 沿用原 state(若有)
         merged: dict[int, LayerMemState] = dict(state.layers) if state.layers else {}
         merged.update(new_layers)
-        state_next = XinheMemoryState(merged)
+        state_next = XinheMemoryState(merged, new_mem_snapshots)
 
         aux_loss = (
             torch.stack(aux_loss_terms).sum()
@@ -307,11 +402,18 @@ class XinheModel(nn.Module):
         return generated, state_next
 
     def get_trainable_params(self) -> list[nn.Parameter]:
-        """收集所有可训练参数(memory + d_total 投影)"""
+        """收集所有可训练参数(memory + d_total 投影 + MAC 参数)"""
         params = [p for p in self.memory.parameters() if p.requires_grad]
         if not isinstance(self._d_total_in, nn.Identity):
             params += [p for p in self._d_total_in.parameters() if p.requires_grad]
             params += [p for p in self._d_total_out.parameters() if p.requires_grad]
+        if self.persistent_mem is not None and self.persistent_mem.requires_grad:
+            params.append(self.persistent_mem)
+        if self.mem_token_init is not None and self.mem_token_init.requires_grad:
+            params.append(self.mem_token_init)
+        if (getattr(self, "mac_inject_logit", None) is not None
+                and self.mac_inject_logit.requires_grad):
+            params.append(self.mac_inject_logit)
         return params
 
     def get_trainable_param_count(self) -> int:

@@ -93,17 +93,30 @@ def test_tbptt_turns_greater_than_max_turns():
 
 
 # ────────────────────────────────────────────────────────────
-# 规则 4: tbptt_turns < max_turns_per_episode 仅 warning
+# 规则 4: tbptt_turns < max_turns_per_episode 在 v9 Titans 架构下不再 warn
+#   (Hippo 是 per-token inner SGD,gate/alpha 是局部决策,长程 BPTT 本就不需要)
+#   只在 tbptt_turns < 2 时才提示
 # ────────────────────────────────────────────────────────────
 
-def test_tbptt_turns_less_than_max_turns_warns_no_raise(caplog):
+def test_tbptt_turns_less_than_max_turns_no_warn(caplog):
     cfg = _stage("skeleton", training={
         "max_turns_per_episode": 12, "turn_max_tokens": 256, "tbptt_turns": 6,
     })
     with caplog.at_level(logging.WARNING):
         validate_stage_config("s0", cfg)
+    # tbptt < max_turns 在 Titans 架构下是常规配置,不应该有 warn
     msgs = " ".join(r.message for r in caplog.records)
-    assert "detach boundary" in msgs
+    assert "tbptt" not in msgs.lower() or "tbptt_turns=6" not in msgs
+
+
+def test_tbptt_turns_less_than_2_warns(caplog):
+    cfg = _stage("skeleton", training={
+        "max_turns_per_episode": 12, "turn_max_tokens": 256, "tbptt_turns": 1,
+    })
+    with caplog.at_level(logging.WARNING):
+        validate_stage_config("s0", cfg)
+    msgs = " ".join(r.message for r in caplog.records)
+    assert "tbptt_turns=1" in msgs
     assert "Hint:" in msgs
 
 

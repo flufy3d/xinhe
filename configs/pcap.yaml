@@ -12,11 +12,17 @@
 #   python scripts/remote.py logs -f
 #
 # 显存调优(RTX 4090 24GB,0.8B + v9 NeuralMemoryPair):
-#   - batch_size=1 + grad_accum_steps=4 = effective batch 4,稳跑约 8-12 GB
-#   - 若有显存余量可在 stage_overrides 里 batch_size=2(检验后再调)
+#   - bs=1, accum=4, turns=4, tok=512 → ~13.8 GB(56% 利用率,余量太多)
+#   - bs=2, accum=2, turns=4, tok=512 → 估 ~22 GB(effective batch 不变,激活密度翻倍)
+#   - 还有余量再考虑 max_turns 4→6/8 拉长 state 跨 turn 序列
 base: qwen3.5-0.8b.yaml
 
 curriculum_file: curriculum_pcap.yaml
+
+state:
+  # Ablation: 关掉 cross-turn snapshots(只保 persistent_mem 全局 + fresh_mem 本 turn)
+  # 测试 cross-turn hidden carry 是不是真有贡献
+  max_mem_snapshots: 0
 
 training:
   grad_accum_steps: 4
@@ -25,10 +31,23 @@ training:
 
 stage_overrides:
   pcap_mini:
-    batch_size: 1
+    # Pure MAC 历程:
+    #   lr=3e-4 + inject=1.0          → step 5-90 loss 5→14 砸崩
+    #   lr=5e-5 + inject=1.0          → 不发散但学不动(50 步只降 0.08)
+    #   lr=1.5e-4 + inject=sigmoid(-3) → step 5-50 改善 4.3→3.7,但 lr 一到峰就反弹
+    #   lr=7e-5 + warmup=150          → 平缓过渡,看能否稳住
+    learning_rate: 7.0e-5
+    warmup_steps: 150
+    # 维持 bs=1 + accum=4,扩 max_turns 让 Hippo 跨 turn state 累积更长,顺便提显存利用率。
+    # max_turns=8 完整覆盖 longcite (7 ctx + 1 QA) / skeleton needle 序列
+    # tbptt_turns=2 把 BPTT 窗口从默认 4 减半 → 峰值 activation 减半,
+    # 否则 max_turns=8 + tbptt=4 直接 24/24.5 GB OOM(2026-05-07 实测)
+    # tbptt=2 在 Titans 架构下不损失能力(Hippo 是 per-token inner SGD,
+    # gate/alpha 是局部决策,长程梯度本就不需要)
+    # 显存实测:bs=1 + tbptt=2 + max_turns=8 → 9.1 GB,有 15 GB 余量
+    # 顺势 bs 拉到 2,effective batch = 8,梯度更稳
+    batch_size: 2
     grad_accum_steps: 4
-    # 24GB / 0.8B 第一次跑保守起步,跑通后再视余量上调:
-    #   turn=512 × max_turns=4 → 2048 tokens/episode,32 个 Hippo chunks
-    #   Neo 走标准 backprop 已不再是 OOM 主因,可以保留 base 默认(depth=4 exp=4.0)
     turn_max_tokens: 512
-    max_turns_per_episode: 4
+    max_turns_per_episode: 8
+    tbptt_turns: 2

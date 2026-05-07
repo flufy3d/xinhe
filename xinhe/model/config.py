@@ -21,6 +21,20 @@ class XinheConfig:
     # --- v9 NeuralMemoryPair ---
     n_heads: int = 16               # 头数
     head_dim: int = 64              # d_head(d_total = n_heads * head_dim)
+
+    # --- MAC: Memory As Context ---
+    # 蓝图 Layer1 Capability:per-layer KV prefix + 跨 turn mem tokens KV cache。
+    # 简化首版用 hidden-state passing 实现等效行为:
+    #   - persistent_mem:input-level soft prompt(跨 session 学的"全局便签")
+    #   - mem_tokens:turn 末尾插 N_mem 个,fresh_init 学习参数;forward 后截 hidden state
+    #     存到 episode state,下一 turn 拼到序列开头(在 persistent_mem 之后),让 attention
+    #     看到所有历史 turn 的 mem 摘要 → 等效"跨 turn KV 持久化"。
+    #     state.mem_snapshots: list[(B, N_mem, hidden_size)],turn 0 空,第 t turn 后含 t 个。
+    n_persistent_mem: int = 32      # 0 禁用;>0 prepend N 个跨 session 学习 token
+    n_mem_tokens: int = 16          # 0 禁用;>0 每 turn 末插 N_mem 个,跨 turn 累积 hidden
+    # mem_snapshots FIFO 上限。0 表示完全不跨 turn 累积(只本 turn fresh_mem,等价 MAC ablation),
+    # >0 保留最近 K 个 turn 的 snapshot,长 episode 不爆 sequence
+    max_mem_snapshots: int = 8
     hippo_mlp_depth: int = 2
     hippo_mlp_expansion: float = 2.0
     neo_mlp_depth: int = 4
@@ -156,6 +170,9 @@ class XinheConfig:
             "state": {
                 "n_heads": "n_heads",
                 "head_dim": "head_dim",
+                "n_persistent_mem": "n_persistent_mem",
+                "n_mem_tokens": "n_mem_tokens",
+                "max_mem_snapshots": "max_mem_snapshots",
                 "hippo_mlp_depth": "hippo_mlp_depth",
                 "hippo_mlp_expansion": "hippo_mlp_expansion",
                 "neo_mlp_depth": "neo_mlp_depth",

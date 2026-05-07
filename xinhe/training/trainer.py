@@ -207,7 +207,10 @@ class Trainer:
                     avg_loss = accumulated_loss / loss_turns
                     (avg_loss / self.config.grad_accum_steps).backward()
                     episode_total_loss += avg_loss.item()
-                    self._maybe_optimizer_step(avg_loss.item())
+                    # 传 running acc:混合数据时 grad_accum cycle 可能落在 mid-ep call,
+                    # EMA 必须得到真实 partial accuracy,否则会被 default 1.0 污染成假 100%
+                    running_acc = episode_correct / max(episode_total, 1)
+                    self._maybe_optimizer_step(avg_loss.item(), running_acc)
 
                 state = state.detach()
                 accumulated_loss = torch.tensor(0.0, device=self.device)
@@ -327,8 +330,12 @@ class Trainer:
             print(f"  [val breakdown] 跳过: {e}")
         self.model.train()
 
-    def _maybe_optimizer_step(self, last_loss: float, last_acc: float = 1.0):
-        """梯度累积: 累积够 grad_accum_steps 次后执行一次 optimizer step"""
+    def _maybe_optimizer_step(self, last_loss: float, last_acc: float):
+        """梯度累积: 累积够 grad_accum_steps 次后执行一次 optimizer step.
+
+        last_acc 必须显式传(running 或 episode-level),不给默认值 ——
+        默认值会在 mixed-source grad_accum cycle 落在 mid-ep call 时把 EMA 污染。
+        """
         self._accum_count += 1
         if self._accum_count < self.config.grad_accum_steps:
             return
@@ -354,12 +361,23 @@ class Trainer:
 
         if self.global_step % self.config.log_every == 0:
             lr = self.scheduler.get_last_lr()[0]
-            alphas = [torch.sigmoid(p.alpha_logit).item() for p in self.model.memory.values()]
-            alpha_mean = sum(alphas) / max(len(alphas), 1)
+            # pure MAC 通路效度指标:persistent_mem / mem_token_init norm + 注入开度
+            pmem_norm = (
+                self.model.persistent_mem.detach().float().norm().item()
+                if getattr(self.model, "persistent_mem", None) is not None else 0.0
+            )
+            mtok_norm = (
+                self.model.mem_token_init.detach().float().norm().item()
+                if getattr(self.model, "mem_token_init", None) is not None else 0.0
+            )
+            inject = (
+                torch.sigmoid(self.model.mac_inject_logit).item()
+                if getattr(self.model, "mac_inject_logit", None) is not None else 0.0
+            )
             print(
                 f"  [Step {self.global_step}] ema_loss={self._ema_loss:.4f} "
                 f"ema_acc={self._ema_acc:.2%} lr={lr:.2e} "
-                f"alpha={alpha_mean:.4f}"
+                f"inject={inject:.3f} pmem={pmem_norm:.3f} mtok={mtok_norm:.3f}"
             )
 
         if self.global_step % self.config.save_every == 0:
@@ -400,7 +418,7 @@ class Trainer:
         self.optimizer.zero_grad()
 
     def _save_checkpoint(self, path: Optional[str] = None):
-        """v9 ckpt: 单键 memory_pair_state(整个 ModuleDict 的 state_dict)。"""
+        """v9 ckpt: memory_pair_state + persistent_mem(若启用)。"""
         if path is None:
             path = f"checkpoints/xinhe_step_{self.global_step}.pt"
 
@@ -418,6 +436,12 @@ class Trainer:
             "curriculum_stage": self.current_stage_name,
             "version": "v9",
         }
+        if getattr(self.model, "persistent_mem", None) is not None:
+            checkpoint["persistent_mem"] = self.model.persistent_mem.detach().cpu()
+        if getattr(self.model, "mem_token_init", None) is not None:
+            checkpoint["mem_token_init"] = self.model.mem_token_init.detach().cpu()
+        if getattr(self.model, "mac_inject_logit", None) is not None:
+            checkpoint["mac_inject_logit"] = self.model.mac_inject_logit.detach().cpu()
 
         torch.save(checkpoint, path)
         print(f"  [Checkpoint] 保存到 {path}")
@@ -432,6 +456,28 @@ class Trainer:
                 "请从零重训。"
             )
         self.model.memory.load_state_dict(checkpoint["memory_pair_state"], strict=True)
+
+        # persistent_mem / mem_token_init 是 v9 + MAC 后引入,旧 ckpt 没有
+        # (可选加载,缺则保留随机 init)
+        if (getattr(self.model, "persistent_mem", None) is not None
+                and "persistent_mem" in checkpoint):
+            with torch.no_grad():
+                self.model.persistent_mem.copy_(checkpoint["persistent_mem"].to(
+                    self.model.persistent_mem.device
+                ))
+        if (getattr(self.model, "mem_token_init", None) is not None
+                and "mem_token_init" in checkpoint):
+            with torch.no_grad():
+                self.model.mem_token_init.copy_(checkpoint["mem_token_init"].to(
+                    self.model.mem_token_init.device
+                ))
+        if (getattr(self.model, "mac_inject_logit", None) is not None
+                and "mac_inject_logit" in checkpoint):
+            with torch.no_grad():
+                self.model.mac_inject_logit.copy_(checkpoint["mac_inject_logit"].to(
+                    self.model.mac_inject_logit.device
+                ))
+
         self.global_step = checkpoint["global_step"]
 
         if "optimizer_state" in checkpoint:
