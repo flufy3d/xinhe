@@ -44,18 +44,24 @@ README_BODY = """\
 # Xinhe Memory Training Dataset
 
 中文长上下文 + 多轮对话训练数据,用于 [Xinhe (心核)](https://github.com/flufy3d/xinhe)
-项目让小型 Transformer 在 fast-weights NeuralMemory 中习得长程记忆能力(P-cap 阶段)。
+项目让小型 Transformer 在 fast-weights NeuralMemory 中习得长程记忆能力
+(v9.5 paper-faithful Titans MAC + LoRA + per-layer K/V)。
 
-包含四个 config:
-- **skeleton**:11 种合成骨架对话(needle-in-haystack 写读 / 覆写 / 删除 / stale-read 对抗),用于 sanity probe
+包含五个 config:
+- **skeleton**:11 种合成骨架对话(needle-in-haystack 写读 / 覆写 / 删除 / stale-read 对抗),
+  v9.5 起 S1/S2/S5/S7/S9/S10/S11 切到 paragraph distract(从 congliu 短答 bank 拼成长段),
+  用于 sanity probe + 长 episode 压力
 - **dialog**:LLM(DeepSeek / OpenRouter)生成的 5-Beat 自然多轮对话,真实分布代理
 - **novel**:中文长篇小说按 ~350 字 raw chunking,每 episode = 8 个章内连续 chunk,
   用作长上下文 next-token 压力源(章节切分由 generator 通过多 pattern 自动识别)
 - **longcite**:基于 [zai-org/LongCite-45k](https://huggingface.co/datasets/zai-org/LongCite-45k)
   的长文档 QA(末轮 question + cited answer),前 7 turn 是文档 chunks,末 1 turn 是 QA 应用
+- **congliu**:基于 [Congliu/Chinese-DeepSeek-R1-Distill-data-110k](https://huggingface.co/datasets/Congliu/Chinese-DeepSeek-R1-Distill-data-110k)
+  的中文 R1 推理蒸馏单 turn QA,assistant 段含 `<think>{reasoning}</think>\\n\\n{answer}` 标准格式,
+  让模型暴露真实长 reasoning 分布
 
-P-cap 训练时通过 `mix_dynamic` 在内存按比例(40% novel / 30% longcite / 20% dialog / 10% skeleton)抽样,
-不预生成 mix 物理文件 — 训练入口直接读这四个 source config。
+P-cap 训练通过 `mix_dynamic` 在内存按比例(skeleton 30% / novel 25% / congliu 20% / longcite 15% / dialog 10%)抽样,
+不预生成 mix 物理文件 — 训练入口直接读这五个 source config。
 
 ## Schema
 
@@ -64,13 +70,13 @@ P-cap 训练时通过 `mix_dynamic` 在内存按比例(40% novel / 30% longcite 
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `sample_id` | str | 样本 hash 短 ID |
-| `stage` | str | 数据来源标签(`0`/`1`/`novel`) |
+| `stage` | str | 数据来源标签(`skeleton`/`dialog`/`novel`/`longcite`/`congliu`) |
 | `skeleton_id` | str \\| null | 骨架模板 ID(skeleton 专属) |
 | `meta` | object | 来源元数据(skeleton 的 n_turns / dialog 的 canonical_facts / novel 的 chapter_id 等) |
 | `conversations` | list | 对话轮次:`role` ∈ {user, assistant} + `content`;assistant 含 `train_loss` ∈ {true, lm_only, false} 决定是否计 loss |
 
 辅助字段(`value` / `value_span` / `value_tier` / `weight_per_span`)由 skeleton/dialog 的 parser 定位 VALUE token,
-用于训练时构造 token 级加权损失。novel config 不带 VALUE 标记(纯长上下文 next-token)。
+用于训练时构造 token 级加权损失。novel / longcite / congliu config 不带 VALUE 标记(纯长上下文 next-token)。
 
 ## 加载
 
@@ -81,7 +87,7 @@ ds = load_dataset("flufy3d/xinhe-dataset", "novel", split="train")
 print(ds[0]["conversations"][1]["content"][:100])
 ```
 
-config_name 直接用 kind 名(`skeleton` / `dialog` / `novel` / `longcite`)。每个 config 含 `train` / `validation`。
+config_name 直接用 kind 名(`skeleton` / `dialog` / `novel` / `longcite` / `congliu`)。每个 config 含 `train` / `validation`。
 
 ## 国内镜像
 

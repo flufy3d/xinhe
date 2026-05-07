@@ -40,9 +40,9 @@ stage_overrides:
     learning_rate: 7.0e-5
     warmup_steps: 200             # LoRA + per-layer K/V + Congliu 同时引入新分布,缓和点
     weight_decay: 0.1             # 0.01 → 0.1 paper 对齐;LoRA 翻倍可训参数后防过拟合
-    batch_size: 1                 # 长序列降 bs
-    grad_accum_steps: 8           # bs 减半补 effective batch
+    batch_size: 1                 # bs=2 实测 23/24GB 太紧 + util 14% 不提升 → 回退 bs=1
+    grad_accum_steps: 8           # 14GB 利用率低但安全,GPU util 低瓶颈在 IO/CPU 不在 batch
     turn_max_tokens: 768          # 512 → 768 给 Congliu paragraph 留余量
     max_turns_per_episode: 16     # 8 → 16 长 episode
-    tbptt_turns: 2
+    tbptt_turns: 4                # 2 → 4 减一半 backward 次数,GPU 连续 forward 时间 2×;显存涨 50%
     max_steps: 3000               # 1000 → 3000

@@ -107,11 +107,13 @@ def make_dataloaders(config, tokenizer, stage_data: dict | None = None):
 
     train_loader = DataLoader(
         train_dataset, batch_size=config.batch_size,
-        shuffle=True, collate_fn=collate_episodes, num_workers=0,
+        shuffle=True, collate_fn=collate_episodes,
+        num_workers=2, pin_memory=True, persistent_workers=True,
     )
     val_loader = DataLoader(
         val_dataset, batch_size=config.batch_size,
-        shuffle=False, collate_fn=collate_episodes, num_workers=0,
+        shuffle=False, collate_fn=collate_episodes,
+        num_workers=2, pin_memory=True, persistent_workers=True,
     ) if val_dataset else None
 
     return train_loader, val_loader, len(train_dataset), len(val_dataset) if val_dataset else 0
