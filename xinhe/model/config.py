@@ -1,8 +1,14 @@
 """
-XinheConfig — 心核配置 (v9)
+XinheConfig — 心核配置 (v9.5)
 
-v9: 双 NeuralMemory(Hippocampus 浅 MLP + Neocortex 深 MLP),挂在每个 full-attn 层。
-v8 的 read_scale / beta_proj / Delta-Rule W 已废弃;LoRA 已抛弃,backbone 全冻。
+v9.5: 双 NeuralMemory(Hippocampus 浅 MLP + Neocortex 深 MLP),挂在每个 full-attn 层。
+paper-faithful 重构:
+  - input-level persistent_mem(soft prompt)→ 删,改 per-layer K/V(在 attention 内拼接)
+  - past_snapshots(跨 turn hidden carry)→ 删,跨 turn 走 NM weights 演化(paper way)
+  - fresh_mem(NM 输出承载)→ 保留,paper 简化版
+  - mac_inject_logit → 软取消(init +10 ≈ paper sigmoid≈1.0)
+  - LoRA on q/k/v/o → 恢复(frozen backbone 适配 OOD 的根因修复)
+v8 的 read_scale / beta_proj / Delta-Rule W 已废弃。
 """
 from dataclasses import dataclass, field
 from typing import Optional
@@ -22,20 +28,27 @@ class XinheConfig:
     n_heads: int = 16               # 头数
     head_dim: int = 64              # d_head(d_total = n_heads * head_dim)
 
-    # --- MAC: Memory As Context ---
-    # 蓝图 Layer1 Capability:per-layer KV prefix + 跨 turn mem tokens KV cache。
-    # 简化首版用 hidden-state passing 实现等效行为:
-    #   - persistent_mem:input-level soft prompt(跨 session 学的"全局便签")
-    #   - mem_tokens:turn 末尾插 N_mem 个,fresh_init 学习参数;forward 后截 hidden state
-    #     存到 episode state,下一 turn 拼到序列开头(在 persistent_mem 之后),让 attention
-    #     看到所有历史 turn 的 mem 摘要 → 等效"跨 turn KV 持久化"。
-    #     state.mem_snapshots: list[(B, N_mem, hidden_size)],turn 0 空,第 t turn 后含 t 个。
-    n_persistent_mem: int = 16      # 0 禁用;>0 prepend N 个跨 session 学习 token
-    n_mem_tokens: int = 16          # 0 禁用;>0 每 turn 末插 N_mem 个,跨 turn 累积 hidden
-    mac_inject_logit_init: float = -3.0  # MAC fresh_mem 注入开度 init(sigmoid):-3≈0.05;-1≈0.27
-    # mem_snapshots FIFO 上限。0 表示完全不跨 turn 累积(只本 turn fresh_mem,等价 MAC ablation),
-    # >0 保留最近 K 个 turn 的 snapshot,长 episode 不爆 sequence
-    max_mem_snapshots: int = 8
+    # --- MAC: Memory As Context (v9.5 paper-faithful) ---
+    # paper Titans MAC:per-layer K/V persistent memory + NM 输出作为序列 context。
+    # v9.5 实现:
+    #   - per-layer K/V:每个 full_attention 层独立的 K_pers/V_pers,直接拼接到该层 attention
+    #     的 K/V cache(不经过 q/k/v 投影,paper Eq 11-13 形态)
+    #   - fresh_mem (n_mem_tokens):每 turn 末插 N_mem 个 hidden 位置承载 NM mem_out
+    #     (paper M_t(K) 是序列级,我们简化为固定 N_m 位置)
+    #   - 跨 turn carry:走 NM weights 演化(W 跨 turn 不重置),不再 prepend 过去 hidden
+    n_persistent_per_layer: int = 16  # 每个 full_attention 层独立的 K/V tokens 数
+    n_mem_tokens: int = 16            # 0 禁用;>0 每 turn 末插 N_mem 个,fresh_mem 承载 NM 输出
+    mac_inject_logit_init: float = 10.0  # +10 → sigmoid≈0.99996 ≈ paper 直接 +mem_out(软取消)
+
+    # --- LoRA(v9.5 恢复:frozen backbone 适配 MAC OOD 的根因修复)---
+    # 与 MAC 是 producer/consumer 协同(MAC 放 prefix,LoRA 学怎么读),不抢梯度。
+    # 0 禁用;>0 注入到 target_modules 指定的层
+    lora_rank: int = 0
+    lora_alpha: int = 32
+    lora_dropout: float = 0.0
+    lora_target_modules: list = field(
+        default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj"]
+    )
     hippo_mlp_depth: int = 2
     hippo_mlp_expansion: float = 2.0
     neo_mlp_depth: int = 4
@@ -171,9 +184,8 @@ class XinheConfig:
             "state": {
                 "n_heads": "n_heads",
                 "head_dim": "head_dim",
-                "n_persistent_mem": "n_persistent_mem",
+                "n_persistent_per_layer": "n_persistent_per_layer",
                 "n_mem_tokens": "n_mem_tokens",
-                "max_mem_snapshots": "max_mem_snapshots",
                 "hippo_mlp_depth": "hippo_mlp_depth",
                 "hippo_mlp_expansion": "hippo_mlp_expansion",
                 "neo_mlp_depth": "neo_mlp_depth",
@@ -227,6 +239,12 @@ class XinheConfig:
                 "use_wandb": "use_wandb",
                 "project": "wandb_project",
                 "run_name": "wandb_run_name",
+            },
+            "lora": {
+                "rank": "lora_rank",
+                "alpha": "lora_alpha",
+                "dropout": "lora_dropout",
+                "target_modules": "lora_target_modules",
             },
         }
 

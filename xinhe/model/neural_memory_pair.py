@@ -106,36 +106,30 @@ class LayerMemState:
 
 
 class XinheMemoryState:
-    """模型级 state 容器,per-layer LayerMemState + 跨 turn mem token snapshots。
+    """模型级 state 容器,per-layer LayerMemState 字典。
 
-    mem_snapshots: list of (B, N_mem, hidden_size) tensors,turn 间累积 ——
-    模拟 MAC 的"跨 turn KV 持久化"(用 hidden-state passing 等效)。第 t turn 末
-    forward 取 fresh mem 位置 hidden state 追加进 snapshots,下 turn 在序列起头
-    重放,让 attention 看到所有历史 turn 的 mem 摘要。
+    v9.5 paper-faithful:删除 mem_snapshots(跨 turn hidden carry,paper 没有,
+    跨 turn 通过 NM weights 演化承载,W 在 episode 内连续 update,turn 之间不重置)。
     """
 
     def __init__(
         self,
         layers: Optional[dict[int, LayerMemState]] = None,
-        mem_snapshots: Optional[list] = None,
     ):
         self.layers: dict[int, LayerMemState] = layers if layers is not None else {}
-        self.mem_snapshots: list = mem_snapshots if mem_snapshots is not None else []
 
     @classmethod
     def init(cls, layer_indices: list[int]) -> "XinheMemoryState":
-        return cls({l: LayerMemState(None, None) for l in layer_indices}, [])
+        return cls({l: LayerMemState(None, None) for l in layer_indices})
 
     def detach(self) -> "XinheMemoryState":
         return XinheMemoryState(
             {l: s.detach() for l, s in self.layers.items()},
-            [s.detach() for s in self.mem_snapshots],
         )
 
     def to(self, device) -> "XinheMemoryState":
         return XinheMemoryState(
             {l: s.to(device) for l, s in self.layers.items()},
-            [s.to(device) for s in self.mem_snapshots],
         )
 
     def __getitem__(self, l: int) -> LayerMemState:

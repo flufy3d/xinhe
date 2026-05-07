@@ -40,7 +40,8 @@ def run_stage(stage_cfg: dict, *,
               seed_offset: int = 0,
               workers: int | None = None,
               novel_path: str | None = None,
-              parquet_path: str | None = None) -> None:
+              parquet_path: str | None = None,
+              congliu_path: str | None = None) -> None:
     name = stage_cfg.get("name", "?")
     validate_stage_config(name, stage_cfg)
 
@@ -81,6 +82,13 @@ def run_stage(stage_cfg: dict, *,
                     "(配置文件不持久化路径)"
                 )
             gen_cfg["parquet_path"] = parquet_path
+        if kind == "congliu":
+            if not congliu_path:
+                raise ValueError(
+                    f"stage {name!r}: kind=congliu 需要从 CLI 传入 --congliu-path /path/to/congliu_raw "
+                    "(配置文件不持久化路径)"
+                )
+            gen_cfg["raw_path"] = congliu_path
 
         gen = GENERATORS[kind](**gen_cfg)
 
@@ -153,6 +161,8 @@ def main():
                         help="小说 txt 路径(仅 kind=novel 生效)。配置文件不持久化此路径。")
     parser.add_argument("--parquet-path", type=str, default=None,
                         help="parquet 路径(仅 kind=longcite 生效)。配置文件不持久化此路径。")
+    parser.add_argument("--congliu-path", type=str, default=None,
+                        help="Congliu raw 数据目录或文件(仅 kind=congliu 生效)。配置文件不持久化此路径。")
     args = parser.parse_args()
 
     from xinhe.model.config import XinheConfig
@@ -187,6 +197,7 @@ def main():
             workers=args.workers,
             novel_path=args.novel_path,
             parquet_path=args.parquet_path,
+            congliu_path=args.congliu_path,
         )
 
 

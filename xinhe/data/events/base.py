@@ -62,6 +62,10 @@ class EventContext:
     used_keys: list[Key] = field(default_factory=list)
     erased_keys: list[Key] = field(default_factory=list)
 
+    # v9.5 distract paragraph expansion(由 SkeletonRunner 在处理 DistractGroup slot 时设)
+    distract_expansion: str = "short"           # "short" | "paragraph"
+    distract_paragraph_token_target: int = 300
+
     # 内部 lazy bank 缓存
     _banks: dict[str, EntityBank] = field(default_factory=dict)
 

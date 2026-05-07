@@ -10,12 +10,14 @@ from xinhe.data.generators.skeleton.generator import SkeletonGenerator
 from xinhe.data.generators.dialog.generator import DialogGenerator
 from xinhe.data.generators.novel.generator import NovelGenerator
 from xinhe.data.generators.longcite.generator import LongCiteGenerator
+from xinhe.data.generators.congliu.generator import CongliuGenerator
 
 GENERATORS: dict[str, type[Generator]] = {
     "skeleton": SkeletonGenerator,
     "dialog": DialogGenerator,
     "novel": NovelGenerator,
     "longcite": LongCiteGenerator,
+    "congliu": CongliuGenerator,
 }
 
 __all__ = ["GENERATORS", "Generator", "GenerateRequest"]

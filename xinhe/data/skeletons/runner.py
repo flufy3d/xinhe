@@ -93,12 +93,20 @@ class SkeletonRunner:
                 if n_distract < 0:
                     n_distract = 0
 
+                # 透传 DistractGroup 的 expansion / paragraph_token_target 到 ctx,
+                # 让 e_distract 决定走 short 还是 paragraph 分支
+                ctx.distract_expansion = slot.expansion
+                ctx.distract_paragraph_token_target = slot.paragraph_token_target
+
                 E = get_event("E")
                 for k in range(n_distract):
                     pairs = E.run(rng, state, ctx, turn_idx=len(conversations) // 2)
                     for u, a in pairs:
                         conversations.append(u)
                         conversations.append(a)
+                # 还原 ctx,避免后续 DistractGroup 误用
+                ctx.distract_expansion = "short"
+                ctx.distract_paragraph_token_target = 300
                 # 记录桶位
                 if bucket_main is None:
                     bucket_main = bucket

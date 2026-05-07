@@ -441,6 +441,7 @@ class ConversationDataset(Dataset):
             mtime = data_path_p.stat().st_mtime
             key = _make_cache_key({
                 "kind": "single",
+                "schema_version": "v9.5",  # paragraph distract / per-layer K/V 数据 schema 标识
                 "tokenizer": getattr(tokenizer, "name_or_path", str(tokenizer)),
                 "turn_max": turn_max_tokens,
                 "max_turns": max_turns_per_episode,
@@ -614,6 +615,7 @@ class MixedConversationDataset(ConversationDataset):
                 })
             key = _make_cache_key({
                 "kind": "mix_dynamic",
+                "schema_version": "v9.5",  # paragraph distract / per-layer K/V 数据 schema 标识
                 "tokenizer": getattr(tokenizer, "name_or_path", str(tokenizer)),
                 "turn_max": turn_max_tokens,
                 "max_turns": max_turns_per_episode,

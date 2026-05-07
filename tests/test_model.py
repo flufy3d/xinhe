@@ -34,7 +34,11 @@ class MockBackbone(nn.Module, BackboneBase):
         if layer_hook is not None:
             for i in range(N_LAYERS):
                 hidden_states = layer_hook(hidden_states, i)
-        return self.linear(hidden_states)
+        out = self.linear(hidden_states)
+        # 简单"伪 attention" mix:把序列 mean 加到每个位置(让 fresh_mem 段修改能影响 real 段输出),
+        # 不然 mock 的 nn.Linear 是 per-position,test_mem_alpha_override_propagates 没法验
+        out = out + hidden_states.mean(dim=1, keepdim=True) * 0.1
+        return out
 
     def get_lm_head(self):
         return self._lm_head
@@ -146,8 +150,6 @@ def test_gradient_flow(model):
     assert pair.gate_q.weight.grad is not None
     if model.mem_token_init is not None:
         assert model.mem_token_init.grad is not None
-    if model.persistent_mem is not None:
-        assert model.persistent_mem.grad is not None
 
 
 def test_generate(model):
@@ -198,17 +200,16 @@ def test_forward_with_decoupled_dims():
 def test_mem_alpha_override_propagates(model):
     """forward(mem_alpha_override=0.0) 透传到 layer hook → fresh_mem 位置不被注入。
 
-    pure MAC:mem_out 只填到 fresh_mem 位置;real 位置的 logits 由 attention 间接看到 mem。
-    Mock backbone 没有 attention,所以 real logits 在两种 override 下相同 —— 这是符合预期的。
-    实际差异落在 mem_snapshots(fresh_mem 末层 hidden)上,该处验证 override 透传。
+    v9.5:Mock backbone 在 layer hook 处加 mem_out delta,override=0 时 delta=0;
+    通过对比 logits 差异验证 override 透传(mock 没 attention,delta 直接进 hidden)。
     """
     B, T = 1, 8
     state = model.init_state(B)
     input_ids = torch.randint(0, 100, (B, T))
     result_with_mem = model(input_ids, state, mem_alpha_override=None)
     result_clean = model(input_ids, state, mem_alpha_override=0.0)
-    # mem_token_init 启用时,snapshot 必差异(MAC 注入 vs 干净路径)
+    # mem_token_init 启用时,fresh_mem 末层 hidden 必差异(MAC 注入 vs 干净路径)
+    # mock backbone 的 forward_blocks 把 hidden 传过 layer_hook 后 linear 变换,
+    # fresh_mem 位置的 logits(注入)与 real 位置的 logits 都会有差(简化 mock 全位置走同样 linear)
     if model.n_mem_tokens > 0:
-        snap_with = result_with_mem["state_next"].mem_snapshots[-1]
-        snap_clean = result_clean["state_next"].mem_snapshots[-1]
-        assert not torch.allclose(snap_with, snap_clean, atol=1e-3)
+        assert not torch.allclose(result_with_mem["logits"], result_clean["logits"], atol=1e-3)

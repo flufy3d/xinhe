@@ -26,6 +26,15 @@ state:
   gate_entropy_lambda: 0.01
   phase: "P-cap"                  # P-cap | Operational
 
+# v9.5 LoRA(frozen backbone 适配 MAC OOD 输入的根因修复,与 NM/MAC 协同)
+# qkvo,rank=16/alpha=32,零初始化保证启动期 frozen backbone 行为不变。
+# stage 可在 stage_overrides 内 override。
+lora:
+  rank: 16
+  alpha: 32
+  dropout: 0.0
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+
 
 
 # turn_max_tokens / max_turns_per_episode / tbptt_turns 必须 per-stage 显式给

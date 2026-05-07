@@ -37,6 +37,47 @@ def test_skeleton_n_turns_within_bounds():
         assert 1 <= n_turns <= 12, f"n_turns={n_turns} out of bounds"
 
 
+def test_paragraph_distract_expansion_runs():
+    """v9.5:含 _DG_PARA 的 skeleton 跑通(paragraph 分支即使无 congliu 数据
+    也 fallback 到 distract_chat 多条拼接)。验证 paragraph 模式 distract turn
+    比 short 模式输出更长。"""
+    from xinhe.data.skeletons.spec import DistractGroup, Skeleton
+    from xinhe.data.skeletons.library import SKELETONS
+
+    # S1 = [A, _DG_PARA, B] 是 paragraph 模式
+    rng = random.Random(123)
+    runner = SkeletonRunner(dict_split="train", stage="0", max_turns=24)
+    sk_para = SKELETONS["S1"]
+
+    # 短模式对照
+    _DG_SHORT_TEST = DistractGroup(expansion="short", label="DG")
+    sk_short = Skeleton("S1_short", ["A", _DG_SHORT_TEST, "B"], weight=1.0)
+
+    para_lengths = []
+    for _ in range(8):
+        sample = runner.run(sk_para, rng)
+        for turn in sample.conversations:
+            if turn["role"] == "assistant" and turn.get("train_loss") == "lm_only":
+                para_lengths.append(len(turn["content"]))
+
+    rng_short = random.Random(123)
+    short_lengths = []
+    for _ in range(8):
+        sample = runner.run(sk_short, rng_short)
+        for turn in sample.conversations:
+            if turn["role"] == "assistant" and turn.get("train_loss") == "lm_only":
+                short_lengths.append(len(turn["content"]))
+
+    if not para_lengths or not short_lengths:
+        pytest.skip("没采到 distract turn")
+    para_avg = sum(para_lengths) / len(para_lengths)
+    short_avg = sum(short_lengths) / len(short_lengths)
+    # paragraph 模式至少比 short 模式长 1.5×(拼接 4-8 个短句应远超单句)
+    assert para_avg > short_avg * 1.3, (
+        f"paragraph distract 不显著长于 short:para_avg={para_avg:.0f} vs short_avg={short_avg:.0f}"
+    )
+
+
 def test_skeleton_S5_produces_stale_correction():
     """S5 = [A, D, {En}, K]：K 的 asst 应包含新值（覆盖后纠正）。"""
     rng = random.Random(42)

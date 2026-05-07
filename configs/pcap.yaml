@@ -20,14 +20,12 @@ base: qwen3.5-0.8b.yaml
 curriculum_file: curriculum_pcap.yaml
 
 state:
-  # Ablation: 关掉 cross-turn snapshots(只保 persistent_mem 全局 + fresh_mem 本 turn)
-  # 测试 cross-turn hidden carry 是不是真有贡献
-  max_mem_snapshots: 0
-  # N_p 32 → 16:短数据下 prefix 占比畸形,且 N_p 通路梯度本来就 ~0;减半释放 attention 计算预算给 real
-  n_persistent_mem: 16
-  # MAC 注入开度 init:-3 (sigmoid≈0.05) → -1 (sigmoid≈0.27),给更强初始信号
-  # 失败信号:step 5-30 loss > 6 持续上扬 → 回退 -2.0 或 -3.0
-  mac_inject_logit_init: -1.0
+  # v9.5 paper-faithful:
+  #   - persistent memory 改 per-layer K/V(每个 full_attention 层独立,在 attention 内拼接)
+  #   - past_snapshots 删除(跨 turn carry 走 NM weights 演化,paper way)
+  #   - mac_inject_logit init +10 ≈ sigmoid 0.99996 ≈ paper 直接 += mem_out(软取消)
+  n_persistent_per_layer: 16        # 每个 full_attention 层独立 K/V tokens 数
+  mac_inject_logit_init: 10.0       # paper 软取消;模型自行决定末态(≈10 印证 paper,< 7 说明仍需 gating)
 
 training:
   grad_accum_steps: 4
@@ -36,23 +34,15 @@ training:
 
 stage_overrides:
   pcap_mini:
-    # Pure MAC 历程:
-    #   lr=3e-4 + inject=1.0          → step 5-90 loss 5→14 砸崩
-    #   lr=5e-5 + inject=1.0          → 不发散但学不动(50 步只降 0.08)
-    #   lr=1.5e-4 + inject=sigmoid(-3) → step 5-50 改善 4.3→3.7,但 lr 一到峰就反弹
-    #   lr=7e-5 + warmup=150          → 平缓过渡,看能否稳住
+    # v9.5 训练计划:LoRA(qkvo) + per-layer K/V + Congliu data + paper 对齐 weight_decay 0.1
+    # 步数 1000 → 3000(补回 v8 量级训练量)
+    # 长 episode max_turns 8 → 16 + turn_max_tokens 512 → 768 让 MAC 通路真有用武之地
     learning_rate: 7.0e-5
-    warmup_steps: 150
-    # 维持 bs=1 + accum=4,扩 max_turns 让 Hippo 跨 turn state 累积更长,顺便提显存利用率。
-    # max_turns=8 完整覆盖 longcite (7 ctx + 1 QA) / skeleton needle 序列
-    # tbptt_turns=2 把 BPTT 窗口从默认 4 减半 → 峰值 activation 减半,
-    # 否则 max_turns=8 + tbptt=4 直接 24/24.5 GB OOM(2026-05-07 实测)
-    # tbptt=2 在 Titans 架构下不损失能力(Hippo 是 per-token inner SGD,
-    # gate/alpha 是局部决策,长程梯度本就不需要)
-    # 显存实测:bs=1 + tbptt=2 + max_turns=8 → 9.1 GB,有 15 GB 余量
-    # 顺势 bs 拉到 2,effective batch = 8,梯度更稳
-    batch_size: 2
-    grad_accum_steps: 4
-    turn_max_tokens: 512
-    max_turns_per_episode: 8
+    warmup_steps: 200             # LoRA + per-layer K/V + Congliu 同时引入新分布,缓和点
+    weight_decay: 0.1             # 0.01 → 0.1 paper 对齐;LoRA 翻倍可训参数后防过拟合
+    batch_size: 1                 # 长序列降 bs
+    grad_accum_steps: 8           # bs 减半补 effective batch
+    turn_max_tokens: 768          # 512 → 768 给 Congliu paragraph 留余量
+    max_turns_per_episode: 16     # 8 → 16 长 episode
     tbptt_turns: 2
+    max_steps: 3000               # 1000 → 3000

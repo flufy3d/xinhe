@@ -1,0 +1,16 @@
+# Skeleton 数据生成入口(v9.5 paragraph DistractGroup)
+#
+# v9.5:含 {En} 的 skeleton(S1/S2/S5/S7/S9/S10/S11) 切到 _DG_PARA,
+# distract 段从 congliu_distract bank 拼 1-3 条 R1 short answer 拼成长 paragraph
+# (paragraph_token_target=300,实测平均 600+ 字)。
+# S3/S4/S8 无 distract,paragraph 改动不影响。
+#
+# 用法:
+#   python scripts/generate_data.py --config configs/skeleton.yaml --stage skeleton_only
+base: qwen3.5-0.8b.yaml
+
+curriculum_file: curriculum_skeleton.yaml
+
+training:
+  grad_accum_steps: 1
+  dtype: bfloat16

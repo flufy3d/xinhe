@@ -1,0 +1,16 @@
+# Congliu/Chinese-DeepSeek-R1-Distill-data-110k 数据生成入口
+#
+# 前置:用 scripts/download_congliu.py(已用过即可删)或直接 hf_hub_download 拉
+#       Congliu/Chinese-DeepSeek-R1-Distill-data-110k 到 data/congliu_raw/
+#
+# 用法:
+#   python scripts/generate_data.py --config configs/congliu.yaml \
+#     --stage congliu_only \
+#     --congliu-path data/congliu_raw/distill_r1_110k.jsonl
+base: qwen3.5-0.8b.yaml
+
+curriculum_file: curriculum_congliu.yaml
+
+training:
+  grad_accum_steps: 1
+  dtype: bfloat16

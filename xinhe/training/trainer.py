@@ -1,10 +1,12 @@
 """
-Trainer (v9) — 训练循环
+Trainer (v9.5) — 训练循环
 
 核心特性:
-- state 跨 turn 传递,state 是 XinheMemoryState(per-layer LayerMemState 字典)
+- state 跨 turn 传递,state 是 XinheMemoryState(per-layer LayerMemState 字典,
+  paper-faithful 删除 mem_snapshots,跨 turn carry 走 NM weights 演化)
 - 截断 BPTT: 每 tbptt_turns 轮做 detach + backward + step
-- 只训练 NeuralMemoryPair 参数(backbone 全冻,无 LoRA)
+- 训练参数:NeuralMemoryPair + fresh_mem + mac_inject_logit + LoRA(qkvo)
+  + per-layer K/V(K_pers/V_pers,在每个 full_attention 层独立)
 """
 import math
 from pathlib import Path
@@ -331,11 +333,11 @@ class Trainer:
         self.model.train()
 
     def _capture_mac_grads(self) -> dict:
-        """诊断:捕获 MAC 三组 + Hippo to_decay_factor 的梯度 norm。
+        """诊断:捕获 MAC + LoRA + per-layer K/V + Hippo to_decay_factor 的梯度 norm。
         在 optimizer.step() 前调用(grad 已 clip)。grad 为 None 表示该参数本步无梯度。
         """
         out = {}
-        for name in ("persistent_mem", "mem_token_init", "mac_inject_logit"):
+        for name in ("mem_token_init", "mac_inject_logit"):
             p = getattr(self.model, name, None)
             out[name] = (
                 p.grad.detach().float().norm().item()
@@ -350,6 +352,18 @@ class Trainer:
         out["to_decay_factor"] = (
             sum(decay_norms) / len(decay_norms) if decay_norms else None
         )
+        # LoRA grad norm 聚合(所有 lora_A.grad 的均值,验证 LoRA 在学)
+        lora_norms = []
+        kpers_norms = []
+        for n, p in self.model.backbone.named_parameters():
+            if p.grad is None:
+                continue
+            if "lora_A" in n or "lora_B" in n:
+                lora_norms.append(p.grad.detach().float().norm().item())
+            elif "K_pers" in n or "V_pers" in n:
+                kpers_norms.append(p.grad.detach().float().norm().item())
+        out["lora"] = sum(lora_norms) / len(lora_norms) if lora_norms else None
+        out["K_pers"] = sum(kpers_norms) / len(kpers_norms) if kpers_norms else None
         return out
 
     def _maybe_optimizer_step(self, last_loss: float, last_acc: float):
@@ -385,11 +399,7 @@ class Trainer:
 
         if self.global_step % self.config.log_every == 0:
             lr = self.scheduler.get_last_lr()[0]
-            # pure MAC 通路效度指标:persistent_mem / mem_token_init norm + 注入开度
-            pmem_norm = (
-                self.model.persistent_mem.detach().float().norm().item()
-                if getattr(self.model, "persistent_mem", None) is not None else 0.0
-            )
+            # v9.5 通路效度指标:fresh_mem norm + inject 开度 + LoRA/K_pers 是否在学
             mtok_norm = (
                 self.model.mem_token_init.detach().float().norm().item()
                 if getattr(self.model, "mem_token_init", None) is not None else 0.0
@@ -398,7 +408,6 @@ class Trainer:
                 torch.sigmoid(self.model.mac_inject_logit).item()
                 if getattr(self.model, "mac_inject_logit", None) is not None else 0.0
             )
-            # 诊断:MAC + decay 梯度 norm + mem_out norm(NM 输出强度)
             grads = getattr(self, "_last_mac_grads", None) or {}
             def _fg(k): return grads.get(k)
             def _fmt(v): return f"{v:.1e}" if isinstance(v, float) else "—"
@@ -413,11 +422,12 @@ class Trainer:
             print(
                 f"  [Step {self.global_step}] ema_loss={self._ema_loss:.4f} "
                 f"ema_acc={self._ema_acc:.2%} lr={lr:.2e} "
-                f"inject={inject:.3f} pmem={pmem_norm:.3f} mtok={mtok_norm:.3f} "
+                f"inject={inject:.3f} mtok={mtok_norm:.3f} "
                 f"|g_inj|={_fmt(_fg('mac_inject_logit'))} "
-                f"|g_pm|={_fmt(_fg('persistent_mem'))} "
                 f"|g_mt|={_fmt(_fg('mem_token_init'))} "
                 f"|g_dec|={_fmt(_fg('to_decay_factor'))} "
+                f"|g_lora|={_fmt(_fg('lora'))} "
+                f"|g_kp|={_fmt(_fg('K_pers'))} "
                 f"mem_norm={mem_norm_avg:.3f}"
             )
 
@@ -459,7 +469,7 @@ class Trainer:
         self.optimizer.zero_grad()
 
     def _save_checkpoint(self, path: Optional[str] = None):
-        """v9 ckpt: memory_pair_state + persistent_mem(若启用)。"""
+        """v9.5 ckpt: memory_pair_state + fresh_mem 参数 + backbone addons(LoRA + per-layer K/V)。"""
         if path is None:
             path = f"checkpoints/xinhe_step_{self.global_step}.pt"
 
@@ -475,37 +485,44 @@ class Trainer:
             "scheduler_state": self.scheduler.state_dict(),
             "config": self.config,
             "curriculum_stage": self.current_stage_name,
-            "version": "v9",
+            "version": "v9.5",
         }
-        if getattr(self.model, "persistent_mem", None) is not None:
-            checkpoint["persistent_mem"] = self.model.persistent_mem.detach().cpu()
         if getattr(self.model, "mem_token_init", None) is not None:
             checkpoint["mem_token_init"] = self.model.mem_token_init.detach().cpu()
         if getattr(self.model, "mac_inject_logit", None) is not None:
             checkpoint["mac_inject_logit"] = self.model.mac_inject_logit.detach().cpu()
+        # backbone addons(LoRA lora_A/B + per-layer K/V K_pers/V_pers):
+        # 只取 trainable 的子张量(原 backbone weight frozen 不存)
+        backbone_addons = {
+            k: v.detach().cpu() for k, v in self.model.backbone.state_dict().items()
+            if ("lora_A" in k or "lora_B" in k
+                or "K_pers" in k or "V_pers" in k)
+        }
+        if backbone_addons:
+            checkpoint["backbone_addons_state"] = backbone_addons
 
         torch.save(checkpoint, path)
-        print(f"  [Checkpoint] 保存到 {path}")
+        print(f"  [Checkpoint] 保存到 {path} "
+              f"(addons {len(backbone_addons)} 张量)")
 
     def load_checkpoint(self, path: str):
-        """加载 checkpoint(v9 strict=True,不兼容 v8 hippocampus_state)。"""
+        """加载 checkpoint(v9.5)。
+
+        兼容:
+          - v9.5 ckpt:完整加载 memory_pair_state / fresh_mem / backbone_addons(LoRA + per-layer K/V)
+          - v9 ckpt(无 backbone_addons):memory_pair_state 加载,LoRA / per-layer K/V 从零起步
+          - 不兼容 v8 hippocampus_state(架构不同)
+        """
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
 
         if "memory_pair_state" not in checkpoint:
             raise RuntimeError(
-                "checkpoint 缺少 'memory_pair_state' 键。v9 不兼容 v8 hippocampus_state,"
+                "checkpoint 缺少 'memory_pair_state' 键。v9.5 不兼容 v8 hippocampus_state,"
                 "请从零重训。"
             )
         self.model.memory.load_state_dict(checkpoint["memory_pair_state"], strict=True)
 
-        # persistent_mem / mem_token_init 是 v9 + MAC 后引入,旧 ckpt 没有
-        # (可选加载,缺则保留随机 init)
-        if (getattr(self.model, "persistent_mem", None) is not None
-                and "persistent_mem" in checkpoint):
-            with torch.no_grad():
-                self.model.persistent_mem.copy_(checkpoint["persistent_mem"].to(
-                    self.model.persistent_mem.device
-                ))
+        # mem_token_init / mac_inject_logit 是 v9 + MAC 引入,旧 ckpt 可能有可能无
         if (getattr(self.model, "mem_token_init", None) is not None
                 and "mem_token_init" in checkpoint):
             with torch.no_grad():
@@ -518,6 +535,15 @@ class Trainer:
                 self.model.mac_inject_logit.copy_(checkpoint["mac_inject_logit"].to(
                     self.model.mac_inject_logit.device
                 ))
+
+        # backbone addons(v9.5 引入:LoRA + per-layer K/V),strict=False 兼容旧 ckpt
+        if "backbone_addons_state" in checkpoint:
+            addons = {
+                k: v.to(self.device) for k, v in checkpoint["backbone_addons_state"].items()
+            }
+            missing, unexpected = self.model.backbone.load_state_dict(addons, strict=False)
+            print(f"[Checkpoint] LoRA/K_pers 加载 {len(addons)} 个张量 "
+                  f"(unexpected={len(unexpected)})")
 
         self.global_step = checkpoint["global_step"]
 

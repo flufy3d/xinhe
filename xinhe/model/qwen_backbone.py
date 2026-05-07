@@ -66,6 +66,29 @@ class QwenBackbone(nn.Module, BackboneBase):
             except Exception as e:
                 print(f"[torch.compile] 跳过(异常: {e})")
 
+    def wrap_persistent_kv(self, n_persistent_per_layer: int) -> int:
+        """v9.5:把每个 full_attention 层的 self_attn 包装为 XinheQwen3FullAttention,
+        加 per-layer K/V persistent memory(paper Titans MAC 严格形态)。
+
+        必须在 LoRA 注入(inject_lora)之后调用,这样 wrapper 复用的 q_proj/k_proj/v_proj/o_proj
+        是 LoRA 注入后的版本。
+
+        返回:被包装的 full_attention 层数。
+        """
+        if n_persistent_per_layer <= 0:
+            return 0
+        from .qwen_persistent_attn import XinheQwen3FullAttention
+        wrapped = 0
+        for layer in self.model.model.layers:
+            if getattr(layer, "layer_type", None) == "full_attention":
+                layer.self_attn = XinheQwen3FullAttention(
+                    layer.self_attn, n_persistent=n_persistent_per_layer,
+                )
+                wrapped += 1
+        print(f"[per-layer K/V] 包装 {wrapped} 个 full_attention 层 "
+              f"(N_p={n_persistent_per_layer})")
+        return wrapped
+
     def embed(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.model.embed_tokens(input_ids)
 

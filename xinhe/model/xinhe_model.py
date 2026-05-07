@@ -1,9 +1,15 @@
 """
-XinheModel (v9) — 顶层模型
+XinheModel (v9.5) — 顶层模型
 
 组合 backbone + 双 NeuralMemory(Hippocampus + Neocortex)per full-attn 层。
-v9 抛弃 LoRA(backbone 全冻),write/read 在每层 fused 进行(不再有末尾全局写)。
-state 是 XinheMemoryState(per-layer LayerMemState 字典)。
+v9.5 paper-faithful 重构:
+  - 删 input-level persistent_mem(soft prompt),改 per-layer K/V(每个 full_attention 层独立,
+    在 attention 内拼接,paper Titans MAC Eq 11-13 形态)
+  - 删 past_snapshots(跨 turn hidden carry,paper 没有这个,跨 turn 走 NM weights 演化)
+  - 保留 fresh_mem(NM 输出承载点,paper M_t(K) 的简化版固定 N_m 位置)
+  - mac_inject_logit 软取消(init +10 ≈ paper sigmoid≈1.0,直接 += mem_out)
+  - 恢复 LoRA on q/k/v/o:frozen backbone 适配 MAC 输入的根因修复(MAC=producer / LoRA=consumer)
+state 是 XinheMemoryState(per-layer LayerMemState 字典,无 mem_snapshots)。
 """
 import torch
 import torch.nn as nn
@@ -35,6 +41,30 @@ class XinheModel(nn.Module):
         else:
             from .qwen_backbone import QwenBackbone
             self.backbone = QwenBackbone(config)
+
+        # LoRA 注入(在 backbone freeze 后、per-layer K/V wrap 前):
+        # frozen q/k/v 投影看不懂 MAC 引入的 OOD prefix(per-layer K_pers / fresh_mem),
+        # LoRA 是低秩旁路,与 MAC 是 producer/consumer 协同(MAC 放 prefix,LoRA 学怎么读)。
+        # 零初始化 → 启动时增量 0 不破坏 frozen backbone。
+        if config.freeze_backbone and getattr(config, "lora_rank", 0) > 0:
+            from .lora import inject_lora
+            replaced = inject_lora(
+                self.backbone.model,  # HF AutoModel(QwenBackbone 内的 self.model)
+                target_modules=config.lora_target_modules,
+                rank=config.lora_rank,
+                alpha=config.lora_alpha,
+                dropout=config.lora_dropout,
+            )
+            print(f"[LoRA] 注入 {len(replaced)} 个 Linear "
+                  f"(rank={config.lora_rank}, alpha={config.lora_alpha}, "
+                  f"target={config.lora_target_modules})")
+
+        # per-layer K/V persistent memory(paper Titans MAC 严格形态):
+        # 在 LoRA 注入之后包装 self_attn,wrapper 复用 LoRA 后的 q/k/v/o_proj。
+        # 只对 QwenBackbone 有效;其他 backbone 没这个方法时跳过(MockBackbone 用 noop)。
+        n_per_layer = int(getattr(config, "n_persistent_per_layer", 0))
+        if n_per_layer > 0 and hasattr(self.backbone, "wrap_persistent_kv"):
+            self.backbone.wrap_persistent_kv(n_per_layer)
 
         # Memory:每个 full-attn 层挂一个 NeuralMemoryPair
         self._hook_layer_indices = self.backbone.get_hook_layer_indices()
@@ -87,28 +117,21 @@ class XinheModel(nn.Module):
 
         self.lm_head = self.backbone.get_lm_head()
 
-        # MAC: persistent_memory soft prompt(input-level prefix,跨所有层共享)
-        self.n_persistent_mem = int(getattr(config, "n_persistent_mem", 0))
-        if self.n_persistent_mem > 0:
-            self.persistent_mem = nn.Parameter(
-                torch.randn(self.n_persistent_mem, config.hidden_size)
-                * (config.hidden_size ** -0.5)
-            )
-        else:
-            self.register_parameter("persistent_mem", None)
-
-        # MAC: cross-turn mem tokens(hidden-state passing,跨 turn 累积)
-        # mem_token_init:每 turn 末插 N_mem 个 fresh 位置的初始 embedding
+        # MAC: fresh_mem (NM 输出承载) — paper M_t(K) 简化为 N_m 个固定位置
+        # 每 turn 末插 N_mem 个 fresh 位置,NM forward 把 mem_out 写到这 N_mem 位置
+        # 注:input-level persistent_mem (soft prompt) 已删,改用 per-layer K/V(在 attention 内拼接)
+        # 注:past_snapshots (跨 turn hidden carry) 已删,跨 turn 走 NM weights 演化(paper way)
         self.n_mem_tokens = int(getattr(config, "n_mem_tokens", 0))
         if self.n_mem_tokens > 0:
             self.mem_token_init = nn.Parameter(
                 torch.randn(self.n_mem_tokens, config.hidden_size)
                 * (config.hidden_size ** -0.5)
             )
-            # MAC 注入强度的可学缩放:fresh_mem 位置 hidden += inject · NM mem_out
-            # init 走 config.mac_inject_logit_init(默认 -3 ≈ 0.05,可调到 -1 ≈ 0.27 给更强初始信号)
-            # 这不是 MAL 的 alpha(全位置加),只在 fresh_mem 一处,不破 MAC 架构
-            init_val = float(getattr(config, "mac_inject_logit_init", -3.0))
+            # MAC 注入开度(paper 软取消):init 默认 +10 ≈ sigmoid 0.99996 ≈ paper 直接 += mem_out
+            # 保留参数 + 不冻结,模型自己决定:
+            #   - 末态 ≈ +10 不动 → paper 假设对,下轮可彻底删参数
+            #   - 末态自学小 → gating 仍有用,留 fallback
+            init_val = float(getattr(config, "mac_inject_logit_init", 10.0))
             self.mac_inject_logit = nn.Parameter(torch.tensor(init_val))
         else:
             self.register_parameter("mem_token_init", None)
@@ -162,34 +185,22 @@ class XinheModel(nn.Module):
 
         content_emb = self.backbone.embed(input_ids)  # (B, T, hidden_size)
 
-        # Pure MAC sequence 布局(从前到后):
-        #   [persistent_mem (N_p), past_snapshots (N_m × past_turns), fresh_mem (N_m), real (T)]
-        # 关键:fresh_mem 在 real 前面 → 因果 mask 让 real 能 attend 到 fresh_mem
+        # v9.5 paper-faithful 序列布局(从前到后):
+        #   [fresh_mem (N_m), real (T)]
+        # input-level persistent_mem 已删 → 改 per-layer K/V(每个 full_attention 层 attention 内拼接)
+        # past_snapshots 已删 → 跨 turn carry 走 NM weights 演化(paper way)
+        # fresh_mem 仍在 real 前面 → 因果 mask 让 real 能 attend 到 fresh_mem
         # NeuralMemory 在每层只把 mem_out 写到 fresh_mem 位置,其他位置 hidden 不动
-        # → memory 信息唯一通过 attention(real → fresh_mem)进入 real 表示
-        # → 论文 MAC 设计,无 MAL 残差并存
-        N_p = self.n_persistent_mem if self.persistent_mem is not None else 0
+        # → memory 信息通过 attention(real → fresh_mem)进入 real 表示
         N_m = self.n_mem_tokens if self.mem_token_init is not None else 0
-        past_snaps = list(state.mem_snapshots) if hasattr(state, "mem_snapshots") else []
-        past_turns = len(past_snaps)
 
-        prefix_parts = []
-        if N_p > 0:
-            pmem = self.persistent_mem.to(content_emb.dtype).unsqueeze(0).expand(B, -1, -1)
-            prefix_parts.append(pmem)
-        for snap in past_snaps:
-            # 上 turn 末层 fresh_mem hidden state(TBPTT 已 detach)
-            prefix_parts.append(snap.to(content_emb.dtype))
         if N_m > 0:
             fresh = self.mem_token_init.to(content_emb.dtype).unsqueeze(0).expand(B, -1, -1)
-            prefix_parts.append(fresh)
+            content_emb = torch.cat([fresh, content_emb], dim=1)
 
-        seq_parts = prefix_parts + [content_emb]
-        content_emb = torch.cat(seq_parts, dim=1) if len(seq_parts) > 1 else content_emb
-
-        # 关键索引(loss 切片 + 跨 turn snapshot 截取 + 每层 NM 写入定位用)
-        fresh_start = N_p + N_m * past_turns
-        fresh_end = fresh_start + N_m
+        # 关键索引(loss 切片 + 每层 NM 写入定位用)
+        fresh_start = 0
+        fresh_end = N_m
         real_start = fresh_end
         real_end = real_start + T
 
@@ -228,7 +239,7 @@ class XinheModel(nn.Module):
             delta[:, fresh_start:fresh_end, :] = inject * mem_proj[:, fresh_start:fresh_end, :]
             return hidden_states + delta
 
-        # 标准因果 mask(含 persistent + past_snapshots 前缀 + fresh_mem 后缀)
+        # 标准因果 mask(只覆盖 fresh_mem 前缀 + real 段)
         T_ext = content_emb.shape[1]
         causal = torch.triu(
             torch.full((T_ext, T_ext), float("-inf"), device=device, dtype=content_emb.dtype),
@@ -236,8 +247,8 @@ class XinheModel(nn.Module):
         )
         if pad_token_id is not None:
             padding_mask = (input_ids != pad_token_id)             # (B, T)
-            # 顺序: [persistent(N_p) | past_snaps(N_m × past_turns) | fresh_mem(N_m) | real(T)]
-            # 前三段(real 之前)永远 valid;real 段按 input_ids 判 pad
+            # 顺序: [fresh_mem(N_m) | real(T)]
+            # fresh_mem 段永远 valid;real 段按 input_ids 判 pad
             pre_valid = torch.ones(B, real_start, dtype=torch.bool, device=device)
             padding_mask = torch.cat([pre_valid, padding_mask], dim=1)
             pad_col = torch.zeros(B, 1, T_ext, device=device, dtype=content_emb.dtype)
@@ -253,29 +264,16 @@ class XinheModel(nn.Module):
             layer_hook=memory_hook,
         )
 
-        # 截 fresh_mem 段 hidden 作为下 turn 的 snapshot;FIFO 上限防长 episode 爆序列
-        max_snaps = int(getattr(self.config, "max_mem_snapshots", 8))
-        new_mem_snapshots = list(past_snaps)
-        if N_m > 0:
-            new_snap = content_output[:, fresh_start:fresh_end, :].contiguous()
-            new_mem_snapshots.append(new_snap)
-            # 上限 0:完全不 carry(ablation,只本 turn 用 fresh_mem)
-            # 上限 K>0:保留最近 K 个 turn 的 snapshot,丢最老
-            if max_snaps == 0:
-                new_mem_snapshots = []
-            elif len(new_mem_snapshots) > max_snaps:
-                new_mem_snapshots = new_mem_snapshots[-max_snaps:]
-
         # 切回真实 token 段(loss 只在 T 上)
         content_output = content_output[:, real_start:real_end, :]
 
         logits = self.lm_head(content_output)
 
-        # 聚合 state next:per-layer NM state + 跨 turn mem_snapshots
+        # 聚合 state next:per-layer NM state(跨 turn 通过 NM weights 演化承载,无 mem_snapshots)
         # 没经过 hook 的 layer_idx 沿用原 state(若有)
         merged: dict[int, LayerMemState] = dict(state.layers) if state.layers else {}
         merged.update(new_layers)
-        state_next = XinheMemoryState(merged, new_mem_snapshots)
+        state_next = XinheMemoryState(merged)
 
         aux_loss = (
             torch.stack(aux_loss_terms).sum()
@@ -403,18 +401,22 @@ class XinheModel(nn.Module):
         return generated, state_next
 
     def get_trainable_params(self) -> list[nn.Parameter]:
-        """收集所有可训练参数(memory + d_total 投影 + MAC 参数)"""
+        """收集所有可训练参数(memory + d_total 投影 + MAC 参数 + LoRA + per-layer K/V)。
+
+        策略:用 backbone.parameters() requires_grad 过滤,自动覆盖 LoRA 注入的 lora_A/B
+        和后续 per-layer K/V 包装的 K_pers/V_pers(它们都在 backbone 子模块内)。
+        """
         params = [p for p in self.memory.parameters() if p.requires_grad]
         if not isinstance(self._d_total_in, nn.Identity):
             params += [p for p in self._d_total_in.parameters() if p.requires_grad]
             params += [p for p in self._d_total_out.parameters() if p.requires_grad]
-        if self.persistent_mem is not None and self.persistent_mem.requires_grad:
-            params.append(self.persistent_mem)
         if self.mem_token_init is not None and self.mem_token_init.requires_grad:
             params.append(self.mem_token_init)
         if (getattr(self, "mac_inject_logit", None) is not None
                 and self.mac_inject_logit.requires_grad):
             params.append(self.mac_inject_logit)
+        # LoRA 注入的 lora_A/B + 后续 per-layer K/V 的 K_pers/V_pers 都挂在 backbone 内
+        params += [p for p in self.backbone.parameters() if p.requires_grad]
         return params
 
     def get_trainable_param_count(self) -> int:

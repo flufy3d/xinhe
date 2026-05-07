@@ -20,31 +20,34 @@ from typing import Optional
 from xinhe.data.skeletons.spec import Skeleton, DistractGroup
 
 
-_DG = DistractGroup()
-_DG_LONG = DistractGroup(bucket_constraint=None, label="DG_long")           # 默认全分布
-_DG_SHORT = DistractGroup(bucket_constraint="near", max_turns=2, label="DG_short")  # 0-2 轮
+# v9.5:含 {En} 的 skeleton 切到 paragraph DistractGroup,episode 真正长起来
+# (paper Titans MAC 在长 context 下 NM 通路才有用武之地;短 distract 让 attention 直接看到全文)
+_DG_PARA = DistractGroup(expansion="paragraph", paragraph_token_target=300, label="DG")
+_DG_LONG_PARA = DistractGroup(expansion="paragraph", paragraph_token_target=400, label="DG_long")
+_DG_SHORT = DistractGroup(bucket_constraint="near", max_turns=2, label="DG_short",
+                          expansion="short")  # S10 短段保留原行为(对照,paper-style 短跨度)
 
 
 SKELETONS: dict[str, Skeleton] = {
-    "S1":  Skeleton("S1",  ["A", _DG, "B"], weight=1.0,
+    "S1":  Skeleton("S1",  ["A", _DG_PARA, "B"], weight=1.0,
                     description="基础读写 + 长程保持"),
-    "S2":  Skeleton("S2",  ["A", "C", _DG, "B"], weight=0.6,
+    "S2":  Skeleton("S2",  ["A", "C", _DG_PARA, "B"], weight=0.6,
                     description="拒答不污染后续读"),
     "S3":  Skeleton("S3",  ["F", "G", "H"], weight=0.8,
                     description="并发写入与局部/全量召回"),
     "S4":  Skeleton("S4",  ["A", "D", "B"], weight=0.8,
                     description="基础擦写"),
-    "S5":  Skeleton("S5",  ["A", "D", _DG, "K"], weight=1.6,
+    "S5":  Skeleton("S5",  ["A", "D", _DG_PARA, "K"], weight=1.6,
                     description="擦写后 Stale-Query(原 S5+S6 合并;K 池含陈述/疑问两种句式)"),
-    "S7":  Skeleton("S7",  ["F", "D_partial", _DG, "H"], weight=1.0,
+    "S7":  Skeleton("S7",  ["F", "D_partial", _DG_PARA, "H"], weight=1.0,
                     description="多实体中只覆盖一项,长距后多读"),
     "S8":  Skeleton("S8",  ["I", "C", "G"], weight=0.5,
                     description="第三方实体绑定与拒答"),
-    "S9":  Skeleton("S9",  ["A", "J", _DG, "H"], weight=0.6,
+    "S9":  Skeleton("S9",  ["A", "J", _DG_PARA, "H"], weight=0.6,
                     description="Augment 与 Multi-Read 联用"),
-    "S10": Skeleton("S10", ["A", _DG_LONG, "L", _DG_SHORT, "C_prime"], weight=0.8,
+    "S10": Skeleton("S10", ["A", _DG_LONG_PARA, "L", _DG_SHORT, "C_prime"], weight=0.8,
                     description="Reverse-Erase 后查询应得 Miss"),
-    "S11": Skeleton("S11", ["F", "L_partial", _DG, "H", "C_prime"], weight=0.8,
+    "S11": Skeleton("S11", ["F", "L_partial", _DG_PARA, "H", "C_prime"], weight=0.8,
                     description="局部遗忘,防止学成整体拒答"),
 
     # warmup 专用:纯 reveal+recall,无 distract。课程起点,迫使 W 学到 token 级 verbatim

@@ -26,29 +26,35 @@ stages:
   - name: "pcap_mini"
     data:
       kind: "mix_dynamic"
+      # v9.5 调整:skeleton 10% → 30%(暴露量补回 v8 量级);加 congliu 中文 R1 推理 source
+      # 总 ratio 100%,数据多样性保留(novel/longcite/dialog 仍占 50%)
       sources:
-        - {path: "data/novel/train.jsonl",     ratio: 0.40, tag: "novel"}
-        - {path: "data/longcite/train.jsonl",  ratio: 0.30, tag: "longcite"}
-        - {path: "data/dialog/train.jsonl",    ratio: 0.20, tag: "dialog"}
-        - {path: "data/skeleton/train.jsonl",  ratio: 0.10, tag: "skeleton"}
+        - {path: "data/skeleton/train.jsonl",  ratio: 0.30, tag: "skeleton"}
+        - {path: "data/novel/train.jsonl",     ratio: 0.25, tag: "novel"}
+        - {path: "data/congliu/train.jsonl",   ratio: 0.20, tag: "congliu"}
+        - {path: "data/longcite/train.jsonl",  ratio: 0.15, tag: "longcite"}
+        - {path: "data/dialog/train.jsonl",    ratio: 0.10, tag: "dialog"}
       val_sources:
-        - {path: "data/novel/val.jsonl",       ratio: 0.40, tag: "novel"}
-        - {path: "data/longcite/val.jsonl",    ratio: 0.30, tag: "longcite"}
-        - {path: "data/dialog/val.jsonl",      ratio: 0.20, tag: "dialog"}
-        - {path: "data/skeleton/val.jsonl",    ratio: 0.10, tag: "skeleton"}
-      num_train: 50000          # 全量 P-cap 试水
+        - {path: "data/skeleton/val.jsonl",    ratio: 0.30, tag: "skeleton"}
+        - {path: "data/novel/val.jsonl",       ratio: 0.25, tag: "novel"}
+        - {path: "data/congliu/val.jsonl",     ratio: 0.20, tag: "congliu"}
+        - {path: "data/longcite/val.jsonl",    ratio: 0.15, tag: "longcite"}
+        - {path: "data/dialog/val.jsonl",      ratio: 0.10, tag: "dialog"}
+      num_train: 50000
       num_val: 200
       seed: 42
     training:
-      max_turns_per_episode: 8
-      turn_max_tokens: 512
+      max_turns_per_episode: 16     # 8 → 16 长 episode
+      turn_max_tokens: 768          # 512 → 768 给 paragraph distract 留余量
       plugin_lr_multiplier: 1.0
       value_weight_cap: 1.0
       phase: "P-cap"
-      per_segment_checkpoint: false   # 同 gradient_checkpointing,关
-      max_steps: 1000
-      warmup_steps: 50
+      per_segment_checkpoint: false
+      max_steps: 3000               # 1000 → 3000 补回 v8 量级训练量
+      warmup_steps: 200             # 50 → 200(LoRA + per-layer K/V + Congliu 引入新分布,缓和)
+      weight_decay: 0.1             # 0.01 → 0.1 paper Titans 对齐
       use_joint_early_stop: false
     val_sets:
       - {name: "skeleton_val", path: "data/skeleton/val.jsonl"}
       - {name: "novel_val",    path: "data/novel/val.jsonl"}
+      - {name: "congliu_val",  path: "data/congliu/val.jsonl"}
