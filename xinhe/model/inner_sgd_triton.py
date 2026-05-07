@@ -24,7 +24,8 @@ vmap+grad path.
 from __future__ import annotations
 
 import math
-from typing import Optional
+import sys
+from typing import Optional, Callable
 
 import torch
 import torch.nn.functional as F
@@ -400,11 +401,12 @@ class HippoInnerSGD(torch.autograd.Function):
         saved = dict(zip(keys, saved_tensors))
         saved["eps"] = ctx.eps
 
-        # Backward always runs the PyTorch bmm chain: Triton bwd doesn't fit
-        # sm_120 SRAM (see _maybe_load_triton_kernels docstring). Forward already
-        # cast saved tensors to fp32 so the bmm chain consumes them directly.
-        # ~10 kernel launches vs ~1000 for vmap+grad.
-        dK, dV, dlr, dgamma, dW1, dW2 = _pytorch_inner_sgd_bwd(
+        # Backward 走 Inductor-compiled PyTorch bmm chain:
+        #   - Triton bwd 不可行(30+ adjoint tensor 不进 sm_120 100KB SRAM)
+        #   - Inductor compile 把 ~30 ops 融合成 ~3-5 kernel,CPU dispatch 大幅减
+        #   - production 这是 train backward 真热点(576 chunks/ep × 30 ops = ~17000 dispatch)
+        bwd_fn = _get_inner_sgd_bwd_fn()
+        dK, dV, dlr, dgamma, dW1, dW2 = bwd_fn(
             saved, d_g_gamma, d_g_W1, d_g_W2, d_L_c,
         )
 
@@ -456,6 +458,44 @@ def hippo_inner_sgd(
 #     (D=64, DH=128) -- m + WD + W_init weights are ~192KB, > sm_120 100KB.
 #     We rely on HippoInnerSGD's Triton fwd + PyTorch elementwise ops.
 # ----------------------------------------------------------------------------
+
+
+# lazy-compiled 缓存。第一次调用时编译,Inductor 融合 elementwise / bmm 序列减 CPU dispatch
+# 默认 linux 开 / windows 关(Inductor 在 Windows 缺 cl.exe)
+_use_compile_chunk_update_helper = sys.platform != "win32"
+_compiled_cache_chunk_update_fwd: dict[str, Callable] = {}
+_compiled_cache_inner_sgd_bwd: dict[str, Callable] = {}
+
+
+def set_use_compile_chunk_update_helper(flag: bool) -> None:
+    global _use_compile_chunk_update_helper
+    _use_compile_chunk_update_helper = bool(flag)
+
+
+def _get_chunk_update_fn() -> Callable:
+    if not _use_compile_chunk_update_helper:
+        return _pytorch_chunk_update_fwd_autograd
+    key = "default"
+    if key not in _compiled_cache_chunk_update_fwd:
+        _compiled_cache_chunk_update_fwd[key] = torch.compile(
+            _pytorch_chunk_update_fwd_autograd,
+            mode="default", dynamic=False, fullgraph=False,
+        )
+    return _compiled_cache_chunk_update_fwd[key]
+
+
+def _get_inner_sgd_bwd_fn() -> Callable:
+    """Inductor 把 _pytorch_inner_sgd_bwd 的 ~30 ops(20+ bmm/elementwise)融合进 ~3-5 kernel,
+    每 chunk × 6 chunk × 6 layer × 16 turn = 576 chunks/ep,Python dispatch 大头来自这。"""
+    if not _use_compile_chunk_update_helper:
+        return _pytorch_inner_sgd_bwd
+    key = "default"
+    if key not in _compiled_cache_inner_sgd_bwd:
+        _compiled_cache_inner_sgd_bwd[key] = torch.compile(
+            _pytorch_inner_sgd_bwd,
+            mode="default", dynamic=False, fullgraph=False,
+        )
+    return _compiled_cache_inner_sgd_bwd[key]
 
 
 def _pytorch_chunk_update_fwd_autograd(
@@ -597,8 +637,9 @@ class HippoChunkUpdate(torch.autograd.Function):
         chunk_size_inner: int,
         eps: float = 1e-5,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        fn = _get_chunk_update_fn()
         with torch.no_grad():
-            outputs = _pytorch_chunk_update_fwd_autograd(
+            outputs = fn(
                 K, V, lr, gamma, W1, W2,
                 adaptive_momentum, decay_factor,
                 prev_m_gamma, prev_m_W1, prev_m_W2,
@@ -627,10 +668,11 @@ class HippoChunkUpdate(torch.autograd.Function):
 
         # autograd.Function.backward defaults to grad disabled; recomputation
         # needs enable_grad so HippoInnerSGD.apply records its own backward.
+        # 走 compiled 版本时,AOT autograd 把 fwd+bwd 都 codegen 成融合 graph
+        # → backward 真正瓶颈(~30 ops/chunk × 6 chunk × 6 layer × 16 turn)被压平
+        fn = _get_chunk_update_fn()
         with torch.enable_grad():
-            outputs = _pytorch_chunk_update_fwd_autograd(
-                *inputs_grad, chunk_size_inner, eps,
-            )
+            outputs = fn(*inputs_grad, chunk_size_inner, eps)
             torch.autograd.backward(outputs, grad_outputs)
 
         # Collect grads in input order; non-floating inputs (scalars) -> None.

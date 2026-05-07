@@ -104,6 +104,14 @@ class XinheModel(nn.Module):
             except Exception as e:
                 print(f"[torch.compile neo] 跳过(异常: {e})")
 
+        # Hippo NM compile:lazy trace 在 forward 首次入口(配 Dynamo 三连让 outer loop 稳态)
+        hippo_compile_on = sum(
+            1 for pair in self.memory.values()
+            if getattr(pair.hippocampus, "use_compile_chunk_loop", False)
+        )
+        if hippo_compile_on > 0:
+            print(f"[torch.compile] 已编译 {hippo_compile_on} 个 Hippo 路径")
+
         # 投影:d_total ↔ hidden_size(NeuralMemoryPair 在 d_total 子空间工作,
         # backbone 输出是 hidden_size 维度。两者通常相等,但保留投影以备 head_dim 配置不齐)
         if d_total == config.hidden_size:

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import sys
 
 import pytest
 import torch
@@ -259,6 +260,7 @@ def test_nm_fast_path_equiv_regular_path():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="需要 CUDA")
+@pytest.mark.skipif(sys.platform == "win32", reason="Inductor 在 Windows 需 cl.exe;production Linux 验证即可")
 def test_nm_compile_equiv_eager():
     """Stage 3:`use_compile_chunk_loop=True` 与 eager 数学等价(fwd + bwd)。
 

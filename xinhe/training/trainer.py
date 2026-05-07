@@ -199,9 +199,11 @@ class Trainer:
         state = self.model.init_state(B).to(self.device)
         accumulated_loss = torch.tensor(0.0, device=self.device)
         episode_total_loss = 0.0
-        episode_correct = 0
-        episode_total = 0
-        loss_turns = 0
+        # 改 tensor 累加器:每 turn 不再 .item() sync(每 turn 一次 sync × 16 turn = 32 次/ep
+        # GPU pipeline 卡顿)。只在 backward 边界(已天然 sync)取出 Python float
+        episode_correct_t = torch.zeros((), dtype=torch.long, device=self.device)
+        episode_total_t = torch.zeros((), dtype=torch.long, device=self.device)
+        loss_turns_t = torch.zeros((), dtype=torch.long, device=self.device)
 
         for turn_idx, batch in enumerate(episode_turns):
             turn_ids, labels, weights = batch
@@ -210,18 +212,23 @@ class Trainer:
             weights = weights.to(self.device)
 
             if turn_idx > 0 and turn_idx % self.config.tbptt_turns == 0:
-                if loss_turns > 0:
-                    avg_loss = accumulated_loss / loss_turns
+                # 一次性 sync:loss_turns / accuracy 都跟 backward 在同一 sync 点取出
+                loss_turns_int = int(loss_turns_t.item())
+                if loss_turns_int > 0:
+                    avg_loss = accumulated_loss / loss_turns_int
                     (avg_loss / self.config.grad_accum_steps).backward()
-                    episode_total_loss += avg_loss.item()
+                    avg_loss_v = avg_loss.item()
+                    episode_total_loss += avg_loss_v
                     # 传 running acc:混合数据时 grad_accum cycle 可能落在 mid-ep call,
                     # EMA 必须得到真实 partial accuracy,否则会被 default 1.0 污染成假 100%
-                    running_acc = episode_correct / max(episode_total, 1)
-                    self._maybe_optimizer_step(avg_loss.item(), running_acc)
+                    ec = int(episode_correct_t.item())
+                    et = int(episode_total_t.item())
+                    running_acc = ec / max(et, 1)
+                    self._maybe_optimizer_step(avg_loss_v, running_acc)
 
                 state = state.detach()
                 accumulated_loss = torch.tensor(0.0, device=self.device)
-                loss_turns = 0
+                loss_turns_t = torch.zeros((), dtype=torch.long, device=self.device)
 
             with torch.amp.autocast("cuda", dtype=self.dtype):
                 # model.forward 内部仍叫 segment（纯实现细节，与业务 turn 解耦）
@@ -232,18 +239,29 @@ class Trainer:
             accumulated_loss = accumulated_loss + turn_loss
             correct = result.get("correct", 0)
             total = result.get("total", 0)
-            episode_correct += correct.item() if hasattr(correct, 'item') else correct
-            episode_total += total.item() if hasattr(total, 'item') else total
-            has_valid_labels = (labels != -100).any()
-            if has_valid_labels:
-                loss_turns += 1
+            # tensor accum,不 .item();非 tensor 路径(常量 0)直接加
+            if torch.is_tensor(correct):
+                episode_correct_t = episode_correct_t + correct.long()
+            else:
+                episode_correct_t = episode_correct_t + int(correct)
+            if torch.is_tensor(total):
+                episode_total_t = episode_total_t + total.long()
+            else:
+                episode_total_t = episode_total_t + int(total)
+            # 用 tensor 累加 loss_turns,避开 .any() 的 .__bool__() sync
+            has_valid_labels = (labels != -100).any().long()
+            loss_turns_t = loss_turns_t + has_valid_labels
 
-        if loss_turns > 0:
-            avg_loss = accumulated_loss / loss_turns
+        loss_turns_int = int(loss_turns_t.item())
+        if loss_turns_int > 0:
+            avg_loss = accumulated_loss / loss_turns_int
             (avg_loss / self.config.grad_accum_steps).backward()
-            episode_total_loss += avg_loss.item()
-            acc = episode_correct / max(episode_total, 1)
-            self._maybe_optimizer_step(avg_loss.item(), acc)
+            avg_loss_v = avg_loss.item()
+            episode_total_loss += avg_loss_v
+            ec = int(episode_correct_t.item())
+            et = int(episode_total_t.item())
+            acc = ec / max(et, 1)
+            self._maybe_optimizer_step(avg_loss_v, acc)
 
         return episode_total_loss
 

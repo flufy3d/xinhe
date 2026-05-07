@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Callable
 
 import math
+import sys
 from functools import partial
 from itertools import zip_longest
 from collections import namedtuple
@@ -299,10 +300,12 @@ class NeuralMemory(Module):
             depth = 2,
             expansion_factor = 4.
         ),
-        use_compile_chunk_loop: bool = False,  # Stage 3:torch.compile(mode="reduce-overhead") 包 forward
-                                                #   - Dynamo trace 成功 → 自动用 CUDA Graph,training 路径 Python overhead 消失
-                                                #   - graph break 时 Dynamo fallback eager,不会出错只是不加速
-                                                #   - 默认关,production 验证后开
+        use_compile_chunk_loop: bool | None = None,  # Stage 3:torch.compile 包 forward
+                                                #   None = linux 默认 True / windows False (Inductor cl.exe)
+                                                #   开启时:Dynamo 三连关 int specialize / 提 recompile_limit / 关
+                                                #     static-by-default,让 outer loop seq_index 不再 trigger 重编
+                                                #   mode="default":Inductor 融合 only(reduce-overhead 的 CUDA
+                                                #     Graph fast path 与 TBPTT 多 forward autograd state 冲突)
     ):
         super().__init__()
         dim_head = default(dim_head, dim)
@@ -326,6 +329,9 @@ class NeuralMemory(Module):
         self.qkv_receives_diff_views = qkv_receives_diff_views
 
         # Stage 3:torch.compile flag + lazy 编译缓存。dispatch 在 forward 入口
+        # None = 平台自适应:linux 默认开,windows 默认关(Inductor 缺 cl.exe)
+        if use_compile_chunk_loop is None:
+            use_compile_chunk_loop = sys.platform != "win32"
         self.use_compile_chunk_loop = use_compile_chunk_loop
         self._compiled_forward = None
 
@@ -619,7 +625,13 @@ class NeuralMemory(Module):
 
         seq, remainder = seq[..., :round_down_seq_len, :], seq[..., round_down_seq_len:, :]
 
-        next_seq_len_index = seq_index + round_down_seq_len
+        # Stage 4:seq_index 接受 int / 0-D tensor 两种;tensor 路径让 Dynamo 不再 per-value
+        # specialize(int 跨 episode 单调累加 → 7000+ unique 值 → recompile 必爆)。
+        # tensor + int = tensor,下游 NeuralMemState.seq_index 也变 tensor,caller 不区分。
+        if isinstance(seq_index, Tensor):
+            next_seq_len_index = seq_index + round_down_seq_len
+        else:
+            next_seq_len_index = seq_index + round_down_seq_len
 
         # init weights if needed
         # weights of the memory network
@@ -1073,10 +1085,24 @@ class NeuralMemory(Module):
         # Stage 3 dispatch:flag 开 + CUDA + 已 lazy 创建 compiled 路径 → 走 compile;
         # 否则 fallback eager。compiled forward 的 Dynamo trace 失败时会自动 fallback
         # 不影响正确性,只是不加速。
-        if self.use_compile_chunk_loop and torch.cuda.is_available():
+        # 只有 input 真实在 CUDA 才走 compile;否则 Inductor 走 CPU codegen 需要本机 cl.exe
+        seq_on_cuda = isinstance(seq, Tensor) and seq.is_cuda
+        if self.use_compile_chunk_loop and seq_on_cuda:
             if self._compiled_forward is None:
+                # Dynamo 三连:让 compile 在 outer chunk loop 真正稳态(不再 hit recompile_limit)
+                #   - specialize_int=False:int 值(seq_index 等)当成 dynamic,不再 per-value guard
+                #   - recompile_limit=64:即使有少量 shape 变体也能全 cache
+                #   - cache_size_limit=64:同上
+                torch._dynamo.config.specialize_int = False
+                if torch._dynamo.config.recompile_limit < 64:
+                    torch._dynamo.config.recompile_limit = 64
+                if getattr(torch._dynamo.config, "cache_size_limit", 0) < 64:
+                    torch._dynamo.config.cache_size_limit = 64
+                # mode="default":Inductor 融合 only。reduce-overhead 的 CUDA Graph fast path 与
+                # TBPTT 多 forward 累 autograd state 冲突(实测 0 收益)。
+                # dynamic=False:dynamic=True 撞 Dynamo tuple_iterator bug
                 self._compiled_forward = torch.compile(
-                    self._forward_impl, mode="reduce-overhead", dynamic=False,
+                    self._forward_impl, mode="default", dynamic=False, fullgraph=False,
                 )
             return self._compiled_forward(
                 seq, store_seq, state, detach_mem_state, prev_weights,
@@ -1121,6 +1147,13 @@ class NeuralMemory(Module):
             state = (0, None, None, None, None)
 
         seq_index, weights, cache_store_seq, past_state, updates = state
+
+        # Stage 4:state.seq_index 始终保持 int 不再回 tensor
+        # _forward_impl 在出口时把累加得到的 int 写回 NeuralMemState.seq_index(末尾 _replace),
+        # 所以这里 isinstance(.., Tensor) 通常不命中;真命中说明 caller 自己用 tensor 入口,
+        # 此时只能 .item() 一次 sync
+        if isinstance(seq_index, Tensor):
+            seq_index = int(seq_index.item())
 
         # read-before-write: 入口 retrieve 用 store 之前的 weights,store loop 不再回头 retrieve
         # 防止"自窥"——同一 forward 内 token 读到自己刚写入的痕迹,造成 read 与 input 不可区分
@@ -1249,12 +1282,15 @@ class NeuralMemory(Module):
         for ind, (store_seq_chunk, maybe_store_mask) in enumerate(zip(store_seqs, store_masks)):
             is_last = ind == (len(store_seqs) - 1)
 
-            # store
+            # store —— Stage 4:把 seq_index 转 0-D tensor 传入,Dynamo 不再 per-value 重编
+            seq_index_t = torch.tensor(
+                seq_index, dtype=torch.long, device=store_seq_chunk.device,
+            )
 
             next_updates, next_neural_mem_state, chunk_surprises = self.store_memories(
                 store_seq_chunk,
                 weights,
-                seq_index = seq_index,
+                seq_index = seq_index_t,
                 past_state = past_state,
                 prev_weights = prev_weights,
                 mask = maybe_store_mask,
@@ -1262,7 +1298,12 @@ class NeuralMemory(Module):
             )
 
             weights = next_neural_mem_state.weights
-            seq_index = next_neural_mem_state.seq_index
+            # Stage 4:用 chunk len 自己累加 int seq_index,避开读 tensor state.seq_index
+            # 触发 sync。逻辑跟 store_memories 内 next_seq_len_index = seq_index + round_down 等价
+            _chunk_round_down = (
+                store_seq_chunk.shape[-2] // self.store_chunk_size
+            ) * self.store_chunk_size
+            seq_index = seq_index + _chunk_round_down
             past_state = next_neural_mem_state.states
 
             # 写入 updates buffer。next_updates 实际 n_chunk 由 store_memories 决定
@@ -1300,7 +1341,10 @@ class NeuralMemory(Module):
                 states = past_state,
             )
 
-        next_neural_mem_state = next_neural_mem_state._replace(updates = updates)
+        # Stage 4:state.seq_index 强制写回 int(我们在 loop 里手动累加得到),避免下次入口 .item() sync。
+        # 如果 num_chunks==0 special path 则 next_neural_mem_state.seq_index 来自 store_memories
+        # 内部 next_seq_len_index = seq_index_t + 0,我们的 int seq_index 等价。
+        next_neural_mem_state = next_neural_mem_state._replace(updates = updates, seq_index = seq_index)
 
         # retrieve
 
