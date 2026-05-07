@@ -298,7 +298,11 @@ class NeuralMemory(Module):
         default_model_kwargs: dict = dict(
             depth = 2,
             expansion_factor = 4.
-        )
+        ),
+        use_compile_chunk_loop: bool = False,  # Stage 3:torch.compile(mode="reduce-overhead") 包 forward
+                                                #   - Dynamo trace 成功 → 自动用 CUDA Graph,training 路径 Python overhead 消失
+                                                #   - graph break 时 Dynamo fallback eager,不会出错只是不加速
+                                                #   - 默认关,production 验证后开
     ):
         super().__init__()
         dim_head = default(dim_head, dim)
@@ -320,6 +324,10 @@ class NeuralMemory(Module):
         # key values receiving different views
 
         self.qkv_receives_diff_views = qkv_receives_diff_views
+
+        # Stage 3:torch.compile flag + lazy 编译缓存。dispatch 在 forward 入口
+        self.use_compile_chunk_loop = use_compile_chunk_loop
+        self._compiled_forward = None
 
         # norms
 
@@ -1051,6 +1059,35 @@ class NeuralMemory(Module):
         return values[:, :seq_len]
 
     def forward(
+        self,
+        seq,
+        store_seq = None,
+        state: NeuralMemState | None = None,
+        detach_mem_state = False,
+        prev_weights = None,
+        store_mask: Tensor | None = None,
+        return_surprises = False,
+        ttt_batch_size: int | None = None,
+        read_before_write: bool = False,
+    ):
+        # Stage 3 dispatch:flag 开 + CUDA + 已 lazy 创建 compiled 路径 → 走 compile;
+        # 否则 fallback eager。compiled forward 的 Dynamo trace 失败时会自动 fallback
+        # 不影响正确性,只是不加速。
+        if self.use_compile_chunk_loop and torch.cuda.is_available():
+            if self._compiled_forward is None:
+                self._compiled_forward = torch.compile(
+                    self._forward_impl, mode="reduce-overhead", dynamic=False,
+                )
+            return self._compiled_forward(
+                seq, store_seq, state, detach_mem_state, prev_weights,
+                store_mask, return_surprises, ttt_batch_size, read_before_write,
+            )
+        return self._forward_impl(
+            seq, store_seq, state, detach_mem_state, prev_weights,
+            store_mask, return_surprises, ttt_batch_size, read_before_write,
+        )
+
+    def _forward_impl(
         self,
         seq,
         store_seq = None,

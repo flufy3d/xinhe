@@ -259,6 +259,45 @@ def test_nm_fast_path_equiv_regular_path():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="需要 CUDA")
+def test_nm_compile_equiv_eager():
+    """Stage 3:`use_compile_chunk_loop=True` 与 eager 数学等价(fwd + bwd)。
+
+    backward 在 HippoChunkUpdate.backward 的 `requires_grad_()` 处会有 graph break
+    (Dynamo 限制),但会 gracefully fallback eager,正确性不受影响。"""
+    from xinhe.model.neural_memory_pair import NeuralMemoryPair
+
+    torch.manual_seed(0)
+    pair_a = NeuralMemoryPair(d_total=32, n_heads=2, d_head=16, chunk_size=16, phase="P-cap").cuda()
+    pair_b = NeuralMemoryPair(d_total=32, n_heads=2, d_head=16, chunk_size=16, phase="P-cap").cuda()
+    pair_b.load_state_dict(pair_a.state_dict())
+
+    pair_a.hippocampus.use_compile_chunk_loop = True
+    pair_b.hippocampus.use_compile_chunk_loop = False
+
+    # Forward 等价
+    pair_a.eval()
+    pair_b.eval()
+    x = torch.randn(2, 32, 32, device="cuda")
+    out_a, _, _ = pair_a(x)
+    out_b, _, _ = pair_b(x)
+    assert (out_a - out_b).abs().max().item() < 1e-5
+
+    # Backward 等价(compile + eager 在 graph break 处均能正确传梯度)
+    pair_a.train()
+    pair_b.train()
+    torch.manual_seed(7)
+    x_a = torch.randn(2, 32, 32, device="cuda", requires_grad=True)
+    x_b = x_a.detach().clone().requires_grad_(True)
+
+    out_a, _, _ = pair_a(x_a)
+    out_b, _, _ = pair_b(x_b)
+    out_a.sum().backward()
+    out_b.sum().backward()
+
+    assert (x_a.grad - x_b.grad).abs().max().item() < 1e-5
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="需要 CUDA")
 def test_chunk_update_bf16_tol():
     """bf16:多步 scan 累积误差,容差 5e-2(scan=2 步,bf16 7-bit mantissa)。
 
