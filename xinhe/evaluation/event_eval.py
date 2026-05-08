@@ -183,6 +183,7 @@ def eval_event_jsonl(
     bucket_by_tier: dict[str, list[bool]] = defaultdict(list)
     bucket_by_substream: dict[str, list[bool]] = defaultdict(list)
 
+    print(f"  [{p.name}] start: max_episodes={max_episodes}", flush=True)
     with open(p, "r", encoding="utf-8") as fp:
         for line in fp:
             line = line.strip()
@@ -207,6 +208,10 @@ def eval_event_jsonl(
                 continue
 
             n_eps += 1
+            if n_eps % 10 == 0:
+                running_acc = total_correct / max(1, total_value_turns)
+                print(f"  [{p.name}] ep {n_eps}/{max_episodes} "
+                      f"value_turns={total_value_turns} running_acc={running_acc:.2%}", flush=True)
 
             for tr in turn_records:
                 ok = _turn_value_fullmatch(tr, tokenizer)
@@ -234,6 +239,8 @@ def eval_event_jsonl(
         return out
 
     overall = total_correct / max(1, total_value_turns)
+    print(f"  [{p.name}] DONE n_eps={n_eps} n_value_turns={total_value_turns} "
+          f"overall_acc={overall:.2%}", flush=True)
     return {
         "overall_acc": overall,
         "n_episodes": n_eps,

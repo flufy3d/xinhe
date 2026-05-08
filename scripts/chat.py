@@ -103,6 +103,11 @@ def main():
     elif checkpoint and not config_explicit and "config" not in checkpoint:
         print("  提示: 请使用与 checkpoint 匹配的 --config。")
 
+    # chat 关掉 backbone + Neo 的 torch.compile:训练时序列长度 fixed + 用了 recompile_limit=64
+    # 能稳态 cache;chat 时 generate 每 token 序列长 +1,shape 一直变,默认 limit=8 不够会
+    # recompile thrash 出 W0508 警告。eager 在 chat 单用户场景速度也够。
+    config.compile_backbone_layers = False
+
     device = torch.device(config.device if torch.cuda.is_available() else "cpu")
 
     print("=== 心核 (Xinhe) 交互式聊天 ===")
@@ -110,6 +115,10 @@ def main():
     print("加载模型...")
 
     model = XinheModel(config)
+
+    # chat 关 NM 的 torch.compile(同 evaluate.py:Dynamo 在 no_grad pytree 上撞 AssertionError)
+    for pair in model.memory.values():
+        pair.hippocampus.use_compile_chunk_loop = False
 
     # 加载训练好的 checkpoint
     if checkpoint:
@@ -122,7 +131,21 @@ def main():
             raise RuntimeError(
                 "checkpoint 缺少 'memory_pair_state' 键。v9 不兼容 v8 hippocampus_state。"
             )
-        model.memory.load_state_dict(checkpoint["memory_pair_state"], strict=True)
+        # ckpt 是 compile 状态下保存的(key 含 `_orig_mod.`);chat 关了 compile,目标 module 没这个前缀
+        def _strip_orig_mod(sd: dict) -> dict:
+            return {k.replace("_orig_mod.", ""): v for k, v in sd.items()}
+        model.memory.load_state_dict(_strip_orig_mod(checkpoint["memory_pair_state"]), strict=True)
+        # v9.5 MAC 参数(mem_token_init / mac_inject_logit)
+        for key in ("mem_token_init", "mac_inject_logit"):
+            param = getattr(model, key, None)
+            if param is not None and key in checkpoint:
+                with torch.no_grad():
+                    param.copy_(checkpoint[key].to(param.device))
+        # v9.5 backbone addons(LoRA + per-layer K/V)— 不加这个 LoRA 权重不生效,行为像 base Qwen
+        if "backbone_addons_state" in checkpoint:
+            addons = {k: v.to(device) for k, v in
+                      _strip_orig_mod(checkpoint["backbone_addons_state"]).items()}
+            model.backbone.load_state_dict(addons, strict=False)
         print(f"  checkpoint 已加载: {args.checkpoint}")
 
     model.to(device)
@@ -213,7 +236,7 @@ def main():
                     for i in range(0, len(token_ids), seg_len):
                         seg = token_ids[i:i+seg_len]
                         segments.append(torch.tensor(seg, dtype=torch.long, device=device))
-                    with torch.no_grad():
+                    with torch.no_grad(), torch.amp.autocast(device.type, dtype=torch.bfloat16):
                         state = model.burn_in(segments, batch_size=1)
                     print("  Burn-in 完成")
             else:
@@ -256,7 +279,7 @@ def main():
                 print(new_text, end="", flush=True)
                 printed_len = len(text)
 
-            with torch.no_grad():
+            with torch.no_grad(), torch.amp.autocast(device.type, dtype=torch.bfloat16):
                 generated_ids, state = model.generate_with_state(
                     input_ids=input_tensor,
                     state=state,
@@ -269,7 +292,7 @@ def main():
             print()  # 换行
         else:
             # --- 非流式输出 ---
-            with torch.no_grad():
+            with torch.no_grad(), torch.amp.autocast(device.type, dtype=torch.bfloat16):
                 generated_ids, state = model.generate_with_state(
                     input_ids=input_tensor,
                     state=state,

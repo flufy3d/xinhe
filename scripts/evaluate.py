@@ -38,6 +38,12 @@ from xinhe.model.xinhe_model import XinheModel
 def load_model_and_tokenizer(config, checkpoint_path, device):
     model = XinheModel(config)
 
+    # eval 关 NM 的 torch.compile:Dynamo 在 no_grad 下 trace NeuralMemState pytree
+    # 触发 side_effects.codegen_save_tempvars AssertionError(cls_source 缺失)
+    # 训练期 grad 路径无此问题,只 eval 关
+    for pair in model.memory.values():
+        pair.hippocampus.use_compile_chunk_loop = False
+
     if checkpoint_path:
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         if "memory_pair_state" not in checkpoint:
