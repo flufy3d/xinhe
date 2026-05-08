@@ -46,12 +46,10 @@ def load_tokenizer(config: XinheConfig):
 
 
 def print_stats(model: XinheModel, state):
-    """打印 NeuralMemoryPair 状态简要(per-layer alpha 平均)"""
+    """打印 NeuralMemoryPair 状态简要(目前仅层数)"""
     stats = model.state_stats(state)
     print(f"\n{'='*50}")
     print(f"  v9 Memory 状态 ({stats['n_layers']} 层 NeuralMemoryPair)")
-    print(f"{'='*50}")
-    print(f"  alpha_mean:        {stats['alpha_mean']:.4f}")
     print(f"{'='*50}\n")
 
 
@@ -308,9 +306,7 @@ def main():
             response = response.strip()
             print(f"\n心核: {response}")
 
-        alphas = [torch.sigmoid(p.alpha_logit).item() for p in model.memory.values()]
-        alpha_mean = sum(alphas) / max(len(alphas), 1)
-        print(f"  [轮次 {turn_count} | alpha={alpha_mean:.3f}]")
+        print(f"  [轮次 {turn_count}]")
 
 
 

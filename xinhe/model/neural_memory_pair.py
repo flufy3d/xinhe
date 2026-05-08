@@ -20,8 +20,11 @@ forward:
   2. r_n         = neocortex(x)                                           # 普通 fwd
   3. q = gate_q(x); gate = softmax([⟨q,r_h⟩, ⟨q,r_n⟩] / √d)               # 内容感知
   4. mem_out = gate·{r_h, r_n} → mem_rmsnorm
-  5. alpha = sigmoid(alpha_logit).clamp(min);受 mem_alpha_override 覆写
-  6. return (x + alpha·mem_out, LayerMemState(hippo=h_new, neo=None), aux)
+  5. return (x + mem_out, LayerMemState(hippo=h_new, neo=None), aux)
+
+paper-faithful 形态:直接 += mem_out(无 alpha gate)。MAC caller 用 aux["mem_out"] 填
+fresh_mem 位置;NM-zero ablation 走 xinhe_model.py 的 mem_alpha_override 参数(在那里
+零化 fresh_proj),不需要 NeuralMemoryPair 这层介入。
 
 LayerMemState.neo 永远 None(为兼容旧字段保留位置),Neo 没有 episode 内状态。
 """
@@ -223,10 +226,9 @@ class NeuralMemoryPair(nn.Module):
         hippo_retention: float = 0.99,
         hippo_base_lr: float = 1e-2,
         chunk_size: int = 64,
-        alpha_logit_init: float = -5.0,
-        alpha_min_clamp: float = 0.02,
         phase: str = "P-cap",
         gate_entropy_lambda: float = 0.01,
+        disable_neo: bool = False,
     ):
         super().__init__()
         assert phase in ("P-cap", "Operational"), f"unknown phase: {phase}"
@@ -235,9 +237,9 @@ class NeuralMemoryPair(nn.Module):
         self.d_total = d_total
         self.n_heads = n_heads
         self.d_head = d_head
-        self.alpha_min = float(alpha_min_clamp)
         self.gate_entropy_lambda = float(gate_entropy_lambda)
         self.phase = phase
+        self.disable_neo = bool(disable_neo)
 
         # Hippo:TTT inner SGD via NeuralMemory(快适配,episode 内演化)
         self.hippocampus = self._build_neural_memory(
@@ -253,9 +255,6 @@ class NeuralMemoryPair(nn.Module):
         # 内容感知 gate:q from x;<q, r_h>/<q, r_n> 决定权重
         self.gate_q = nn.Linear(d_total, d_total, bias=False)
         nn.init.xavier_uniform_(self.gate_q.weight)
-
-        # alpha 开度:sigmoid(alpha_logit).clamp(alpha_min);受 mem_alpha_override 覆写
-        self.alpha_logit = nn.Parameter(torch.tensor(float(alpha_logit_init)))
 
         # 控制 mem_out 跟 attn_out 同量级,避免幅值竞争盖住 backbone
         self.mem_rmsnorm = AdaptiveRMSNorm(d_total)
@@ -344,17 +343,15 @@ class NeuralMemoryPair(nn.Module):
         self,
         x: torch.Tensor,
         layer_state: Optional[LayerMemState] = None,
-        mem_alpha_override: Optional[float] = None,
     ) -> tuple[torch.Tensor, LayerMemState, dict]:
         """
         x:           (B, T, d_total)
         layer_state: 上一次 forward 的 LayerMemState,None 时 lazy init
-        mem_alpha_override: float 或 None。给 learning_session 阶段 1 传 0.0 走干净路径
 
         返回:
-            x_out:      (B, T, d_total) — 已加 alpha*mem_out 残差
+            x_out:      (B, T, d_total) — 已加 mem_out 残差(paper-faithful 直接 +=)
             new_state:  LayerMemState(hippo=NeuralMemState, neo=None)
-            aux:        {"gate_entropy_reg_loss": Tensor, ...}
+            aux:        {"gate_entropy_reg_loss": Tensor, "mem_out": Tensor, ...}
         """
         if layer_state is None:
             layer_state = LayerMemState(None, None)
@@ -365,6 +362,21 @@ class NeuralMemoryPair(nn.Module):
         r_h, h_new = self.hippocampus(x, state=h_old, read_before_write=True)
         if not self._daytime_plastic_hippo:
             h_new = h_old
+
+        if self.disable_neo:
+            # paper-faithful Titans MAC:仅 Hippo 路径,无 gate / Neo
+            mem_out = self.mem_rmsnorm(r_h)
+            self.last_mem_out_norm = mem_out.detach().float().norm()
+            x_out = x + mem_out
+            zero = torch.zeros((), device=x.device, dtype=x.dtype)
+            aux = {
+                "gate_entropy": zero,
+                "gate_entropy_reg_loss": zero,
+                "gate_mean_h": torch.ones((), device=x.device, dtype=x.dtype),
+                "gate_mean_n": zero,
+                "mem_out": mem_out,
+            }
+            return x_out, LayerMemState(hippo=h_new, neo=None), aux
 
         # 2. Neo:普通 multi-head MLP,无 state、无 vmap、无 chunk SGD
         r_n = self.neocortex(x)
@@ -382,22 +394,15 @@ class NeuralMemoryPair(nn.Module):
         # 旁路诊断:存 scalar tensor,延迟 .item() 到 trainer log block(避免 forward 里 CPU sync)
         self.last_mem_out_norm = mem_out.detach().float().norm()
 
-        # 5. alpha 开度。reparam 保证 alpha ∈ [alpha_min, 1] 且全程可导:
-        #    alpha = alpha_min + (1 - alpha_min) * sigmoid(alpha_logit)
-        #    旧版 sigmoid().clamp(min) 在 sigmoid<min 时梯度断 → alpha_logit 永不学。
-        if mem_alpha_override is not None:
-            alpha = torch.tensor(float(mem_alpha_override), device=x.device, dtype=x.dtype)
-        else:
-            alpha = self.alpha_min + (1.0 - self.alpha_min) * torch.sigmoid(self.alpha_logit)
-
-        x_out = x + alpha * mem_out
+        # 5. paper-faithful 直接 += mem_out(无 alpha gate)。
+        # NM-zero ablation 由 caller(xinhe_model.py)在 fresh_proj 位置零化,不在这里介入。
+        x_out = x + mem_out
 
         # 6. gate 熵正则:防 gate 单边塌缩(λ * (-H) 加入 loss → 等价 λ 最大化 H)
         gate_entropy = -(gate.clamp_min(1e-9).log() * gate).sum(dim=-1).mean()
         aux = {
             "gate_entropy": gate_entropy.detach(),
             "gate_entropy_reg_loss": -self.gate_entropy_lambda * gate_entropy,
-            "alpha_eff": (alpha.detach() if torch.is_tensor(alpha) else torch.tensor(alpha)),
             "gate_mean_h": gate[..., 0].mean().detach(),
             "gate_mean_n": gate[..., 1].mean().detach(),
             "mem_out": mem_out,   # MAC 模式下 caller 从这里取原 mem 输出去填 fresh_mem 位置

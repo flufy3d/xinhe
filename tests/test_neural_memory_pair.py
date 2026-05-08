@@ -93,25 +93,36 @@ def test_forward_with_explicit_layer_state():
     assert not torch.allclose(s1_lu, s2_lu)
 
 
-# ── alpha override / mem_alpha=0 干净路径 ─────────────────────────
+# ── x_out = x + mem_out(paper-faithful 直接 +=)──────────────────
 
 
-def test_mem_alpha_override_zero_yields_pure_residual():
+def test_x_out_equals_x_plus_mem_out():
+    """paper-faithful:x_out = x + mem_out。aux["mem_out"] 是 caller 注入 fresh_mem 用的同一个张量。"""
     pair = _build_pair()
     pair.eval()
     x = torch.randn(2, 16, 32)
-    x_out, _, _ = pair(x, mem_alpha_override=0.0)
-    assert torch.allclose(x_out, x, atol=1e-6)
-
-
-def test_mem_alpha_override_one_full_memory():
-    """alpha=1 时 x_out = x + mem_out,差值 = mem_out 不为 0。"""
-    pair = _build_pair()
-    pair.eval()
-    x = torch.randn(2, 16, 32)
-    x_out, _, _ = pair(x, mem_alpha_override=1.0)
+    x_out, _, aux = pair(x)
+    assert torch.allclose(x_out, x + aux["mem_out"], atol=1e-6)
+    # mem_out 应有非平凡贡献(不是常零)
     diff = (x_out - x).abs().mean().item()
-    assert diff > 1e-4   # mem_out 应有非平凡贡献
+    assert diff > 1e-4
+
+
+def test_disable_neo_yields_pure_hippo_path():
+    """disable_neo=True 时 forward 跳过 Neo / gate,mem_out = mem_rmsnorm(r_h)。
+    Pure Titans MAC 形态(paper-faithful)。"""
+    pair = _build_pair(disable_neo=True)
+    pair.eval()
+    x = torch.randn(2, 16, 32)
+    x_out, _, aux = pair(x)
+    # 形状不变 + mem_out 非平凡
+    assert x_out.shape == x.shape
+    assert torch.allclose(x_out, x + aux["mem_out"], atol=1e-6)
+    assert (x_out - x).abs().mean().item() > 1e-4
+    # gate 相关辅助统计应被压平为 (h=1, n=0, entropy=0)
+    assert aux["gate_mean_h"].item() == pytest.approx(1.0)
+    assert aux["gate_mean_n"].item() == pytest.approx(0.0)
+    assert aux["gate_entropy_reg_loss"].item() == pytest.approx(0.0)
 
 
 # ── daytime_plastic 切换 ─────────────────────────────────────────
@@ -180,9 +191,8 @@ def test_gradient_flow_through_pair():
     loss = x_out.pow(2).mean() + aux["gate_entropy_reg_loss"]
     loss.backward()
 
-    # Pair 顶层 gate / alpha
+    # Pair 顶层 gate
     assert pair.gate_q.weight.grad is not None
-    assert pair.alpha_logit.grad is not None
     # Hippo NeuralMemory 内部静态参数(meta-params,gate_q-like)
     assert any(p.grad is not None for p in pair.hippocampus.parameters() if p.requires_grad)
     # Neo 是普通 MLP,所有 weight 都该有 grad(走 backbone backprop)

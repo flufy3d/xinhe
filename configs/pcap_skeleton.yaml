@@ -1,0 +1,41 @@
+# Skeleton-only fast-iter 入口 —— 配 curriculum_pcap_skeleton.yaml 用。
+#
+# 跟 pcap.yaml 区别:
+#   - curriculum_file 改 curriculum_pcap_skeleton.yaml(单 stage 100% skeleton)
+#   - max_steps 3000 → 1000(架构验证用,通过门槛后再回 pcap.yaml 跑完整 P-cap)
+#
+# 跑训练:
+#   python scripts/remote.py start python scripts/train.py --config configs/pcap_skeleton.yaml
+base: qwen3.5-0.8b.yaml
+
+curriculum_file: curriculum_pcap_skeleton.yaml
+
+state:
+  n_persistent_per_layer: 4
+  # fresh_mem 大小(NM 输出注入到 hidden 的 token 数)。默认 16 跟 v9.5 baseline 一致。
+  # Phase 3 探索方向:Titans MAC M_t(K) 也是 8-16 量级,改小可能强迫 NM 学更紧的压缩。
+  # 候选值:16(baseline)/ 8 / 4。0 = 完全禁用 fresh_mem(纯 NM-W 跨 turn 通道,无序列写出)。
+  n_mem_tokens: 16
+  # Phase 3 v3:屏蔽 Neo MLP,paper-faithful Titans MAC = 单 Hippo 路径。
+  # v1 (default+Neo+gate) read ΔNM=0pp;v2 (Hippo lr5e-2/chunk32+Neo) read ΔNM=0pp。
+  # v3 单变量从 v1 改:disable_neo=true,Hippo 调参回 default 隔离 Neo 干扰假设。
+  hippo_base_lr: 1.0e-2          # default(v1 同步)
+  mem_chunk_size: 128            # default(v1 同步)
+  disable_neo: true              # v3 关 Neo,纯 Hippo 路径
+
+training:
+  grad_accum_steps: 4
+  dtype: bfloat16
+  compile_backbone_layers: true   # 局部 compile 每个 Qwen layer body(NM 在 compile 外)
+
+stage_overrides:
+  pcap_skeleton:
+    learning_rate: 7.0e-5
+    warmup_steps: 100
+    weight_decay: 0.1
+    batch_size: 2
+    grad_accum_steps: 4
+    turn_max_tokens: 768
+    max_turns_per_episode: 16
+    tbptt_turns: 3
+    max_steps: 1000

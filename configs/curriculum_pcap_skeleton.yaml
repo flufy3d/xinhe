@@ -1,0 +1,55 @@
+# Skeleton-only fast-iter 课程 — 用于 Phase 0+1 完成后的架构诊断/敏捷迭代。
+#
+# 目的:把 mix 改成 100% skeleton,信号最纯(novel/congliu/longcite/dialog 都没有 value_span
+# 监督,对 NIH 召回不提供梯度)。max_steps=1000 而不是 3000 → 30 分钟看 EWMA 稳定 + S1
+# strict eval 是否往 80%+ 走,不过门槛回 Phase 3 调架构(N_m / hippo_lr / aux loss / LoRA scope),
+# 单变量隔离一次只动一项。
+#
+# 跟 curriculum_pcap.yaml 共用 5-source mix 的 builder(`kind: mix_dynamic`,ratio 1.0
+# 等价于 100% 单源,不绕 builder 路径)。
+#
+# 跑训练:
+#   python scripts/remote.py deploy
+#   python scripts/remote.py start python scripts/train.py --config configs/pcap_skeleton.yaml
+#   python scripts/remote.py logs -f
+#
+# 完成后跑 strict eval:
+#   python scripts/remote.py run "cd /root/workspace/xinhe && PYTHONUNBUFFERED=1 uv run python -u \\
+#       scripts/validate_memory.py --checkpoint checkpoints/<latest>.pt \\
+#       --config configs/pcap_skeleton.yaml --val data/skeleton/val.jsonl \\
+#       --max-episodes 200 --output checkpoints/validate_memory_skeleton.json"
+#
+# 放行门槛:S1 first-token + free-gen 都 ≥ 90% AND ΔNM ≥ 30pp。
+
+training_defaults:
+  learning_rate: 3.0e-4
+  grad_clip: 1.0
+  gradient_checkpointing: false
+  log_every: 10
+  eval_every: 200                # 每 200 步看一次 val,够看曲线
+  save_every: 200                # 每 200 步存 ckpt,避免 1000 步只剩一个
+
+stages:
+  - name: "pcap_skeleton"
+    data:
+      kind: "mix_dynamic"
+      sources:
+        - {path: "data/skeleton/train.jsonl", ratio: 1.0, tag: "skeleton"}
+      val_sources:
+        - {path: "data/skeleton/val.jsonl",   ratio: 1.0, tag: "skeleton"}
+      num_train: 50000
+      num_val: 200
+      seed: 42
+    training:
+      max_turns_per_episode: 16
+      turn_max_tokens: 768
+      plugin_lr_multiplier: 1.0
+      value_weight_cap: 1.0
+      phase: "P-cap"
+      per_segment_checkpoint: false
+      max_steps: 1000              # 3000 → 1000(敏捷迭代)
+      warmup_steps: 100            # 200 → 100(短训练 cycle)
+      weight_decay: 0.1
+      use_joint_early_stop: false
+    val_sets:
+      - {name: "skeleton_val", path: "data/skeleton/val.jsonl"}

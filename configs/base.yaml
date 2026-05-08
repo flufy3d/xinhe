@@ -21,8 +21,6 @@ state:
   hippo_retention: 0.99           # Hippo 每 chunk 保留 99% 自然遗忘
   hippo_base_lr: 1.0e-2           # Hippo 内层 test-time SGD lr 上限
   mem_chunk_size: 128             # 64→128 把 NM TTT 小 kernel 风暴的 launch overhead 摊薄
-  alpha_logit_init: -5.0          # sigmoid(-5)≈0.007 保守起步
-  alpha_min_clamp: 0.02
   gate_entropy_lambda: 0.01
   phase: "P-cap"                  # P-cap | Operational
 

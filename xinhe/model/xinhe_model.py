@@ -102,10 +102,9 @@ class XinheModel(nn.Module):
                 hippo_retention=config.hippo_retention,
                 hippo_base_lr=config.hippo_base_lr,
                 chunk_size=config.mem_chunk_size,
-                alpha_logit_init=config.alpha_logit_init,
-                alpha_min_clamp=config.alpha_min_clamp,
                 phase=config.phase,
                 gate_entropy_lambda=config.gate_entropy_lambda,
+                disable_neo=getattr(config, "disable_neo", False),
             )
             for layer_idx in self._hook_layer_indices
         })
@@ -245,8 +244,7 @@ class XinheModel(nn.Module):
             pair: NeuralMemoryPair = self.memory[str(layer_idx)]
             old_state = state.get(layer_idx, LayerMemState(None, None))
             x_in = self._d_total_in(hidden_states)
-            _x_out, new_state, aux = pair(x_in, layer_state=old_state,
-                                          mem_alpha_override=mem_alpha_override)
+            _x_out, new_state, aux = pair(x_in, layer_state=old_state)
             new_layers[layer_idx] = new_state
             aux_loss_terms.append(aux["gate_entropy_reg_loss"])
             if N_m == 0:
@@ -492,13 +490,5 @@ class XinheModel(nn.Module):
         return sum(p.numel() for p in self.parameters())
 
     def state_stats(self, state: XinheMemoryState) -> dict:
-        """聚合 per-layer Hippo/Neo weight norm + alpha + gate entropy(简单平均)。"""
-        stats = {"layers": {}, "n_layers": len(state.layers)}
-        alphas = []
-        for layer_idx, lyr in state.items():
-            pair: NeuralMemoryPair = self.memory[str(layer_idx)]
-            alpha = torch.sigmoid(pair.alpha_logit).item()
-            alphas.append(alpha)
-            stats["layers"][layer_idx] = {"alpha": alpha}
-        stats["alpha_mean"] = sum(alphas) / max(len(alphas), 1)
-        return stats
+        """聚合 per-layer 状态简要(目前仅层数)。"""
+        return {"layers": {}, "n_layers": len(state.layers)}

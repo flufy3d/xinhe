@@ -138,7 +138,6 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
         "per_segment_checkpoint": "per_segment_checkpoint",
         "learning_rate": "learning_rate",
         "plugin_lr_multiplier": "plugin_lr_multiplier",
-        "freeze_alpha": "freeze_alpha",
         "freeze_gate_q": "freeze_gate_q",
         "value_weight_cap": "value_weight_cap",
         "weight_decay": "weight_decay",

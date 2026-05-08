@@ -143,9 +143,7 @@ def test_gradient_flow(model):
     loss = result_2["loss"]
     loss.backward()
 
-    # NeuralMemoryPair 关键参数应该有 grad
-    # pure MAC:alpha_logit 不在 loss 路径(x_out 被丢弃,只用 mem_out 填 fresh_mem)
-    # 所以 alpha_logit.grad 是 None,不再 assert。gate_q + mem_token_init 才是关键
+    # NeuralMemoryPair 关键参数应该有 grad(gate_q + mem_token_init)
     pair = next(iter(model.memory.values()))
     assert pair.gate_q.weight.grad is not None
     if model.mem_token_init is not None:
@@ -168,7 +166,7 @@ def test_generate(model):
 
 
 def test_trainable_params(model):
-    """可训练参数数量 > 0(memory + gate_q + alpha 等)"""
+    """可训练参数数量 > 0(memory + gate_q 等)"""
     params = model.get_trainable_params()
     assert len(params) > 0
     count = model.get_trainable_param_count()

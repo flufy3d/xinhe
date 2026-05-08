@@ -83,16 +83,11 @@ class Trainer:
         self._ema_acc = None
 
     def _apply_freezes(self, config: XinheConfig):
-        """按配置冻结 NeuralMemoryPair 内的 alpha / gate_q。
+        """按配置冻结 NeuralMemoryPair 内的 gate_q。
         plugin_lr_multiplier=0 等效冻结整个 memory。"""
         freeze_plugin = getattr(config, "plugin_lr_multiplier", 1.0) == 0
         for p in self.model.memory.parameters():
             p.requires_grad = not freeze_plugin
-
-        if getattr(config, "freeze_alpha", False):
-            for pair in self.model.memory.values():
-                pair.alpha_logit.requires_grad = False
-            print("  [freeze_alpha] alpha_logit 全部冻结")
 
         if getattr(config, "freeze_gate_q", False):
             for pair in self.model.memory.values():
@@ -167,13 +162,10 @@ class Trainer:
             print(f"  [最终 val @ step {self.global_step}]")
             self._validate()
 
-        # 取一个 layer 的 alpha 平均当作整体记忆开度指标
-        alphas = [torch.sigmoid(p.alpha_logit).item() for p in self.model.memory.values()]
-        alpha_mean = sum(alphas) / max(len(alphas), 1)
         if self._early_stopped:
-            print(f"训练已收敛, 共 {self.global_step} 步, alpha_mean={alpha_mean:.4f}")
+            print(f"训练已收敛, 共 {self.global_step} 步")
         else:
-            print(f"训练完成, 共 {self.global_step} 步, alpha_mean={alpha_mean:.4f}")
+            print(f"训练完成, 共 {self.global_step} 步")
 
     def _train_epoch(self) -> float:
         """训练一个 epoch (遍历所有 episode)"""

@@ -56,13 +56,14 @@ class XinheConfig:
     hippo_base_lr: float = 1e-2      # Hippo 内层 test-time SGD lr 上限
     # NOTE: Neo 走标准 backprop,无 retention 概念;lr = outer learning_rate × plugin_lr_multiplier。
     mem_chunk_size: int = 64
-    alpha_logit_init: float = -5.0   # sigmoid(-5)≈0.007 保守起步
-    alpha_min_clamp: float = 0.02    # 防 alpha collapse 到 0
     gate_entropy_lambda: float = 0.01  # gate 熵正则,防单边塌缩
     phase: str = "P-cap"             # "P-cap" | "Operational",决定 Neo 默认 daytime_plastic
+    # 屏蔽 Neo MLP(paper-faithful Titans MAC = 仅 Hippo 路径)。
+    # True 时 forward 跳过 neocortex / gate 计算,mem_out = mem_rmsnorm(r_h)。
+    # neocortex/gate_q 参数仍正常 init/load(ckpt 兼容),只是 forward 不走它们。
+    disable_neo: bool = False
 
     # v9 freeze flags
-    freeze_alpha: bool = False       # 测试基线时可冻 alpha
     freeze_gate_q: bool = False      # 测试基线时可冻 gate
 
     # 编译加速(只对 backbone 单 transformer 块,不包 NeuralMemoryPair —
@@ -192,10 +193,9 @@ class XinheConfig:
                 "hippo_retention": "hippo_retention",
                 "hippo_base_lr": "hippo_base_lr",
                 "mem_chunk_size": "mem_chunk_size",
-                "alpha_logit_init": "alpha_logit_init",
-                "alpha_min_clamp": "alpha_min_clamp",
                 "gate_entropy_lambda": "gate_entropy_lambda",
                 "phase": "phase",
+                "disable_neo": "disable_neo",
             },
             "training": {
                 "value_weight_cap": "value_weight_cap",
@@ -205,7 +205,6 @@ class XinheConfig:
                 "batch_size": "batch_size",
                 "learning_rate": "learning_rate",
                 "plugin_lr_multiplier": "plugin_lr_multiplier",
-                "freeze_alpha": "freeze_alpha",
                 "freeze_gate_q": "freeze_gate_q",
                 "weight_decay": "weight_decay",
                 "grad_clip": "grad_clip",
