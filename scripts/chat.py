@@ -135,8 +135,8 @@ def main():
         def _strip_orig_mod(sd: dict) -> dict:
             return {k.replace("_orig_mod.", ""): v for k, v in sd.items()}
         model.memory.load_state_dict(_strip_orig_mod(checkpoint["memory_pair_state"]), strict=True)
-        # v9.5 MAC 参数(mem_token_init / mac_inject_logit)
-        for key in ("mem_token_init", "mac_inject_logit"):
+        # v9.5 MAC 参数(mem_token_init)
+        for key in ("mem_token_init",):
             param = getattr(model, key, None)
             if param is not None and key in checkpoint:
                 with torch.no_grad():

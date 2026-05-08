@@ -51,8 +51,8 @@ def load_model_and_tokenizer(config, checkpoint_path, device):
                 "checkpoint 缺少 'memory_pair_state' 键。仅兼容 v9+ 格式。"
             )
         model.memory.load_state_dict(checkpoint["memory_pair_state"], strict=True)
-        # v9.5 MAC 参数(mem_token_init / mac_inject_logit)可选加载
-        for key in ("mem_token_init", "mac_inject_logit"):
+        # v9.5 MAC 参数(mem_token_init)可选加载
+        for key in ("mem_token_init",):
             param = getattr(model, key, None)
             if param is not None and key in checkpoint:
                 with torch.no_grad():

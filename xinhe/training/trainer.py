@@ -5,7 +5,7 @@ Trainer (v9.5) — 训练循环
 - state 跨 turn 传递,state 是 XinheMemoryState(per-layer LayerMemState 字典,
   paper-faithful 删除 mem_snapshots,跨 turn carry 走 NM weights 演化)
 - 截断 BPTT: 每 tbptt_turns 轮做 detach + backward + step
-- 训练参数:NeuralMemoryPair + fresh_mem + mac_inject_logit + LoRA(qkvo)
+- 训练参数:NeuralMemoryPair + fresh_mem + LoRA(qkvo)
   + per-layer K/V(K_pers/V_pers,在每个 full_attention 层独立)
 """
 import math
@@ -366,7 +366,7 @@ class Trainer:
         在 optimizer.step() 前调用(grad 已 clip)。grad 为 None 表示该参数本步无梯度。
         """
         out = {}
-        for name in ("mem_token_init", "mac_inject_logit"):
+        for name in ("mem_token_init",):
             p = getattr(self.model, name, None)
             out[name] = (
                 p.grad.detach().float().norm().item()
@@ -428,14 +428,10 @@ class Trainer:
 
         if self.global_step % self.config.log_every == 0:
             lr = self.scheduler.get_last_lr()[0]
-            # v9.5 通路效度指标:fresh_mem norm + inject 开度 + LoRA/K_pers 是否在学
+            # v9.5 通路效度指标:fresh_mem norm + LoRA/K_pers 是否在学
             mtok_norm = (
                 self.model.mem_token_init.detach().float().norm().item()
                 if getattr(self.model, "mem_token_init", None) is not None else 0.0
-            )
-            inject = (
-                torch.sigmoid(self.model.mac_inject_logit).item()
-                if getattr(self.model, "mac_inject_logit", None) is not None else 0.0
             )
             grads = getattr(self, "_last_mac_grads", None) or {}
             def _fg(k): return grads.get(k)
@@ -451,8 +447,7 @@ class Trainer:
             print(
                 f"  [Step {self.global_step}] ema_loss={self._ema_loss:.4f} "
                 f"ema_acc={self._ema_acc:.2%} lr={lr:.2e} "
-                f"inject={inject:.3f} mtok={mtok_norm:.3f} "
-                f"|g_inj|={_fmt(_fg('mac_inject_logit'))} "
+                f"mtok={mtok_norm:.3f} "
                 f"|g_mt|={_fmt(_fg('mem_token_init'))} "
                 f"|g_dec|={_fmt(_fg('to_decay_factor'))} "
                 f"|g_lora|={_fmt(_fg('lora'))} "
@@ -518,8 +513,6 @@ class Trainer:
         }
         if getattr(self.model, "mem_token_init", None) is not None:
             checkpoint["mem_token_init"] = self.model.mem_token_init.detach().cpu()
-        if getattr(self.model, "mac_inject_logit", None) is not None:
-            checkpoint["mac_inject_logit"] = self.model.mac_inject_logit.detach().cpu()
         # backbone addons(LoRA lora_A/B + per-layer K/V K_pers/V_pers):
         # 只取 trainable 的子张量(原 backbone weight frozen 不存)
         backbone_addons = {
@@ -551,18 +544,12 @@ class Trainer:
             )
         self.model.memory.load_state_dict(checkpoint["memory_pair_state"], strict=True)
 
-        # mem_token_init / mac_inject_logit 是 v9 + MAC 引入,旧 ckpt 可能有可能无
+        # mem_token_init 是 v9 + MAC 引入,旧 ckpt 可能有可能无
         if (getattr(self.model, "mem_token_init", None) is not None
                 and "mem_token_init" in checkpoint):
             with torch.no_grad():
                 self.model.mem_token_init.copy_(checkpoint["mem_token_init"].to(
                     self.model.mem_token_init.device
-                ))
-        if (getattr(self.model, "mac_inject_logit", None) is not None
-                and "mac_inject_logit" in checkpoint):
-            with torch.no_grad():
-                self.model.mac_inject_logit.copy_(checkpoint["mac_inject_logit"].to(
-                    self.model.mac_inject_logit.device
                 ))
 
         # backbone addons(v9.5 引入:LoRA + per-layer K/V),strict=False 兼容旧 ckpt

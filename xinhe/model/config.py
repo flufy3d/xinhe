@@ -6,7 +6,7 @@ paper-faithful 重构:
   - input-level persistent_mem(soft prompt)→ 删,改 per-layer K/V(在 attention 内拼接)
   - past_snapshots(跨 turn hidden carry)→ 删,跨 turn 走 NM weights 演化(paper way)
   - fresh_mem(NM 输出承载)→ 保留,paper 简化版
-  - mac_inject_logit → 软取消(init +10 ≈ paper sigmoid≈1.0)
+  - mac inject gating 删除(实测 inject 一直 = 1.0,直接 += mem_out 即可)
   - LoRA on q/k/v/o → 恢复(frozen backbone 适配 OOD 的根因修复)
 v8 的 read_scale / beta_proj / Delta-Rule W 已废弃。
 """
@@ -38,7 +38,6 @@ class XinheConfig:
     #   - 跨 turn carry:走 NM weights 演化(W 跨 turn 不重置),不再 prepend 过去 hidden
     n_persistent_per_layer: int = 16  # 每个 full_attention 层独立的 K/V tokens 数
     n_mem_tokens: int = 16            # 0 禁用;>0 每 turn 末插 N_mem 个,fresh_mem 承载 NM 输出
-    mac_inject_logit_init: float = 10.0  # +10 → sigmoid≈0.99996 ≈ paper 直接 +mem_out(软取消)
 
     # --- LoRA(v9.5 恢复:frozen backbone 适配 MAC OOD 的根因修复)---
     # 与 MAC 是 producer/consumer 协同(MAC 放 prefix,LoRA 学怎么读),不抢梯度。
@@ -196,7 +195,6 @@ class XinheConfig:
                 "alpha_logit_init": "alpha_logit_init",
                 "alpha_min_clamp": "alpha_min_clamp",
                 "gate_entropy_lambda": "gate_entropy_lambda",
-                "mac_inject_logit_init": "mac_inject_logit_init",
                 "phase": "phase",
             },
             "training": {

@@ -7,7 +7,7 @@ v9.5 paper-faithful 重构:
     在 attention 内拼接,paper Titans MAC Eq 11-13 形态)
   - 删 past_snapshots(跨 turn hidden carry,paper 没有这个,跨 turn 走 NM weights 演化)
   - 保留 fresh_mem(NM 输出承载点,paper M_t(K) 的简化版固定 N_m 位置)
-  - mac_inject_logit 软取消(init +10 ≈ paper sigmoid≈1.0,直接 += mem_out)
+  - 删 mac_inject_logit gating(实测 inject 全程 = 1.0,直接 += mem_out 即可,paper 形态)
   - 恢复 LoRA on q/k/v/o:frozen backbone 适配 MAC 输入的根因修复(MAC=producer / LoRA=consumer)
 state 是 XinheMemoryState(per-layer LayerMemState 字典,无 mem_snapshots)。
 """
@@ -154,15 +154,8 @@ class XinheModel(nn.Module):
                 torch.randn(self.n_mem_tokens, config.hidden_size)
                 * (config.hidden_size ** -0.5)
             )
-            # MAC 注入开度(paper 软取消):init 默认 +10 ≈ sigmoid 0.99996 ≈ paper 直接 += mem_out
-            # 保留参数 + 不冻结,模型自己决定:
-            #   - 末态 ≈ +10 不动 → paper 假设对,下轮可彻底删参数
-            #   - 末态自学小 → gating 仍有用,留 fallback
-            init_val = float(getattr(config, "mac_inject_logit_init", 10.0))
-            self.mac_inject_logit = nn.Parameter(torch.tensor(init_val))
         else:
             self.register_parameter("mem_token_init", None)
-            self.register_parameter("mac_inject_logit", None)
 
         self._pad_token_id: Optional[int] = None
 
@@ -259,16 +252,13 @@ class XinheModel(nn.Module):
             if N_m == 0:
                 return hidden_states  # 没启 mem tokens → memory 通路无写入点(纯 baseline)
             mem_proj = self._d_total_out(aux["mem_out"])  # (B, T_ext, hidden)
-            # 注入强度:override 走干净路径(learning_session phase 1 用 0.0),
-            # 否则 sigmoid(mac_inject_logit) 可学。起步 ~0.05 给模型 warmup 缓冲。
+            # paper-faithful:直接 += mem_out 到 fresh_mem 位置(实测 sigmoid gating 全程≈1)
+            # learning_session phase 1 走 mem_alpha_override=0.0 屏蔽注入(NM 内部 alpha 也=0)
+            fresh_proj = mem_proj[:, fresh_start:fresh_end, :]
             if mem_alpha_override is not None:
-                inject = torch.tensor(float(mem_alpha_override),
-                                      device=hidden_states.device,
-                                      dtype=hidden_states.dtype)
-            else:
-                inject = torch.sigmoid(self.mac_inject_logit).to(hidden_states.dtype)
+                fresh_proj = float(mem_alpha_override) * fresh_proj
             delta = torch.zeros_like(hidden_states)
-            delta[:, fresh_start:fresh_end, :] = inject * mem_proj[:, fresh_start:fresh_end, :]
+            delta[:, fresh_start:fresh_end, :] = fresh_proj
             return hidden_states + delta
 
         # 标准因果 mask(只覆盖 fresh_mem 前缀 + real 段)
@@ -491,9 +481,6 @@ class XinheModel(nn.Module):
             params += [p for p in self._d_total_out.parameters() if p.requires_grad]
         if self.mem_token_init is not None and self.mem_token_init.requires_grad:
             params.append(self.mem_token_init)
-        if (getattr(self, "mac_inject_logit", None) is not None
-                and self.mac_inject_logit.requires_grad):
-            params.append(self.mac_inject_logit)
         # LoRA 注入的 lora_A/B + 后续 per-layer K/V 的 K_pers/V_pers 都挂在 backbone 内
         params += [p for p in self.backbone.parameters() if p.requires_grad]
         return params

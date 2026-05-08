@@ -23,9 +23,8 @@ state:
   # v9.5 paper-faithful:
   #   - persistent memory 改 per-layer K/V(每个 full_attention 层独立,在 attention 内拼接)
   #   - past_snapshots 删除(跨 turn carry 走 NM weights 演化,paper way)
-  #   - mac_inject_logit init +10 ≈ sigmoid 0.99996 ≈ paper 直接 += mem_out(软取消)
+  #   - MAC 注入 paper 形态:直接 += mem_out 到 fresh_mem 位置(原 sigmoid gating 实测全程≈1,已删)
   n_persistent_per_layer: 4        # 每个 full_attention 层独立 K/V tokens 数
-  mac_inject_logit_init: 10.0       # paper 软取消;模型自行决定末态(≈10 印证 paper,< 7 说明仍需 gating)
 
 training:
   grad_accum_steps: 4

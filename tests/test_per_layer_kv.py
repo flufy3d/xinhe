@@ -66,7 +66,6 @@ def test_xinhe_qwen3_wrapper_full_integration():
         backbone_model_path="./models/qwen3.5-0.8b",
         hidden_size=1024, n_heads=8, head_dim=256,
         n_persistent_per_layer=4, n_mem_tokens=4,
-        mac_inject_logit_init=10.0,
         lora_rank=4, lora_alpha=8,
         freeze_backbone=True, per_segment_checkpoint=False,
         compile_backbone_layers=False, mem_chunk_size=4,
