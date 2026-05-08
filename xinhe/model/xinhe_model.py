@@ -16,9 +16,28 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional
 
+from cut_cross_entropy import linear_cross_entropy
+
 from .config import XinheConfig
 from .backbone import BackboneBase
 from .neural_memory_pair import NeuralMemoryPair, LayerMemState, XinheMemoryState
+
+
+@torch.no_grad()
+def _chunked_argmax(h: torch.Tensor, W: torch.Tensor, v_chunk: int = 4096) -> torch.Tensor:
+    """argmax(h @ W.T) without materializing (N, V). h:(N,D), W:(V,D) -> (N,)"""
+    N = h.shape[0]
+    V = W.shape[0]
+    running_max = torch.full((N,), float("-inf"), device=h.device, dtype=torch.float32)
+    running_argmax = torch.zeros((N,), dtype=torch.long, device=h.device)
+    for v_start in range(0, V, v_chunk):
+        v_end = min(v_start + v_chunk, V)
+        logits_chunk = (h @ W[v_start:v_end].T).float()
+        chunk_max, chunk_argmax = logits_chunk.max(dim=-1)
+        update = chunk_max > running_max
+        running_max = torch.where(update, chunk_max, running_max)
+        running_argmax = torch.where(update, chunk_argmax + v_start, running_argmax)
+    return running_argmax
 
 
 class XinheModel(nn.Module):
@@ -155,6 +174,7 @@ class XinheModel(nn.Module):
         pad_token_id: Optional[int] = None,
         weights: Optional[torch.Tensor] = None,
         mem_alpha_override: Optional[float] = None,
+        compute_logits: bool = True,
     ) -> dict:
         """
         参数:
@@ -164,6 +184,9 @@ class XinheModel(nn.Module):
             pad_token_id: padding 屏蔽
             weights: (B, T) per-token loss 权重
             mem_alpha_override: float|None。给 learning_session 阶段 1 传 0.0 走干净路径
+            compute_logits: True 时材化 (B,T,V) logits(eval/tests 路径);
+                            False 时走 cut_cross_entropy 快路径,result["logits"]=None,
+                            correct/total 用 chunked argmax 算(省 ~3GB / 4 turns)。
 
         返回 dict:
             logits, state_next, aux_loss, loss(labels 给定时), correct, total
@@ -174,10 +197,10 @@ class XinheModel(nn.Module):
             from torch.utils.checkpoint import checkpoint
             return checkpoint(
                 self._forward_impl,
-                input_ids, state, labels, weights, mem_alpha_override,
+                input_ids, state, labels, weights, mem_alpha_override, compute_logits,
                 use_reentrant=False,
             )
-        return self._forward_impl(input_ids, state, labels, weights, mem_alpha_override)
+        return self._forward_impl(input_ids, state, labels, weights, mem_alpha_override, compute_logits)
 
     def _forward_impl(
         self,
@@ -186,6 +209,7 @@ class XinheModel(nn.Module):
         labels: Optional[torch.Tensor],
         weights: Optional[torch.Tensor],
         mem_alpha_override: Optional[float],
+        compute_logits: bool = True,
     ) -> dict:
         B, T = input_ids.shape
         device = input_ids.device
@@ -275,53 +299,100 @@ class XinheModel(nn.Module):
         # 切回真实 token 段(loss 只在 T 上)
         content_output = content_output[:, real_start:real_end, :]
 
-        logits = self.lm_head(content_output)
-
         # 聚合 state next:per-layer NM state(跨 turn 通过 NM weights 演化承载,无 mem_snapshots)
         # 没经过 hook 的 layer_idx 沿用原 state(若有)
         merged: dict[int, LayerMemState] = dict(state.layers) if state.layers else {}
         merged.update(new_layers)
         state_next = XinheMemoryState(merged)
 
+        ref_dtype = content_output.dtype
+        ref_device = content_output.device
         aux_loss = (
             torch.stack(aux_loss_terms).sum()
             if aux_loss_terms
-            else torch.zeros((), device=logits.device, dtype=logits.dtype)
+            else torch.zeros((), device=ref_device, dtype=ref_dtype)
         )
 
+        if compute_logits:
+            # eval/tests 路径:材化 (B,T,V) logits(由调用方读 result["logits"] argmax)
+            logits = self.lm_head(content_output)
+            result = {
+                "logits": logits,
+                "state_next": state_next,
+                "aux_loss": aux_loss,
+            }
+            if labels is not None:
+                shift_logits = logits[:, :-1, :].contiguous()
+                shift_labels = labels[:, 1:].contiguous()
+                valid_count = (shift_labels != -100).sum()
+                if valid_count > 0:
+                    flat_logits = shift_logits.view(-1, shift_logits.size(-1))
+                    flat_labels = shift_labels.view(-1)
+                    if weights is not None:
+                        shift_weights = weights[:, 1:].contiguous().view(-1).to(flat_logits.dtype)
+                        safe_labels = flat_labels.clamp(min=0)
+                        per_token = F.cross_entropy(flat_logits, safe_labels, reduction="none")
+                        w_sum = shift_weights.sum().clamp(min=1e-8)
+                        ce_loss = (per_token * shift_weights).sum() / w_sum
+                    else:
+                        ce_loss = F.cross_entropy(flat_logits, flat_labels, ignore_index=-100)
+                    valid_mask = flat_labels != -100
+                    preds = flat_logits[valid_mask].argmax(dim=-1)
+                    targets = flat_labels[valid_mask]
+                    result["correct"] = (preds == targets).sum()
+                    result["total"] = valid_count
+                    result["loss"] = ce_loss + aux_loss
+                else:
+                    result["loss"] = torch.tensor(0.0, device=ref_device, requires_grad=True)
+                    result["correct"] = torch.tensor(0, device=ref_device)
+                    result["total"] = torch.tensor(0, device=ref_device)
+            return result
+
+        # 训练快路径:cut_cross_entropy 不材化 (B,T,V) logits → 省 ~3GB / 4 turns
         result = {
-            "logits": logits,
+            "logits": None,
             "state_next": state_next,
             "aux_loss": aux_loss,
         }
+        if labels is None:
+            return result
 
-        if labels is not None:
-            shift_logits = logits[:, :-1, :].contiguous()
-            shift_labels = labels[:, 1:].contiguous()
-            valid_count = (shift_labels != -100).sum()
-            if valid_count > 0:
-                flat_logits = shift_logits.view(-1, shift_logits.size(-1))
-                flat_labels = shift_labels.view(-1)
-                if weights is not None:
-                    shift_weights = weights[:, 1:].contiguous().view(-1).to(flat_logits.dtype)
-                    safe_labels = flat_labels.clamp(min=0)
-                    per_token = F.cross_entropy(flat_logits, safe_labels, reduction="none")
-                    w_sum = shift_weights.sum().clamp(min=1e-8)
-                    ce_loss = (per_token * shift_weights).sum() / w_sum
-                else:
-                    ce_loss = F.cross_entropy(flat_logits, flat_labels, ignore_index=-100)
-                valid_mask = flat_labels != -100
-                preds = flat_logits[valid_mask].argmax(dim=-1)
-                targets = flat_labels[valid_mask]
-                result["correct"] = (preds == targets).sum()
-                result["total"] = valid_count
-                # gate 熵正则加进总 loss
-                result["loss"] = ce_loss + aux_loss
-            else:
-                result["loss"] = torch.tensor(0.0, device=logits.device, requires_grad=True)
-                result["correct"] = torch.tensor(0, device=logits.device)
-                result["total"] = torch.tensor(0, device=logits.device)
+        shift_h = content_output[:, :-1, :].contiguous()           # (B, T-1, D)
+        shift_labels = labels[:, 1:].contiguous()                  # (B, T-1)
+        flat_h = shift_h.view(-1, shift_h.size(-1))                # (B*(T-1), D)
+        flat_labels = shift_labels.view(-1)                        # (B*(T-1),)
+        valid_mask = flat_labels != -100
+        valid_count = valid_mask.sum()
 
+        if valid_count == 0:
+            result["loss"] = torch.tensor(0.0, device=ref_device, requires_grad=True)
+            result["correct"] = torch.tensor(0, device=ref_device)
+            result["total"] = torch.tensor(0, device=ref_device)
+            return result
+
+        lm_w = self.lm_head.weight  # (V, D)
+        if weights is not None:
+            per_token = linear_cross_entropy(
+                flat_h, lm_w, flat_labels,
+                ignore_index=-100, reduction="none",
+            )  # (B*(T-1),) — ignored 位置 cut CE 自动给 0
+            shift_weights = weights[:, 1:].contiguous().view(-1).to(per_token.dtype)
+            shift_weights = shift_weights * valid_mask.to(shift_weights.dtype)
+            w_sum = shift_weights.sum().clamp(min=1e-8)
+            ce_loss = (per_token * shift_weights).sum() / w_sum
+        else:
+            ce_loss = linear_cross_entropy(
+                flat_h, lm_w, flat_labels,
+                ignore_index=-100, reduction="mean",
+            )
+
+        # chunked argmax(no_grad,不材化 (N, V))
+        valid_h = flat_h[valid_mask].detach()
+        preds = _chunked_argmax(valid_h, lm_w)
+        targets = flat_labels[valid_mask]
+        result["correct"] = (preds == targets).sum()
+        result["total"] = valid_count
+        result["loss"] = ce_loss + aux_loss
         return result
 
     def setup_device(self, device: torch.device):

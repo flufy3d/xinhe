@@ -24,7 +24,7 @@ state:
   #   - persistent memory 改 per-layer K/V(每个 full_attention 层独立,在 attention 内拼接)
   #   - past_snapshots 删除(跨 turn carry 走 NM weights 演化,paper way)
   #   - mac_inject_logit init +10 ≈ sigmoid 0.99996 ≈ paper 直接 += mem_out(软取消)
-  n_persistent_per_layer: 16        # 每个 full_attention 层独立 K/V tokens 数
+  n_persistent_per_layer: 4        # 每个 full_attention 层独立 K/V tokens 数
   mac_inject_logit_init: 10.0       # paper 软取消;模型自行决定末态(≈10 印证 paper,< 7 说明仍需 gating)
 
 training:
@@ -40,9 +40,9 @@ stage_overrides:
     learning_rate: 7.0e-5
     warmup_steps: 200             # LoRA + per-layer K/V + Congliu 同时引入新分布,缓和点
     weight_decay: 0.1             # 0.01 → 0.1 paper 对齐;LoRA 翻倍可训参数后防过拟合
-    batch_size: 1                 # bs=2 实测 23/24GB 太紧 + util 14% 不提升 → 回退 bs=1
-    grad_accum_steps: 8           # 14GB 利用率低但安全,GPU util 低瓶颈在 IO/CPU 不在 batch
+    batch_size: 2                 # cut_cross_entropy 落地后 bs=1 仅 15.6GB(原 20GB),试 bs=2
+    grad_accum_steps: 4           # bs×accum=8 effective batch 与之前等价
     turn_max_tokens: 768          # 512 → 768 给 Congliu paragraph 留余量
     max_turns_per_episode: 16     # 8 → 16 长 episode
-    tbptt_turns: 4                # 2 → 4 减一半 backward 次数,GPU 连续 forward 时间 2×;显存涨 50%
+    tbptt_turns: 3                # bs=2 显存吃紧 4→3 留 ~6GB 余量,backward 频次 +33%
     max_steps: 3000               # 1000 → 3000

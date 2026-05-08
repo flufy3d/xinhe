@@ -109,7 +109,8 @@ class Trainer:
         param_groups = []
         if plugin_params:
             param_groups.append({"params": plugin_params, "lr": lr * plugin_mult})
-        return torch.optim.AdamW(param_groups, weight_decay=config.weight_decay)
+        # fused=True:CUDA fused 内核,m/v/master 更新单 kernel,省 ~200MB 临时缓冲 + 2-3× 加速
+        return torch.optim.AdamW(param_groups, weight_decay=config.weight_decay, fused=True)
 
     def _build_scheduler(self):
         """Cosine schedule with linear warmup + min LR clamp (1% of peak)。"""
@@ -232,7 +233,12 @@ class Trainer:
 
             with torch.amp.autocast("cuda", dtype=self.dtype):
                 # model.forward 内部仍叫 segment（纯实现细节，与业务 turn 解耦）
-                result = self.model(turn_ids, state, labels=labels, pad_token_id=self.pad_token_id, weights=weights)
+                # compute_logits=False 走 cut_cross_entropy 快路径,不材化 (B,T,V=248320) logits
+                # 4 turns 累积省 ~3GB(probe 实测)。trainer 不读 result["logits"]
+                result = self.model(
+                    turn_ids, state, labels=labels, pad_token_id=self.pad_token_id,
+                    weights=weights, compute_logits=False,
+                )
 
             state = result["state_next"]
             turn_loss = result["loss"]
