@@ -136,6 +136,7 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
         "grad_accum_steps": "grad_accum_steps",
         "gradient_checkpointing": "gradient_checkpointing",
         "per_segment_checkpoint": "per_segment_checkpoint",
+        "mem_out_real_alpha": "mem_out_real_alpha",
         "learning_rate": "learning_rate",
         "plugin_lr_multiplier": "plugin_lr_multiplier",
         "freeze_gate_q": "freeze_gate_q",

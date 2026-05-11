@@ -36,5 +36,6 @@ stages:
       warmup_steps: 50
       weight_decay: 0.1
       use_joint_early_stop: false
+      mem_out_real_alpha: 0.1   # iter4 突破: MAC + MAL 混合,NM 输出直通 lm_head(详见 docs/v9.5_iter4)
     val_sets:
       - {name: "probe_val", path: "data/recall_probe/val.jsonl"}

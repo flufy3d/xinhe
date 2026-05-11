@@ -250,13 +250,19 @@ class XinheModel(nn.Module):
             if N_m == 0:
                 return hidden_states  # 没启 mem tokens → memory 通路无写入点(纯 baseline)
             mem_proj = self._d_total_out(aux["mem_out"])  # (B, T_ext, hidden)
-            # paper-faithful:直接 += mem_out 到 fresh_mem 位置(实测 sigmoid gating 全程≈1)
-            # learning_session phase 1 走 mem_alpha_override=0.0 屏蔽注入(NM 内部 alpha 也=0)
+            # MAC (paper-faithful): fresh_mem 位置 += mem_out (sigmoid gating 实测≈1, 直接加)
+            # MAL (iter4): real 位置 += alpha * mem_out_real, alpha>0 时启用,给 NM 直通 lm_head
+            # learning_session phase 1 走 mem_alpha_override=0.0 屏蔽两路注入 (NM-zero eval 也走这)
             fresh_proj = mem_proj[:, fresh_start:fresh_end, :]
+            real_proj = mem_proj[:, real_start:real_end, :]
             if mem_alpha_override is not None:
                 fresh_proj = float(mem_alpha_override) * fresh_proj
+                real_proj = float(mem_alpha_override) * real_proj
             delta = torch.zeros_like(hidden_states)
             delta[:, fresh_start:fresh_end, :] = fresh_proj
+            real_alpha = float(getattr(self.config, "mem_out_real_alpha", 0.0))
+            if real_alpha > 0:
+                delta[:, real_start:real_end, :] = real_alpha * real_proj
             return hidden_states + delta
 
         # 标准因果 mask(只覆盖 fresh_mem 前缀 + real 段)
@@ -417,12 +423,15 @@ class XinheModel(nn.Module):
         eos_token_id: Optional[int] = None,
         repetition_penalty: float = 1.2,
         token_callback: Optional[callable] = None,
+        pad_token_id: Optional[int] = None,
     ) -> tuple[torch.Tensor, XinheMemoryState]:
         self.eval()
         B = input_ids.shape[0]
         generated = input_ids.clone()
+        if pad_token_id is not None:
+            self._pad_token_id = pad_token_id
 
-        result = self.forward(input_ids, state)
+        result = self.forward(input_ids, state, pad_token_id=pad_token_id)
         next_logits = result["logits"][:, -1, :].clone()
         del result
 
@@ -462,7 +471,25 @@ class XinheModel(nn.Module):
             next_logits = result["logits"][:, -1, :].clone()
             del result
 
-        result = self.forward(generated, state)
+        # 关键:state 演化必须用 turn_max_tokens padded 输入,匹配训练分布。
+        # NM chunk_size=mem_chunk_size,变长输入触发的 inner SGD 与训练不一致,
+        # 实测变长 chat 跨 turn 召回 6%,padded 后 100%(scripts/_scratch probe 验证)。
+        seg_len = getattr(self.config, "turn_max_tokens", 128)
+        pad_id = getattr(self, "_pad_token_id", None)
+        if pad_id is None:
+            pad_id = 0
+        B_, T_gen = generated.shape
+        if T_gen < seg_len:
+            pad_tensor = torch.full(
+                (B_, seg_len - T_gen), int(pad_id),
+                dtype=generated.dtype, device=generated.device,
+            )
+            generated_for_state = torch.cat([generated, pad_tensor], dim=1)
+        elif T_gen > seg_len:
+            generated_for_state = generated[:, :seg_len]
+        else:
+            generated_for_state = generated
+        result = self.forward(generated_for_state, state, pad_token_id=int(pad_id))
         state_next = result["state_next"]
 
         return generated, state_next

@@ -286,6 +286,7 @@ def main():
                     top_p=args.top_p,
                     eos_token_id=eos_id,
                     token_callback=_stream_token,
+                    pad_token_id=tokenizer.pad_token_id,
                 )
             print()  # 换行
         else:
@@ -298,6 +299,7 @@ def main():
                     temperature=args.temperature,
                     top_p=args.top_p,
                     eos_token_id=eos_id,
+                    pad_token_id=tokenizer.pad_token_id,
                 )
             new_ids = generated_ids[0, len(input_ids):].tolist()
             response = tokenizer.decode(new_ids, skip_special_tokens=False)

@@ -85,6 +85,11 @@ class XinheConfig:
     grad_accum_steps: int = 1
     gradient_checkpointing: bool = False
     per_segment_checkpoint: bool = False  # v9 必须关:vmap(grad) ↔ checkpoint saved_hooks 冲突
+    # MAC + MAL 混合: NM 输出在 real token 位置直接 side-inject (Titans paper MAL 形态),
+    # 绕过 attention 给 NM → lm_head 一条直接梯度通路。配合 paper-faithful fresh_mem 注入(MAC)。
+    # 实测 0.1 让 recall_probe read first-token 从 baseline 10% 跳到 100% (见 docs/v9.5_iter4)。
+    # 0 = paper-faithful 纯 MAC (旧行为); >0 = MAC + MAL 混合。
+    mem_out_real_alpha: float = 0.0
     resume_from: str = ""
     early_stop_loss: float = 0.0
     early_stop_patience: int = 0
@@ -211,6 +216,7 @@ class XinheConfig:
                 "grad_accum_steps": "grad_accum_steps",
                 "gradient_checkpointing": "gradient_checkpointing",
                 "per_segment_checkpoint": "per_segment_checkpoint",
+                "mem_out_real_alpha": "mem_out_real_alpha",
                 "compile_backbone_layers": "compile_backbone_layers",
                 "resume_from": "resume_from",
                 "early_stop_loss": "early_stop_loss",
