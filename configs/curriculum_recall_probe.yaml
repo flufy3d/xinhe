@@ -1,0 +1,40 @@
+# 跨 turn 召回探针 — 单 stage curriculum。
+#
+# 配 configs/recall_probe.yaml 用。stage 名 recall_probe,数据走 mix_dynamic
+# (虽然只有 1 个 source,但走 builder 与现有路径一致)。
+
+training_defaults:
+  learning_rate: 1.0e-4
+  grad_clip: 1.0
+  gradient_checkpointing: false
+  log_every: 20
+  eval_every: 200
+  save_every: 500
+
+stages:
+  - name: "recall_probe"
+    data:
+      kind: "mix_dynamic"
+      sources:
+        - {path: "data/recall_probe/train.jsonl", ratio: 1.0, tag: "recall_probe"}
+      val_sources:
+        - {path: "data/recall_probe/val.jsonl",   ratio: 1.0, tag: "recall_probe"}
+      num_train: 5000
+      num_val: 200
+      seed: 42
+    training:
+      max_turns_per_episode: 4
+      turn_max_tokens: 128
+      tbptt_turns: 4
+      batch_size: 4
+      grad_accum_steps: 2
+      plugin_lr_multiplier: 1.0
+      value_weight_cap: 1.0
+      phase: "P-cap"
+      per_segment_checkpoint: false
+      max_steps: 2000
+      warmup_steps: 50
+      weight_decay: 0.1
+      use_joint_early_stop: false
+    val_sets:
+      - {name: "probe_val", path: "data/recall_probe/val.jsonl"}

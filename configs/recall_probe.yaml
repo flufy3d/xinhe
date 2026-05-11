@@ -1,0 +1,60 @@
+# 跨 turn 召回探针实验入口(2026-05-11)
+#
+# 目的:在 *极简* 设置下隔离测一件事 — TBPTT 窗口 = max_turns_per_episode
+# 没有 mid-episode detach 时,架构能不能学到固定 distance=3 的跨 turn 召回?
+#
+# 数据:scripts/generate_recall_probe.py 生成,5000 train / 300 val,
+#       每 episode 4 turns、固定 write@turn0 / read@turn3。
+#
+# 实验设计:
+#   - tbptt_turns=4 == max_turns_per_episode=4 → 全 BPTT,梯度可达 turn 0 的 W 更新
+#   - turn 短(96 token cap)+ disable_neo + N_p=4 + N_m=16(与 ablation v3 一致)
+#   - 2000 step,bs=4*accum=2,有效 batch=8 episode/step ≈ 16000 episode 训过(3.2 epoch)
+#
+# 判定标准:
+#   - 拟合(read first-token ΔNM > +30pp、free-gen > 50%) → 架构活,被 TBPTT/规模杀
+#   - 仍 0pp → LoRA + 16 fresh_mem 注入方式有更底层表征断层
+#
+# 跑训练:
+#   python scripts/remote.py upload configs/recall_probe.yaml configs/curriculum_recall_probe.yaml
+#   python scripts/remote.py upload data/recall_probe/
+#   python scripts/remote.py start python scripts/train.py --config configs/recall_probe.yaml
+#   python scripts/remote.py logs -f
+#
+# strict eval:
+#   python scripts/remote.py run "cd /root/workspace/xinhe && PYTHONUNBUFFERED=1 uv run python -u \
+#       scripts/validate_memory.py --checkpoint checkpoints/<latest>.pt \
+#       --config configs/recall_probe.yaml --val data/recall_probe/val.jsonl \
+#       --max-episodes 200 --output checkpoints/validate_memory_probe.json"
+
+base: qwen3.5-0.8b.yaml
+
+curriculum_file: curriculum_recall_probe.yaml
+
+state:
+  # 与 v3 (disable_neo) 一致 — 纯 Hippo 路径,不让 Neo MLP 干扰
+  n_persistent_per_layer: 4
+  n_mem_tokens: 16
+  hippo_base_lr: 1.0e-2
+  mem_chunk_size: 128
+  disable_neo: true
+
+training:
+  grad_accum_steps: 2
+  dtype: bfloat16
+  compile_backbone_layers: true
+
+stage_overrides:
+  recall_probe:
+    # 比 skeleton 稍大 lr (1e-4 vs 7e-5) — 信号清晰,可以学更快
+    learning_rate: 1.0e-4
+    warmup_steps: 50
+    weight_decay: 0.1
+    batch_size: 4
+    grad_accum_steps: 2
+    # 短 turn:write/filler/read 都很短,128 token 足够(validate.py 下限 128)
+    turn_max_tokens: 128
+    max_turns_per_episode: 4
+    # 关键:tbptt_turns == max_turns_per_episode → episode 内不 detach,全 BPTT
+    tbptt_turns: 4
+    max_steps: 2000
