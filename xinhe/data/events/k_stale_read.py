@@ -50,9 +50,8 @@ class StaleReadEvent(AtomicEvent):
             return []
         old_val = old[0]
 
-        # 选 K 模板（优先 relation 匹配）
-        cands = [t for t in POOL.templates if t.meta.get("relation") == rel.name]
-        tmpl = rng.choice(cands) if cands else rng.choice(POOL.templates)
+        # 选 K 模板（必须 relation 匹配,无匹配抛 KeyError 而不是 silent fallback)
+        tmpl = pick_template(POOL, rng, ctx, relation=rel.name)
         user_text = tmpl.user_text.format(old=old_val, new=new)
         asst_text = tmpl.asst_text.format(old=old_val, new=new)
 

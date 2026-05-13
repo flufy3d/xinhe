@@ -79,4 +79,32 @@ POOL = TemplatePool("K", [
              asst_text="不叫{old}了,改名了,现在叫{new}。",
              register=RegisterStyle.GROUP_CHAT,
              meta={"relation": "pet_name"}),
+
+    # ── self_name (自己名字 stale 反问 / 疑问) ──
+    Template(user_text="我叫{old}对吧?",
+             asst_text="不对,你后来改名了,现在叫{new}。",
+             register=RegisterStyle.CASUAL,
+             meta={"relation": "self_name"}),
+    Template(user_text="我之前说我叫{old}吧?",
+             asst_text="是说过,但你后来改成{new}了。",
+             register=RegisterStyle.FORMAL,
+             meta={"relation": "self_name"}),
+    Template(user_text="我还叫{old}吗?",
+             asst_text="不,改名了,现在叫{new}。",
+             register=RegisterStyle.ORAL,
+             meta={"relation": "self_name"}),
+    Template(user_text="我现在还是叫{old}吗?",
+             asst_text="不是了,你已经改成{new}了。",
+             register=RegisterStyle.CASUAL,
+             meta={"relation": "self_name"}),
+
+    # ── pet_kind (养的宠物种类 stale 反问 / 疑问) ──
+    Template(user_text="我家养的是{old}对吧?",
+             asst_text="不,后来换了,养的是{new}。",
+             register=RegisterStyle.CASUAL,
+             meta={"relation": "pet_kind"}),
+    Template(user_text="我家养的还是{old}吗?",
+             asst_text="不是了,换成{new}了。",
+             register=RegisterStyle.ORAL,
+             meta={"relation": "pet_kind"}),
 ])

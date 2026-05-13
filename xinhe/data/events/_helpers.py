@@ -44,19 +44,27 @@ def pick_template(
       2. ctx.canonical_pool["__pending_relation"](一次性消费,pop)
       3. ctx.canonical_pool["__force_relation"](skeleton 级常驻,不 pop)
       4. 从 pool 全集随机
-    若按 relation 过滤为空 → 回退到 pool 全集(避免事件抛错)。
+
+    若 relation 显式指定但 pool 内无匹配模板 → 抛 KeyError。
+    (旧版本静默 fallback 全池随机,造成 S5 self_name 拿 job 模板的语义错位 bug,
+     直接训进 jsonl 数据看不出来。改为 loud 失败逼调用方补模板或不传 relation。)
     """
     if relation is None:
         relation = ctx.canonical_pool.pop("__pending_relation", None)
     if relation is None:
         relation = ctx.canonical_pool.get("__force_relation")
     pool_list = pool.templates
+    if not pool_list:
+        raise ValueError(f"模板池 {pool.event_name} 为空")
     if relation:
         cands = [t for t in pool_list if t.meta.get("relation") == relation]
         if cands:
             return rng.choice(cands)
-    if not pool_list:
-        raise ValueError(f"模板池 {pool.event_name} 为空")
+        raise KeyError(
+            f"模板池 {pool.event_name!r} 内无 relation={relation!r} 的模板;"
+            f" 现有 relations={sorted(set(t.meta.get('relation') for t in pool_list))}。"
+            f" Hint: 给 {pool.event_name} 池补 {relation} 模板,或检查上游 skeleton/event 不要硬塞此 relation。"
+        )
     return rng.choice(pool_list)
 
 

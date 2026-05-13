@@ -65,4 +65,33 @@ POOL = TemplatePool("D", [
              register=RegisterStyle.GROUP_CHAT,
              mood="纠错",
              meta={"relation": "pet_name"}),
+
+    # self_name (自己的名字改名/更正)
+    Template(user_text="对了,我刚才报错名字了,不是{old},我叫{new}。",
+             asst_text="好的,改一下,你叫{new}。",
+             register=RegisterStyle.CASUAL,
+             mood="纠错",
+             meta={"relation": "self_name"}),
+    Template(user_text="纠正一下,我不叫{old},叫{new}。",
+             asst_text="嗯,改了,你叫{new}。",
+             register=RegisterStyle.FORMAL,
+             mood="纠错",
+             meta={"relation": "self_name"}),
+    Template(user_text="哎,刚才说错了,我是{new},不是{old}。",
+             asst_text="抱歉记错了,你叫{new}。",
+             register=RegisterStyle.ORAL,
+             mood="纠错",
+             meta={"relation": "self_name"}),
+
+    # pet_kind (养的宠物种类改正)
+    Template(user_text="搞错了,我家养的不是{old},是{new}。",
+             asst_text="改一下,你家养的是{new}。",
+             register=RegisterStyle.CASUAL,
+             mood="纠错",
+             meta={"relation": "pet_kind"}),
+    Template(user_text="不对,我家不是{old},养的是{new}。",
+             asst_text="好,你家养{new},记下了。",
+             register=RegisterStyle.ORAL,
+             mood="纠错",
+             meta={"relation": "pet_kind"}),
 ])

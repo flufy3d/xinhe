@@ -316,7 +316,8 @@ def train_curriculum(base_config, stages, args):
             stage_config, tokenizer, stage_data=stage.get("data"),
         )
         print(f"  lr={stage_config.learning_rate} batch={stage_config.batch_size} "
-              f"max_turns={stage_config.max_turns_per_episode} max_steps={stage_config.max_steps}")
+              f"max_turns={stage_config.max_turns_per_episode} tbptt={stage_config.tbptt_turns} "
+              f"max_steps={stage_config.max_steps}")
 
         # 训练
         if trainer is None:
