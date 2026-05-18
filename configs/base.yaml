@@ -18,9 +18,9 @@ state:
   hippo_mlp_expansion: 2.0
   neo_mlp_depth: 4
   neo_mlp_expansion: 4.0
-  hippo_retention: 0.99           # Hippo 每 chunk 保留 99% 自然遗忘
-  hippo_base_lr: 1.0e-2           # Hippo 内层 test-time SGD lr 上限
-  mem_chunk_size: 128             # 64→128 把 NM TTT 小 kernel 风暴的 launch overhead 摊薄
+  hippo_retention: 0.999          # α_t init = 1 - sigmoid(_logit(1 - retention)),outer Adam 之后可学
+  hippo_base_lr: 5.0e-3           # θ_t = sigmoid(Linear(x)) * base_lr,每步 inner SGD 上限
+  mem_chunk_size: 128             # turn 内 inner SGD 步数 = turn_max_tokens / chunk
   gate_entropy_lambda: 0.01
   phase: "P-cap"                  # P-cap | Operational
 

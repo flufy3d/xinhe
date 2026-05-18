@@ -14,7 +14,7 @@ DataLoader 工作:
   - 按 weight_per_span 给 value token 加权
   - tri-state train_loss:
       "true"     → lm_weight=1.0, value tokens 用 weight_per_span
-      "lm_only"  → lm_weight=0.3, value tokens 也用 0.3（无 value 加权）
+      "lm_only"  → lm_weight=0.04, value tokens 也用 0.04（无 value 加权）
       "false"    → labels 全 -100, 不算 loss
 
 加速:
@@ -99,8 +99,7 @@ def _resolve_lm_weight(train_loss: Union[bool, str]) -> tuple[float, bool]:
     """tri-state → (lm_weight, value_active)。
 
     - "true" / True   → (1.0, True)
-    - "lm_only"       → (0.1, False)  让 distract 仅微弱影响 backbone,
-                                       LoRA/Hippocampus 容量留给 W 写读通路
+    - "lm_only"       → (0.04, False)  distract 信号压到 ~1/25, value-span 主导外层梯度
     - "false" / False → (0.0, False)
     """
     if train_loss is True:
@@ -111,7 +110,7 @@ def _resolve_lm_weight(train_loss: Union[bool, str]) -> tuple[float, bool]:
         if train_loss == "true":
             return 1.0, True
         if train_loss == "lm_only":
-            return 0.1, False
+            return 0.04, False
         if train_loss == "false":
             return 0.0, False
     raise ValueError(f"非法 train_loss: {train_loss!r}")
