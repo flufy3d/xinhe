@@ -237,6 +237,7 @@ class XinheModel(nn.Module):
         hook_layer_set = self._hook_layer_set
         new_layers: dict[int, LayerMemState] = {}
         aux_loss_terms: list[torch.Tensor] = []
+        nm_aux_weight = float(getattr(self.config, "nm_aux_weight", 0.0))
 
         def memory_hook(hidden_states: torch.Tensor, layer_idx: int) -> torch.Tensor:
             if layer_idx not in hook_layer_set:
@@ -250,6 +251,30 @@ class XinheModel(nn.Module):
             if N_m == 0:
                 return hidden_states  # 没启 mem tokens → memory 通路无写入点(纯 baseline)
             mem_proj = self._d_total_out(aux["mem_out"])  # (B, T_ext, hidden)
+
+            # NM-only aux loss (A 实验):mem_proj 的 real 段过 frozen lm_head 预测 value token。
+            # 目的:逼 Hippo W 学 "name token → value token" 直读映射,绕过 backbone retrieval。
+            # 只在 value-span position 算(weights > 0.5 排除 distract lm_only=0.04),
+            # 否则 NM 会被教成 distract 复读机。cut CE 避免材化 (B,T,V) logits。
+            if nm_aux_weight > 0.0 and labels is not None:
+                mem_real = mem_proj[:, real_start:real_end, :]
+                shift_mem = mem_real[:, :-1, :].contiguous().view(-1, mem_real.size(-1))
+                shift_lbl = labels[:, 1:].contiguous().view(-1)
+                valid = shift_lbl != -100
+                if weights is not None:
+                    shift_w = weights[:, 1:].contiguous().view(-1)
+                    value_mask = (shift_w > 0.5) & valid
+                else:
+                    value_mask = valid
+                if value_mask.any():
+                    # cut CE 要求 embedding bf16/fp16;mem_out 经 RMSNorm 可能是 fp32
+                    sel_h = shift_mem[value_mask].contiguous().to(torch.bfloat16)
+                    sel_l = shift_lbl[value_mask].contiguous()
+                    nm_ce = linear_cross_entropy(
+                        sel_h, self.lm_head.weight, sel_l,
+                        ignore_index=-100, reduction="mean",
+                    )
+                    aux_loss_terms.append(nm_aux_weight * nm_ce)
             # MAC (paper-faithful): fresh_mem 位置 += mem_out (sigmoid gating 实测≈1, 直接加)
             # MAL (iter4): real 位置 += alpha * mem_out_real, alpha>0 时启用,给 NM 直通 lm_head
             # learning_session phase 1 走 mem_alpha_override=0.0 屏蔽两路注入 (NM-zero eval 也走这)
