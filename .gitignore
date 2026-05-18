@@ -39,3 +39,11 @@ outputs/
 *.bin
 /data/
 .cache
+
+# 外部论文 / PDF 抽出文本
+docs/*.pdf
+docs/*.txt
+
+# 实验 writeup(per feedback_git_and_artifacts:迭代记录不入 git)
+docs/*_iter*.md
+docs/*全记录*.md
