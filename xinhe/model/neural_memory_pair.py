@@ -229,6 +229,7 @@ class NeuralMemoryPair(nn.Module):
         phase: str = "P-cap",
         gate_entropy_lambda: float = 0.01,
         disable_neo: bool = False,
+        enable_qk_projection: bool = False,
     ):
         super().__init__()
         assert phase in ("P-cap", "Operational"), f"unknown phase: {phase}"
@@ -245,6 +246,7 @@ class NeuralMemoryPair(nn.Module):
         self.hippocampus = self._build_neural_memory(
             d_total, n_heads, d_head, hippo_mlp_depth, hippo_mlp_expansion,
             hippo_retention, hippo_base_lr, chunk_size,
+            enable_qk_projection=enable_qk_projection,
         )
         # Neo:普通深 MLP(慢知识基底,outer Adam 慢更新)
         self.neocortex = NeocortexBlock(
@@ -283,6 +285,7 @@ class NeuralMemoryPair(nn.Module):
         retention: float,
         base_lr: float,
         chunk_size: int,
+        enable_qk_projection: bool = False,
     ) -> NeuralMemory:
         mlp = MemoryMLP(dim=d_head, depth=depth, expansion_factor=expansion)
         nm = NeuralMemory(
@@ -304,6 +307,7 @@ class NeuralMemoryPair(nn.Module):
             momentum_order=1,
             pre_rmsnorm=True,
             post_rmsnorm=False,
+            enable_qk_projection=enable_qk_projection,
         )
         # to_decay_factor: input-dependent forget gate(paper Table 5 ablation 中单一最大贡献项)。
         # init bias 已用 _logit(1 - retention) 设(Hippo retention=0.99 → bias≈-4.6),

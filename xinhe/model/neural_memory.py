@@ -54,7 +54,9 @@ NeuralMemState = namedtuple('NeuralMemState', [
     'cache_store_segment',
     'states',
     'updates',
+    'qk_M',                # TNT Q-K Projection: Σ k_τ k_τ^T 累加, (B, H, D, D) or None
 ])
+NeuralMemState.__new__.__defaults__ = (None,)  # qk_M 默认 None,旧 caller 不传也兼容
 
 def mem_state_detach(
     state: NeuralMemState
@@ -306,6 +308,8 @@ class NeuralMemory(Module):
                                                 #     static-by-default,让 outer loop seq_index 不再 trigger 重编
                                                 #   mode="default":Inductor 融合 only(reduce-overhead 的 CUDA
                                                 #     Graph fast path 与 TBPTT 多 forward autograd state 冲突)
+        enable_qk_projection: bool = False,     # TNT Q-K Projection:retrieve 时 q ← M·q,
+                                                # M = Σ k_τ k_τ^T 跨 turn carry in NeuralMemState.qk_M
     ):
         super().__init__()
         dim_head = default(dim_head, dim)
@@ -568,6 +572,9 @@ class NeuralMemory(Module):
 
         self.use_accelerated_scan = use_accelerated_scan
 
+        # TNT Q-K Projection 开关
+        self.enable_qk_projection = bool(enable_qk_projection)
+
         self.register_buffer('zero', torch.tensor(0.), persistent = False)
 
     @property
@@ -606,7 +613,8 @@ class NeuralMemory(Module):
         seq_index = 0,
         prev_weights = None,
         mask: Tensor | None = None,
-        return_surprises = True
+        return_surprises = True,
+        past_qk_M: Tensor | None = None,
     ):
         if self.qkv_receives_diff_views:
             _, batch, seq_len = seq.shape[:3]
@@ -691,6 +699,15 @@ class NeuralMemory(Module):
         # maybe keys rmsnorm
 
         keys = self.k_norm(keys)
+
+        # TNT Q-K Projection: 在 keys reshape 成 chunk 之前算 outer-product 累加
+        # keys 此时形状 (B, H, N_total, D),delta = Σ_n k_n k_n^T 给出 (B, H, D, D)
+        # past_qk_M 跨 turn carry,episode 边界 detach;num_chunks==0 时 N_total==0,delta=0,等价 pass-through。
+        if self.enable_qk_projection:
+            delta_qk_M = torch.einsum('b h n d, b h n e -> b h d e', keys, keys)
+            next_qk_M = delta_qk_M if past_qk_M is None else past_qk_M + delta_qk_M
+        else:
+            next_qk_M = None
 
         # take care of chunking
 
@@ -839,7 +856,7 @@ class NeuralMemory(Module):
             adaptive_lr = rearrange(adaptive_lr, '(b h n) c -> b h (n c)', b = batch, h = heads)
             unweighted_mem_model_loss = rearrange(unweighted_mem_model_loss, '(b h n) c -> b h (n c)', b = batch, h = heads)
 
-            next_store_state = NeuralMemState(next_seq_len_index, weights, remainder, next_state, updates)
+            next_store_state = NeuralMemState(next_seq_len_index, weights, remainder, next_state, updates, next_qk_M)
 
             if not return_surprises:
                 return updates, next_store_state
@@ -905,7 +922,7 @@ class NeuralMemory(Module):
 
         if num_chunks == 0:
             updates = rearrange_dict_values(weights, 'bh ... -> bh 1 ...')
-            next_store_state = NeuralMemState(next_seq_len_index, weights, remainder, past_state, updates)
+            next_store_state = NeuralMemState(next_seq_len_index, weights, remainder, past_state, updates, next_qk_M)
 
             output = (updates, next_store_state)
 
@@ -970,7 +987,7 @@ class NeuralMemory(Module):
 
         next_state = (next_last_update, next_last_momentum)
 
-        next_store_state = NeuralMemState(next_seq_len_index, weights, remainder, next_state, updates)
+        next_store_state = NeuralMemState(next_seq_len_index, weights, remainder, next_state, updates, next_qk_M)
 
         # return updates to neural memory at all chunked timesteps + neural mem cache / state to be fed back
 
@@ -983,6 +1000,7 @@ class NeuralMemory(Module):
         self,
         seq,
         weights: dict[str, Tensor],
+        qk_M: Tensor | None = None,
     ):
         chunk_size = self.retrieve_chunk_size
 
@@ -1034,6 +1052,12 @@ class NeuralMemory(Module):
         # maybe qk rmsnorm
 
         queries = self.q_norm(queries)
+
+        # TNT Q-K Projection:把 q 投到已见 keys 子空间 → 喂进 W
+        # queries: (B, H, N_total, D);qk_M: (B, H, D, D)
+        # 公式 o = f(W, M @ q),其中 M = Σ k_τ k_τ^T(read 用入口 M,read_before_write 语义对应)
+        if qk_M is not None:
+            queries = torch.einsum('b h d e, b h n e -> b h n d', qk_M, queries)
 
         # fetch values from memory model
 
@@ -1144,9 +1168,9 @@ class NeuralMemory(Module):
         # handle previous state init
 
         if not exists(state):
-            state = (0, None, None, None, None)
+            state = (0, None, None, None, None, None)
 
-        seq_index, weights, cache_store_seq, past_state, updates = state
+        seq_index, weights, cache_store_seq, past_state, updates, qk_M = state
 
         # Stage 4:state.seq_index 始终保持 int 不再回 tensor
         # _forward_impl 在出口时把累加得到的 int 写回 NeuralMemState.seq_index(末尾 _replace),
@@ -1168,7 +1192,8 @@ class NeuralMemory(Module):
             ret_next_seq_len = round_up_multiple(ret_seq_len + 1, ret_chunk)
             ret_n_chunks = ret_next_seq_len // ret_chunk
             expanded_weights = repeat_dict_values(TensorDict(weights), 'bh ... -> bh n ...', n = ret_n_chunks)
-            early_retrieved = self.retrieve_memories(retrieve_seq, expanded_weights)
+            # Q-K Projection 用入口 qk_M(read_before_write 语义对称:用旧 M 读旧 W,本 turn keys 不污染读)
+            early_retrieved = self.retrieve_memories(retrieve_seq, expanded_weights, qk_M=qk_M)
 
         # store
 
@@ -1294,10 +1319,12 @@ class NeuralMemory(Module):
                 past_state = past_state,
                 prev_weights = prev_weights,
                 mask = maybe_store_mask,
-                return_surprises = True
+                return_surprises = True,
+                past_qk_M = qk_M,
             )
 
             weights = next_neural_mem_state.weights
+            qk_M = next_neural_mem_state.qk_M     # 把累加后的 M 拿出来,下个 chunk 继续累加
             # Stage 4:用 chunk len 自己累加 int seq_index,避开读 tensor state.seq_index
             # 触发 sync。逻辑跟 store_memories 内 next_seq_len_index = seq_index + round_down 等价
             _chunk_round_down = (
@@ -1355,9 +1382,11 @@ class NeuralMemory(Module):
                 last_update, _ = next_neural_mem_state.states
                 updates = rearrange_dict_values(last_update, 'b ... -> b 1 ...')
 
+            # 非 read_before_write 路径:用累加后 qk_M(包含本 turn keys),paper 默认配方
             retrieved = self.retrieve_memories(
                 retrieve_seq,
-                updates
+                updates,
+                qk_M=qk_M,
             )
 
         # maybe detach

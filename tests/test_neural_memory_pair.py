@@ -271,3 +271,104 @@ def test_logit_clamps_extremes():
     assert _logit(0.0) < -10  # 应该是 logit(eps) 不报错
     assert _logit(1.0) > 10
     assert abs(_logit(0.5) - 0.0) < 1e-6
+
+
+# ── TNT Q-K Projection ──────────────────────────────────────────
+
+
+def test_qk_projection_default_off_keeps_state_qk_M_none():
+    """enable_qk_projection=False(默认)→ NeuralMemState.qk_M 全程 None,行为完全等价旧路径。"""
+    pair = _build_pair()  # 默认 enable_qk_projection=False
+    pair.eval()
+    x = torch.randn(2, 16, 32)
+    _, state, _ = pair(x)
+    assert state.hippo is not None
+    assert state.hippo.qk_M is None
+
+
+def test_qk_projection_on_state_qk_M_shape_and_accumulates():
+    """enable=True 时 qk_M 形状 (B, H, D, D) 且跨 turn 累加(M2 范数 > M1)。"""
+    pair = _build_pair(enable_qk_projection=True)
+    pair.eval()
+    B = 2
+    x1 = torch.randn(B, 16, 32)
+    x2 = torch.randn(B, 16, 32)
+    _, state1, _ = pair(x1)
+    M1 = state1.hippo.qk_M
+    assert M1 is not None
+    assert M1.shape == (B, pair.n_heads, pair.d_head, pair.d_head)
+    _, state2, _ = pair(x2, layer_state=state1)
+    M2 = state2.hippo.qk_M
+    assert M2 is not None
+    assert M2.shape == M1.shape
+    # M = Σ k_τ k_τ^T 半正定且单调累加 → 范数严格增长
+    assert M2.norm().item() > M1.norm().item()
+
+
+def test_qk_projection_changes_retrieve_output():
+    """开 vs 关 Q-K projection 跨 turn 应给出不同 mem_out。
+    注意 read_before_write 语义:第 1 turn qk_M 仍是 None(入口),projection 不生效;
+    第 2 turn 入口 qk_M 已累加 turn-1 keys → M @ q 才真正影响 retrieve。
+    """
+    torch.manual_seed(42)
+    pair_off = _build_pair()
+    pair_on = _build_pair(enable_qk_projection=True)
+    pair_on.load_state_dict(pair_off.state_dict())
+    pair_off.eval()
+    pair_on.eval()
+    x1 = torch.randn(2, 16, 32)
+    x2 = torch.randn(2, 16, 32)
+    # turn 1:两路应一致(第一次 read 时 qk_M 都是 None)
+    _, state_off, _ = pair_off(x1)
+    _, state_on, _ = pair_on(x1)
+    # turn 2:state_on.hippo.qk_M 已累加 turn1 keys,read 用 M @ q;state_off 无 M
+    out_off, _, _ = pair_off(x2, layer_state=state_off)
+    out_on, _, _ = pair_on(x2, layer_state=state_on)
+    assert not torch.allclose(out_off, out_on, atol=1e-4), \
+        "turn 2 read 应被入口 M 投影改变(M @ q ≠ q)"
+
+
+def test_qk_projection_detach_preserves_qk_M():
+    """LayerMemState.detach() 走 pytree 应保留 qk_M tensor 字段(detach 不丢值)。"""
+    pair = _build_pair(enable_qk_projection=True)
+    pair.eval()
+    x = torch.randn(2, 16, 32)
+    _, state, _ = pair(x)
+    assert state.hippo.qk_M is not None
+    detached = state.detach()
+    assert detached.hippo.qk_M is not None
+    # 数值不变 + 不再 require_grad
+    assert torch.allclose(detached.hippo.qk_M, state.hippo.qk_M.detach())
+    assert not detached.hippo.qk_M.requires_grad
+
+
+def test_qk_projection_gradient_flow():
+    """backward 必须能通过 qk_M(累加图不应阻断梯度)。"""
+    pair = _build_pair(enable_qk_projection=True)
+    pair.train()
+    x = torch.randn(2, 16, 32, requires_grad=True)
+    x_out, _, aux = pair(x)
+    loss = x_out.pow(2).mean() + aux["gate_entropy_reg_loss"]
+    loss.backward()
+    assert x.grad is not None and x.grad.abs().sum().item() > 0
+    # NeuralMemory 内部参数(包括 to_keys / to_queries)应至少有部分收到梯度
+    assert any(
+        p.grad is not None and p.grad.abs().sum().item() > 0
+        for p in pair.hippocampus.parameters() if p.requires_grad
+    )
+
+
+def test_qk_projection_state_reset_on_new_episode():
+    """新 episode(layer_state=None)→ qk_M 重新从 None 起累加,与上一 episode 不串。"""
+    pair = _build_pair(enable_qk_projection=True)
+    pair.eval()
+    x = torch.randn(2, 16, 32)
+    _, state_ep1, _ = pair(x)
+    _, state_ep1_b, _ = pair(x, layer_state=state_ep1)  # 同 episode 累加
+    M_ep1 = state_ep1_b.hippo.qk_M
+
+    # 新 episode:不传 state,重新初始化
+    _, state_ep2, _ = pair(x)
+    M_ep2 = state_ep2.hippo.qk_M
+    # ep2 只看了一个 x;ep1 看了两个 → 范数 ep1 > ep2
+    assert M_ep1.norm().item() > M_ep2.norm().item() * 1.5

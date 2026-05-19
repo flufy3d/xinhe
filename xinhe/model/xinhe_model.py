@@ -105,6 +105,7 @@ class XinheModel(nn.Module):
                 phase=config.phase,
                 gate_entropy_lambda=config.gate_entropy_lambda,
                 disable_neo=getattr(config, "disable_neo", False),
+                enable_qk_projection=getattr(config, "enable_qk_projection", False),
             )
             for layer_idx in self._hook_layer_indices
         })

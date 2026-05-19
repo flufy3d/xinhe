@@ -34,3 +34,6 @@ stage_overrides:
     # NM-only aux loss。mem_out 过 frozen lm_head 预测 value token,
     # 逼 Hippo W 学 key→value 映射。0 关,~0.5 跟主 loss 等权。
     nm_aux_weight: 0.5
+    # TNT Q-K Projection (iter14):retrieve 时 q ← M·q,M = Σ k_τ k_τ^T 跨 turn carry。
+    # 解 iter4-13 read=0% 死锁的核心假设:冻 backbone 下 q 与 k 落在不同子空间,M·q 把 q 投回 keys 子空间。
+    enable_qk_projection: true

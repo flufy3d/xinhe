@@ -93,6 +93,10 @@ class XinheConfig:
     # iter11 A 实验:NM-only aux loss 权重。mem_out 过 frozen lm_head 预测 value token,
     # 逼 Hippo W 学 key→value 映射(绕过 backbone retrieval)。0 = 关; ~0.5 = 跟主 loss 等权。
     nm_aux_weight: float = 0.0
+    # TNT Q-K Projection:retrieve 时 q ← (Σ k_τ k_τ^T) · q,把 q 强制投到已见 keys 的子空间。
+    # M 跨 turn 累加(随 NeuralMemState 一起 carry),episode 边界 detach。
+    # 解 iter4-iter12 read=0% 死锁的核心假设:q 与 k 落在不同子空间,MLP W 无法跨域检索。
+    enable_qk_projection: bool = False
     resume_from: str = ""
     early_stop_loss: float = 0.0
     early_stop_patience: int = 0
@@ -221,6 +225,7 @@ class XinheConfig:
                 "per_segment_checkpoint": "per_segment_checkpoint",
                 "mem_out_real_alpha": "mem_out_real_alpha",
                 "nm_aux_weight": "nm_aux_weight",
+                "enable_qk_projection": "enable_qk_projection",
                 "compile_backbone_layers": "compile_backbone_layers",
                 "resume_from": "resume_from",
                 "early_stop_loss": "early_stop_loss",
