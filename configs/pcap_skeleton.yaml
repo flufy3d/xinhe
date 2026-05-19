@@ -19,11 +19,11 @@ stage_overrides:
     learning_rate: 7.0e-5
     warmup_steps: 100
     weight_decay: 0.1
-    batch_size: 2
+    batch_size: 1
     grad_accum_steps: 2
     turn_max_tokens: 768
     max_turns_per_episode: 16
-    tbptt_turns: 3
+    tbptt_turns: 8
     value_weight_cap: 5.0
     max_steps: 1200
     # iter11 A 实验:MAL alpha=0 关 real 直接注入。NM-aux 让 W 学输出 = value embedding,
