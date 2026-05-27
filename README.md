@@ -38,7 +38,7 @@ content → beta_proj → β (per-head, per-token)           │
 | 短期工作记忆 | ✅ 已实现 | Delta Rule W | 海马体 / 松果体 | 单次对话动态演化 |
 | 长期固化记忆 | 🚧 未来 | Memory MLP + Sleep | 皮层 synaptic consolidation | 跨 session 权重固化 |
 
-当前 v5c 实现了短期层（W 矩阵），长期层（Memory MLP + Sleep 机制）是未来工作。详见 [docs/architecture.md](docs/architecture.md) 和 [docs/roadmap.md](docs/roadmap.md)。
+当前 v5c 实现了短期层（W 矩阵），长期层（Memory MLP + Sleep 机制）是未来工作。目标架构（双 NM + QueryHead + DeltaNet）见 [docs/心核 架构蓝图：分层记忆与昼夜双相.md](docs/心核%20架构蓝图：分层记忆与昼夜双相.md)，实现路线见 [docs/心核实现规划.md](docs/心核实现规划.md)。
 
 ---
 
@@ -213,7 +213,7 @@ Stage 1: persona_unified
 
 ## 为什么这个方案
 
-**v1-v4 的演化**（历史，详见 [docs/design_rationale.md](docs/design_rationale.md)）：
+**v1-v4 的演化**（历史，v5c→目标架构的 pivot 缘由见 [docs/心核 架构蓝图：分层记忆与昼夜双相.md](docs/心核%20架构蓝图：分层记忆与昼夜双相.md) 末节"为什么从 v9.5 pivot"）：
 - v1 state-as-tokens：0.8b 跑通但 4b LoRA 全局共享瓶颈
 - v2 对称 cross-attention：解决 LoRA 瓶颈但 entity 消歧 87%
 - v3 EKS / v4 slot + key 路由：slot 身份成了伪概念
@@ -228,7 +228,7 @@ Stage 1: persona_unified
 
 ## 相关工作
 
-心核每个组件都有先例，但 "Delta Rule 联想记忆 + LoRA rehearsal 防漂 + 结构化 retention patterns + 统一分布" 这个组合是独特的。详见 [docs/related_work.md](docs/related_work.md)。
+心核每个组件都有先例，但 "Delta Rule 联想记忆 + LoRA rehearsal 防漂 + 结构化 retention patterns + 统一分布" 这个组合是独特的。相关工作对照详见 [docs/心核 架构蓝图：分层记忆与昼夜双相.md](docs/心核%20架构蓝图：分层记忆与昼夜双相.md) "与同期 SOTA 差异化"。
 
 ---
 

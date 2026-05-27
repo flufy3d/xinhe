@@ -40,7 +40,8 @@ outputs/
 /data/
 .cache
 
-# 外部论文 / PDF 抽出文本
+# 外部论文(papers/ 下 txt,按标题命名)+ 任何 PDF — 不入 git
+docs/papers/
 docs/*.pdf
 docs/*.txt
 
