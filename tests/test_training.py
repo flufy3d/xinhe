@@ -72,7 +72,6 @@ def _common_config(**overrides):
         hidden_size=32,
         n_heads=4,
         head_dim=8,           # d_total = 32 = hidden_size,_d_total 是 Identity
-        mem_chunk_size=4,
         freeze_backbone=False,
         tbptt_turns=2,
         batch_size=2,
@@ -83,7 +82,6 @@ def _common_config(**overrides):
         device="cpu",
         dtype="float32",
         per_segment_checkpoint=False,
-        phase="P-cap",
     )
     for k, v in overrides.items():
         setattr(config, k, v)

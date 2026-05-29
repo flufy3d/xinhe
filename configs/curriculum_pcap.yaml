@@ -48,7 +48,6 @@ stages:
       turn_max_tokens: 768          # 512 → 768 给 paragraph distract 留余量
       plugin_lr_multiplier: 1.0
       value_weight_cap: 1.0
-      phase: "P-cap"
       per_segment_checkpoint: false
       max_steps: 3000               # 1000 → 3000 补回 v8 量级训练量
       warmup_steps: 200             # 50 → 200(LoRA + per-layer K/V + Congliu 引入新分布,缓和)

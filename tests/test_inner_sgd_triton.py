@@ -274,25 +274,6 @@ def test_hippo_inner_sgd_force_pytorch():
     assert K.grad is not None and W1.grad is not None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Fallback 路径(NeuralMemory shape guard):chunk_size < 16 → 退回 vmap+grad
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def test_neural_memory_fast_path_eligibility_flag():
-    """ResidualNorm(MemoryMLP(depth=2)) + default MSE 时 flag=True。"""
-    from xinhe.model.neural_memory import NeuralMemory
-
-    nm = NeuralMemory(dim=32, dim_head=16, heads=2, chunk_size=4, batch_size=4)
-    assert nm._fast_path_eligible is True
-
-
-def test_neural_memory_fast_path_falls_back_on_small_chunk():
-    """chunk_size=4 < 16 → store_memories 走 vmap+grad fallback,行为不变。"""
-    from xinhe.model.neural_memory import NeuralMemory
-
-    nm = NeuralMemory(dim=32, dim_head=16, heads=2, chunk_size=4, batch_size=4).cuda()
-    seq = torch.randn(2, 16, 32, device="cuda")
-    # 不该报错(走 vmap+grad fallback)
-    retrieved, state = nm(seq)
-    assert retrieved.shape == seq.shape
+# NOTE: xinhe.model.neural_memory.NeuralMemory(TTT 路径)已删,
+# 原有的 fallback 路径 / fast-path eligibility 测试随之失效,已移除。
+# HippoInnerSGD 自身的数值等价测试(本文件其余部分)仍然有效。

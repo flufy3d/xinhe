@@ -1,12 +1,11 @@
 """
-Trainer (v9.5) — 训练循环
+Trainer — 训练循环(单全局 QueryHead + HippoDelta 架构)
 
 核心特性:
-- state 跨 turn 传递,state 是 XinheMemoryState(per-layer LayerMemState 字典,
-  paper-faithful 删除 mem_snapshots,跨 turn carry 走 NM weights 演化)
+- state 跨 turn 传递,state 是 XinheMemoryState(只在 _global_write_idx 层持有 HippoDeltaState)
 - 截断 BPTT: 每 tbptt_turns 轮做 detach + backward + step
-- 训练参数:NeuralMemoryPair + fresh_mem + LoRA(qkvo)
-  + per-layer K/V(K_pers/V_pers,在每个 full_attention 层独立)
+- 训练参数:QueryHead + HippoDelta + W_mac/W_mal + MAL α + LoRA(qkvo)
+  + per-layer K/V(K_pers/V_pers,Plan B 关停)
 """
 import math
 from pathlib import Path
@@ -83,20 +82,12 @@ class Trainer:
         self._ema_acc = None
 
     def _apply_freezes(self, config: XinheConfig):
-        """按配置冻结 NeuralMemoryPair 内的 gate_q。
-        plugin_lr_multiplier=0 等效冻结整个 memory。"""
-        freeze_plugin = getattr(config, "plugin_lr_multiplier", 1.0) == 0
-        for p in self.model.memory.parameters():
-            p.requires_grad = not freeze_plugin
-
-        if getattr(config, "freeze_gate_q", False):
-            for pair in self.model.memory.values():
-                for p in pair.gate_q.parameters():
-                    p.requires_grad = False
-            print("  [freeze_gate_q] gate_q.weight 全部冻结")
+        """单全局架构没有 per-layer memory ModuleDict;freeze 钩子保留作占位,Plan B 不用。"""
+        # plugin_lr_multiplier=0 走 _build_optimizer 时 lr=0,等效冻结 memory 组。
+        _ = config  # 留作未来 freeze 钩子的入口
 
     def _build_optimizer(self, config: XinheConfig) -> torch.optim.AdamW:
-        """构建 optimizer:NeuralMemoryPair 单组 lr × plugin_lr_multiplier。"""
+        """构建 optimizer:trainable 参数单组 lr × plugin_lr_multiplier。"""
         lr = config.learning_rate
         plugin_mult = getattr(config, "plugin_lr_multiplier", 1.0)
 
@@ -130,15 +121,8 @@ class Trainer:
         # TF32 加速
         torch.set_float32_matmul_precision('high')
 
-        # NOTE: trainer 顶层不开 torch.compile(整个 model 包起来)。
-        # 历史原因:NeuralMemoryPair.hippocampus 内 store_memories 走 vmap(grad) 做 test-time
-        # SGD 时,Dynamo 编译路径会强制 disable_saved_tensors_hooks,而 vmap(grad) 自己也用
-        # 同一机制 → InternalTorchDynamoError。
-        # 现状:Hippo inner SGD 已切到 HippoInnerSGD(autograd.Function 包 Triton fwd kernel +
-        # PyTorch bmm 二阶 bwd),vmap+grad 不再在 hot path。compile 兼容性已具备,但顶层
-        # compile 仍可能踩到 Dynamo 对 NeuralMemState namedtuple / TensorDict 的边角行为 →
-        # 当前用 `compile_backbone_layers=True` 局部 compile(qwen layer body + Neo MLP),
-        # Hippo Triton kernel 是 black box,Dynamo 无需进入。
+        # NOTE: trainer 顶层不开 torch.compile,只用 `compile_backbone_layers=True`
+        # 局部 compile(qwen full_attention layer body),HippoDelta 等记忆模块在 compile 边界外。
 
         total_params = self.model.get_total_param_count()
         trainable_params = self.model.get_trainable_param_count()
@@ -223,6 +207,12 @@ class Trainer:
                 accumulated_loss = torch.tensor(0.0, device=self.device)
                 loss_turns_t = torch.zeros((), dtype=torch.long, device=self.device)
 
+            # Memory Dropout(可选):随机把这 turn 强制 NM-zero,backbone 不能假设 mem 总在。
+            # 与 shortcut_suppression 互补 — implicit curriculum
+            do_drop = (self.config.memory_dropout > 0
+                       and float(torch.rand(()).item()) < self.config.memory_dropout)
+            this_mem_override = 0.0 if do_drop else None
+
             with torch.amp.autocast("cuda", dtype=self.dtype):
                 # model.forward 内部仍叫 segment（纯实现细节，与业务 turn 解耦）
                 # compute_logits=False 走 cut_cross_entropy 快路径,不材化 (B,T,V=248320) logits
@@ -230,10 +220,37 @@ class Trainer:
                 result = self.model(
                     turn_ids, state, labels=labels, pad_token_id=self.pad_token_id,
                     weights=weights, compute_logits=False,
+                    mem_alpha_override=this_mem_override,
                 )
 
             state = result["state_next"]
             turn_loss = result["loss"]
+
+            # Margin-Based Shortcut Suppression(直接 attack 'NM-on==NM-zero' 退化解):
+            # NM-zero forward **带 grad**(关键!detach 会让 penalty 只是放大 loss_on,失去意义)。
+            # penalty = max(0, loss_on - loss_zero + margin),active 时:
+            #   d(loss_on)/d(params) 推主路径优化(NM-on 更准)
+            #   d(-loss_zero)/d(params) **推 backbone 在 NM-zero 模式下变差**:
+            #     因 mem_alpha=0 时 mem 通路全乘 0,梯度只能落 backbone 的 LoRA / K_pers
+            # → 直接 attack backbone shortcut:不让 backbone 学到"不靠 mem 也能答对"
+            # 代价:dual backward,GPU mem ~1.5x。
+            # 与 memory_dropout 互斥:do_drop=True 时这 turn 本身是 NM-zero,baseline 无意义。
+            if self.config.shortcut_suppression and not do_drop:
+                with torch.amp.autocast("cuda", dtype=self.dtype):
+                    result_zero = self.model(
+                        turn_ids, state, labels=labels,
+                        pad_token_id=self.pad_token_id, weights=weights,
+                        compute_logits=False, mem_alpha_override=0.0,
+                    )
+                loss_zero = result_zero["loss"]    # 不 detach!grad 通到 backbone
+                margin = self.config.shortcut_margin
+                lam = self.config.shortcut_lambda
+                penalty = torch.clamp(turn_loss - loss_zero + margin, min=0.0)
+                # gap > 0 = mem 真有用;gap ≤ 0 = mem 没用(penalty 在推梯度让它变有用)
+                self._last_shortcut_gap = float((loss_zero.detach() - turn_loss.detach()).item())
+                self._last_shortcut_penalty = float(penalty.detach().item())
+                turn_loss = turn_loss + lam * penalty
+
             accumulated_loss = accumulated_loss + turn_loss
             correct = result.get("correct", 0)
             total = result.get("total", 0)
@@ -354,25 +371,10 @@ class Trainer:
         self.model.train()
 
     def _capture_mac_grads(self) -> dict:
-        """诊断:捕获 MAC + LoRA + per-layer K/V + Hippo to_decay_factor 的梯度 norm。
+        """诊断:捕获 LoRA + per-layer K/V 的梯度 norm。
         在 optimizer.step() 前调用(grad 已 clip)。grad 为 None 表示该参数本步无梯度。
         """
         out = {}
-        for name in ("mem_token_init",):
-            p = getattr(self.model, name, None)
-            out[name] = (
-                p.grad.detach().float().norm().item()
-                if (p is not None and p.grad is not None) else None
-            )
-        # to_decay_factor 是 per-layer Hippo NeuralMemory 内部参数,聚合 norm
-        decay_norms = []
-        for pair in self.model.memory.values():
-            for p in pair.hippocampus.to_decay_factor.parameters():
-                if p.grad is not None:
-                    decay_norms.append(p.grad.detach().float().norm().item())
-        out["to_decay_factor"] = (
-            sum(decay_norms) / len(decay_norms) if decay_norms else None
-        )
         # LoRA grad norm 聚合(所有 lora_A.grad 的均值,验证 LoRA 在学)
         lora_norms = []
         kpers_norms = []
@@ -420,31 +422,15 @@ class Trainer:
 
         if self.global_step % self.config.log_every == 0:
             lr = self.scheduler.get_last_lr()[0]
-            # v9.5 通路效度指标:fresh_mem norm + LoRA/K_pers 是否在学
-            mtok_norm = (
-                self.model.mem_token_init.detach().float().norm().item()
-                if getattr(self.model, "mem_token_init", None) is not None else 0.0
-            )
+            # 通路效度指标:LoRA/K_pers 梯度 norm 是否在学
             grads = getattr(self, "_last_mac_grads", None) or {}
             def _fg(k): return grads.get(k)
             def _fmt(v): return f"{v:.1e}" if isinstance(v, float) else "—"
-            mem_out_norms = []
-            for pair in self.model.memory.values():
-                t = pair.last_mem_out_norm
-                if torch.is_tensor(t):
-                    v = t.item()
-                    if v > 0:
-                        mem_out_norms.append(v)
-            mem_norm_avg = sum(mem_out_norms) / len(mem_out_norms) if mem_out_norms else 0.0
             print(
                 f"  [Step {self.global_step}] ema_loss={self._ema_loss:.4f} "
                 f"ema_acc={self._ema_acc:.2%} lr={lr:.2e} "
-                f"mtok={mtok_norm:.3f} "
-                f"|g_mt|={_fmt(_fg('mem_token_init'))} "
-                f"|g_dec|={_fmt(_fg('to_decay_factor'))} "
                 f"|g_lora|={_fmt(_fg('lora'))} "
-                f"|g_kp|={_fmt(_fg('K_pers'))} "
-                f"mem_norm={mem_norm_avg:.3f}"
+                f"|g_kp|={_fmt(_fg('K_pers'))}"
             )
 
         if self.global_step % self.config.save_every == 0:
@@ -485,26 +471,21 @@ class Trainer:
         self.optimizer.zero_grad()
 
     def _save_checkpoint(self, path: Optional[str] = None):
-        """v9.5 ckpt: memory_pair_state + fresh_mem 参数 + backbone addons(LoRA + per-layer K/V)。"""
+        """单全局架构 ckpt:qhead_state + backbone addons(LoRA + per-layer K/V)。"""
         if path is None:
             path = f"checkpoints/xinhe_step_{self.global_step}.pt"
 
         save_dir = Path(path).parent
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        memory_pair_state = self.model.memory.state_dict()
-
         checkpoint = {
             "global_step": self.global_step,
-            "memory_pair_state": memory_pair_state,
             "optimizer_state": self.optimizer.state_dict(),
             "scheduler_state": self.scheduler.state_dict(),
             "config": self.config,
             "curriculum_stage": self.current_stage_name,
-            "version": "v9.5",
+            "version": "v-next",
         }
-        if getattr(self.model, "mem_token_init", None) is not None:
-            checkpoint["mem_token_init"] = self.model.mem_token_init.detach().cpu()
         # backbone addons(LoRA lora_A/B + per-layer K/V K_pers/V_pers):
         # 只取 trainable 的子张量(原 backbone weight frozen 不存)
         backbone_addons = {
@@ -514,37 +495,34 @@ class Trainer:
         }
         if backbone_addons:
             checkpoint["backbone_addons_state"] = backbone_addons
+        # 单全局模块:QueryHead + HippoDelta + 注入投影(W_mac/W_mal) + MAL α
+        m = self.model
+        qh = {
+            "hippo_impl": "delta",
+            "query_head": m.query_head.state_dict(),
+            "W_mac": m.W_mac.state_dict(),
+            "W_mal": m.W_mal.state_dict(),
+            "global_mem_rmsnorm": m.global_mem_rmsnorm.state_dict(),
+            "mal_alpha_logit": m.mal_alpha_logit.detach().cpu(),
+            "global_hippo": m.global_hippo.state_dict(),
+        }
+        checkpoint["qhead_state"] = qh
 
         torch.save(checkpoint, path)
         print(f"  [Checkpoint] 保存到 {path} "
               f"(addons {len(backbone_addons)} 张量)")
 
     def load_checkpoint(self, path: str):
-        """加载 checkpoint(v9.5)。
-
-        兼容:
-          - v9.5 ckpt:完整加载 memory_pair_state / fresh_mem / backbone_addons(LoRA + per-layer K/V)
-          - v9 ckpt(无 backbone_addons):memory_pair_state 加载,LoRA / per-layer K/V 从零起步
-          - 不兼容 v8 hippocampus_state(架构不同)
-        """
+        """加载 checkpoint(单全局架构;只读 qhead_state + backbone_addons_state)。"""
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
 
-        if "memory_pair_state" not in checkpoint:
+        if "qhead_state" not in checkpoint:
             raise RuntimeError(
-                "checkpoint 缺少 'memory_pair_state' 键。v9.5 不兼容 v8 hippocampus_state,"
+                "checkpoint 缺少 'qhead_state' 键。单全局架构不兼容 v9.5 memory_pair_state,"
                 "请从零重训。"
             )
-        self.model.memory.load_state_dict(checkpoint["memory_pair_state"], strict=True)
 
-        # mem_token_init 是 v9 + MAC 引入,旧 ckpt 可能有可能无
-        if (getattr(self.model, "mem_token_init", None) is not None
-                and "mem_token_init" in checkpoint):
-            with torch.no_grad():
-                self.model.mem_token_init.copy_(checkpoint["mem_token_init"].to(
-                    self.model.mem_token_init.device
-                ))
-
-        # backbone addons(v9.5 引入:LoRA + per-layer K/V),strict=False 兼容旧 ckpt
+        # backbone addons(LoRA + per-layer K/V),strict=False 兼容老 backbone
         if "backbone_addons_state" in checkpoint:
             addons = {
                 k: v.to(self.device) for k, v in checkpoint["backbone_addons_state"].items()
@@ -552,6 +530,18 @@ class Trainer:
             missing, unexpected = self.model.backbone.load_state_dict(addons, strict=False)
             print(f"[Checkpoint] LoRA/K_pers 加载 {len(addons)} 个张量 "
                   f"(unexpected={len(unexpected)})")
+
+        # 单全局模块
+        qh = checkpoint["qhead_state"]
+        m = self.model
+        m.query_head.load_state_dict(qh["query_head"])
+        m.W_mac.load_state_dict(qh["W_mac"])
+        m.W_mal.load_state_dict(qh["W_mal"])
+        m.global_mem_rmsnorm.load_state_dict(qh["global_mem_rmsnorm"])
+        with torch.no_grad():
+            m.mal_alpha_logit.copy_(qh["mal_alpha_logit"].to(m.mal_alpha_logit.device))
+        m.global_hippo.load_state_dict(qh["global_hippo"])
+        print(f"[Checkpoint] QueryHead 单全局模块加载(hippo_impl={qh.get('hippo_impl')})")
 
         self.global_step = checkpoint["global_step"]
 

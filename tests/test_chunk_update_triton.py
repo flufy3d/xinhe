@@ -224,79 +224,8 @@ def test_chunk_update_cuda_equiv(num_inner):
         assert abs_err < 1e-4, f"abs_err={abs_err}"
 
 
-def test_nm_fast_path_equiv_regular_path():
-    """端到端:NM 走 fast path(HippoChunkUpdate)与禁用 fast path 走原路径
-    (HippoInnerSGD + assoc_scan)产出相同 forward / state / loss(fp32 < 1e-5)。"""
-    from xinhe.model.neural_memory_pair import NeuralMemoryPair
-
-    torch.manual_seed(42)
-    # chunk_size=16 触发 fast path(>= 16 阈值)
-    pair_a = NeuralMemoryPair(d_total=32, n_heads=2, d_head=16, chunk_size=16, phase="P-cap")
-    pair_b = NeuralMemoryPair(d_total=32, n_heads=2, d_head=16, chunk_size=16, phase="P-cap")
-    # 同 init
-    pair_b.load_state_dict(pair_a.state_dict())
-    pair_a.eval()
-    pair_b.eval()
-
-    # 禁用 pair_b 的 fast path,强走原路径
-    pair_b.hippocampus._fast_path_eligible = False
-
-    x = torch.randn(2, 32, 32)
-    out_a, state_a, _ = pair_a(x)
-    out_b, state_b, _ = pair_b(x)
-
-    abs_err, _ = _max_abs_rel(out_a, out_b)
-    assert abs_err < 1e-5, f"NM forward output abs_err={abs_err}"
-
-    # state 也应一致(hippo state 包含 weights / states / updates)
-    assert state_a.hippo is not None
-    assert state_b.hippo is not None
-    # last_update 应一致
-    for k in state_a.hippo.states[0].keys():
-        a = state_a.hippo.states[0][k]
-        b = state_b.hippo.states[0][k]
-        abs_err, _ = _max_abs_rel(a, b)
-        assert abs_err < 1e-5, f"state.{k} abs_err={abs_err}"
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="需要 CUDA")
-@pytest.mark.skipif(sys.platform == "win32", reason="Inductor 在 Windows 需 cl.exe;production Linux 验证即可")
-def test_nm_compile_equiv_eager():
-    """Stage 3:`use_compile_chunk_loop=True` 与 eager 数学等价(fwd + bwd)。
-
-    backward 在 HippoChunkUpdate.backward 的 `requires_grad_()` 处会有 graph break
-    (Dynamo 限制),但会 gracefully fallback eager,正确性不受影响。"""
-    from xinhe.model.neural_memory_pair import NeuralMemoryPair
-
-    torch.manual_seed(0)
-    pair_a = NeuralMemoryPair(d_total=32, n_heads=2, d_head=16, chunk_size=16, phase="P-cap").cuda()
-    pair_b = NeuralMemoryPair(d_total=32, n_heads=2, d_head=16, chunk_size=16, phase="P-cap").cuda()
-    pair_b.load_state_dict(pair_a.state_dict())
-
-    pair_a.hippocampus.use_compile_chunk_loop = True
-    pair_b.hippocampus.use_compile_chunk_loop = False
-
-    # Forward 等价
-    pair_a.eval()
-    pair_b.eval()
-    x = torch.randn(2, 32, 32, device="cuda")
-    out_a, _, _ = pair_a(x)
-    out_b, _, _ = pair_b(x)
-    assert (out_a - out_b).abs().max().item() < 1e-5
-
-    # Backward 等价(compile + eager 在 graph break 处均能正确传梯度)
-    pair_a.train()
-    pair_b.train()
-    torch.manual_seed(7)
-    x_a = torch.randn(2, 32, 32, device="cuda", requires_grad=True)
-    x_b = x_a.detach().clone().requires_grad_(True)
-
-    out_a, _, _ = pair_a(x_a)
-    out_b, _, _ = pair_b(x_b)
-    out_a.sum().backward()
-    out_b.sum().backward()
-
-    assert (x_a.grad - x_b.grad).abs().max().item() < 1e-5
+# NOTE: NeuralMemoryPair(TTT 路径)已删,端到端 NM fast-path / NM compile-eager 等价测试
+# 随之失效,已移除。HippoChunkUpdate kernel 自身的数值等价测试(本文件其余部分)仍然有效。
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="需要 CUDA")

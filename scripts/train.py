@@ -52,7 +52,7 @@ def make_dataloaders(config, tokenizer, stage_data: dict | None = None):
 
     stage_data: stage["data"] 段。kind="mix_dynamic" 时走 MixedConversationDataset
                 动态从多源抽样,不落 mix 物理文件;否则走 ConversationDataset 单文件。
-    v9 mode 默认 value_weight_cap=1.0(NeuralMemory fast-weights 不靠 weight reinforcement)。
+    value_weight_cap 默认 1.0(单全局 HippoDelta 不靠 weight reinforcement)。
     """
     cap = getattr(config, "value_weight_cap", 1.0)
     is_mix_dynamic = bool(stage_data) and stage_data.get("kind") == "mix_dynamic"
@@ -136,12 +136,13 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
         "grad_accum_steps": "grad_accum_steps",
         "gradient_checkpointing": "gradient_checkpointing",
         "per_segment_checkpoint": "per_segment_checkpoint",
-        "mem_out_real_alpha": "mem_out_real_alpha",
         "nm_aux_weight": "nm_aux_weight",
-        "enable_qk_projection": "enable_qk_projection",
+        "shortcut_suppression": "shortcut_suppression",
+        "shortcut_margin": "shortcut_margin",
+        "shortcut_lambda": "shortcut_lambda",
+        "memory_dropout": "memory_dropout",
         "learning_rate": "learning_rate",
         "plugin_lr_multiplier": "plugin_lr_multiplier",
-        "freeze_gate_q": "freeze_gate_q",
         "value_weight_cap": "value_weight_cap",
         "weight_decay": "weight_decay",
         "grad_clip": "grad_clip",
@@ -156,12 +157,9 @@ def apply_stage_overrides(base_config: XinheConfig, stage: dict) -> XinheConfig:
         "log_every": "log_every",
         "save_every": "save_every",
         "eval_every": "eval_every",
-        # v9: 每阶段可调 NeuralMemoryPair 配置
+        # 每阶段可调
         "n_heads": "n_heads",
         "head_dim": "head_dim",
-        "hippo_retention": "hippo_retention",
-        "hippo_base_lr": "hippo_base_lr",
-        "phase": "phase",
     }
     for yaml_key, field_name in field_map.items():
         if yaml_key in training:
@@ -287,11 +285,24 @@ def train_curriculum(base_config, stages, args):
 
     if init_ckpt:
         ckpt = torch.load(init_ckpt, map_location=base_config.device, weights_only=False)
-        if "memory_pair_state" not in ckpt:
+        if "qhead_state" not in ckpt:
             raise RuntimeError(
-                f"checkpoint {init_ckpt} 缺少 'memory_pair_state' 键。v9 不兼容 v8 hippocampus_state,请从零重训。"
+                f"checkpoint {init_ckpt} 缺少 'qhead_state' 键。单全局架构不兼容 v9.5 memory_pair_state,"
+                "请从零重训。"
             )
-        model.memory.load_state_dict(ckpt["memory_pair_state"], strict=True)
+        # 单全局模块加载:QueryHead + HippoDelta + 注入投影 + MAL α
+        qh = ckpt["qhead_state"]
+        model.query_head.load_state_dict(qh["query_head"])
+        model.W_mac.load_state_dict(qh["W_mac"])
+        model.W_mal.load_state_dict(qh["W_mal"])
+        model.global_mem_rmsnorm.load_state_dict(qh["global_mem_rmsnorm"])
+        with torch.no_grad():
+            model.mal_alpha_logit.copy_(qh["mal_alpha_logit"].to(model.mal_alpha_logit.device))
+        model.global_hippo.load_state_dict(qh["global_hippo"])
+        # backbone addons(LoRA + per-layer K/V)
+        if "backbone_addons_state" in ckpt:
+            addons = {k: v.to(base_config.device) for k, v in ckpt["backbone_addons_state"].items()}
+            model.backbone.load_state_dict(addons, strict=False)
         print(f"[课程学习] 从 {init_ckpt} 加载权重")
 
     trainer = None
@@ -362,22 +373,17 @@ def main():
     config, curriculum = XinheConfig.from_yaml(args.config)
     print(f"=== 心核 (Xinhe) 训练 ===")
     print(f"Backbone: {config.backbone_type} ({config.backbone_model_path}) | 设备: {config.device} | 精度: {config.dtype}")
-    print(f"NeuralMemoryPair: H={config.n_heads} d_head={config.head_dim} "
-          f"chunk={config.mem_chunk_size} phase={config.phase}")
-    print(f"  Hippo: depth={config.hippo_mlp_depth} retention={config.hippo_retention} lr={config.hippo_base_lr} (TTT inner SGD)")
-    print(f"  Neo:   depth={config.neo_mlp_depth} expansion={config.neo_mlp_expansion} (普通 MLP + 标准 backprop)")
+    print(f"QueryHead 单全局 / HippoDelta: H={config.n_heads} d_head={config.head_dim} "
+          f"d_key={config.d_key} d_value={config.d_value} n_query={config.n_query}")
     n_per_layer = getattr(config, "n_persistent_per_layer", 0)
-    n_mem = getattr(config, "n_mem_tokens", 0)
     lora_rank = getattr(config, "lora_rank", 0)
     bits = []
     if n_per_layer > 0:
         bits.append(f"per-layer K/V={n_per_layer}")
-    if n_mem > 0:
-        bits.append(f"fresh_mem/turn={n_mem}")
     if lora_rank > 0:
         bits.append(f"LoRA(rank={lora_rank})")
     if bits:
-        print(f"  MAC v9.5: " + " | ".join(bits))
+        print(f"  Backbone addons: " + " | ".join(bits))
 
     if curriculum:
         print(f"课程学习: {len(curriculum)} 个阶段")

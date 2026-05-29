@@ -1,0 +1,30 @@
+# Phase 3 入口 + 方案 A(2026-05-28 min_arch_test 诊断后调优):
+#   - 删 K_pers 死记捷径(n_persistent_per_layer=0)
+#   - MAL alpha 起步强信号(σ(0)=0.5,替代 σ(-3)=0.05 微贡献)
+#   - nm_aux=0.5 逼 mac_tokens 必须含 value 信息(stage_overrides)
+#   - lambda_div=0.05 q 多样性 contrastive
+# 跑:uv run python scripts/train.py --config configs/pcap_delta.yaml
+base: pcap_skeleton.yaml
+
+state:
+  use_query_head: true
+  single_global_memory: true
+  n_query: 16
+  d_key: 256
+  d_value: 128
+  query_source_layer: 0
+  mal_inject_layer: -3
+  global_write_layer: -1
+  pause_mix_gate: true
+  gated_delta: false
+  tau_k_init: 1.0
+  delta_backend: "auto"
+  spectral_norm_cap: 10.0
+  # === 方案 A 修正(关 backbone 捷径 + 强 mem 起步 + q 多样性)===
+  n_persistent_per_layer: 0   # 关 K_pers 死记捷径(诊断:这是 backbone 绕过 mem 的根因)
+  mal_alpha_init: 0.0         # MAL α=σ(0)=0.5 起步,mem 通路初始信号强(替代 σ(-3)≈0.05)
+  lambda_div: 0.05            # q 多样性 contrastive aux(防 QueryHead mode collapse)
+
+stage_overrides:
+  pcap_skeleton:
+    nm_aux_weight: 0.5        # 逼 mac_tokens 经 lm_head 必须预测 value 首 token(强信号)

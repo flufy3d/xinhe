@@ -35,7 +35,6 @@ stages:
       turn_max_tokens: 512
       plugin_lr_multiplier: 1.0
       value_weight_cap: 1.0
-      phase: "P-cap"
       max_steps: 1000
       warmup_steps: 50
       use_joint_early_stop: false

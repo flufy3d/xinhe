@@ -1,14 +1,11 @@
 """
-XinheConfig — 心核配置 (v9.5)
+XinheConfig — 心核配置(单全局 QueryHead + HippoDelta 架构)
 
-v9.5: 双 NeuralMemory(Hippocampus 浅 MLP + Neocortex 深 MLP),挂在每个 full-attn 层。
-paper-faithful 重构:
-  - input-level persistent_mem(soft prompt)→ 删,改 per-layer K/V(在 attention 内拼接)
-  - past_snapshots(跨 turn hidden carry)→ 删,跨 turn 走 NM weights 演化(paper way)
-  - fresh_mem(NM 输出承载)→ 保留,paper 简化版
-  - mac inject gating 删除(实测 inject 一直 = 1.0,直接 += mem_out 即可)
-  - LoRA on q/k/v/o → 恢复(frozen backbone 适配 OOD 的根因修复)
-v8 的 read_scale / beta_proj / Delta-Rule W 已废弃。
+旧 v9.5 双 NeuralMemoryPair(per full-attn 层 Hippo+Neo)已删,目标架构:
+  - 单全局 QueryHead 从 embedding/低层 h_pre 派生动态 q
+  - 单全局 HippoDelta(Gated DeltaNet)持有 M(d_v, d_k)
+  - MAC-R(W_mac)拼前缀 + MAL(W_mal)中后层残差
+  - backbone addons:LoRA(qkvo) + per-layer K/V(可选)
 """
 from dataclasses import dataclass, field
 from typing import Optional
@@ -24,22 +21,17 @@ class XinheConfig:
     hidden_size: int = 1024
     freeze_backbone: bool = True
 
-    # --- v9 NeuralMemoryPair ---
+    # --- 投影维度(d_total = n_heads * head_dim;单全局架构里 mem_dim 走 d_value 独立空间)---
     n_heads: int = 16               # 头数
     head_dim: int = 64              # d_head(d_total = n_heads * head_dim)
 
-    # --- MAC: Memory As Context (v9.5 paper-faithful) ---
-    # paper Titans MAC:per-layer K/V persistent memory + NM 输出作为序列 context。
-    # v9.5 实现:
-    #   - per-layer K/V:每个 full_attention 层独立的 K_pers/V_pers,直接拼接到该层 attention
-    #     的 K/V cache(不经过 q/k/v 投影,paper Eq 11-13 形态)
-    #   - fresh_mem (n_mem_tokens):每 turn 末插 N_mem 个 hidden 位置承载 NM mem_out
-    #     (paper M_t(K) 是序列级,我们简化为固定 N_m 位置)
-    #   - 跨 turn carry:走 NM weights 演化(W 跨 turn 不重置),不再 prepend 过去 hidden
+    # --- MAC: Memory As Context (paper Titans 形态)---
+    # per-layer K/V:每个 full_attention 层独立的 K_pers/V_pers,直接拼接到该层 attention
+    # 的 K/V cache(不经过 q/k/v 投影,paper Eq 11-13 形态)。
+    # MAC-R 前缀长度统一由 n_query 控制,不再独立 n_mem_tokens。
     n_persistent_per_layer: int = 16  # 每个 full_attention 层独立的 K/V tokens 数
-    n_mem_tokens: int = 16            # 0 禁用;>0 每 turn 末插 N_mem 个,fresh_mem 承载 NM 输出
 
-    # --- LoRA(v9.5 恢复:frozen backbone 适配 MAC OOD 的根因修复)---
+    # --- LoRA(frozen backbone 适配 MAC OOD 的根因修复)---
     # 与 MAC 是 producer/consumer 协同(MAC 放 prefix,LoRA 学怎么读),不抢梯度。
     # 0 禁用;>0 注入到 target_modules 指定的层
     lora_rank: int = 0
@@ -48,27 +40,8 @@ class XinheConfig:
     lora_target_modules: list = field(
         default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj"]
     )
-    hippo_mlp_depth: int = 2
-    hippo_mlp_expansion: float = 2.0
-    neo_mlp_depth: int = 4
-    neo_mlp_expansion: float = 4.0
-    hippo_retention: float = 0.99    # Hippo 每 chunk 保留 99%(自然遗忘)
-    hippo_base_lr: float = 1e-2      # Hippo 内层 test-time SGD lr 上限
-    # NOTE: Neo 走标准 backprop,无 retention 概念;lr = outer learning_rate × plugin_lr_multiplier。
-    mem_chunk_size: int = 64
-    gate_entropy_lambda: float = 0.01  # gate 熵正则,防单边塌缩
-    phase: str = "P-cap"             # "P-cap" | "Operational",决定 Neo 默认 daytime_plastic
-    # 屏蔽 Neo MLP(paper-faithful Titans MAC = 仅 Hippo 路径)。
-    # True 时 forward 跳过 neocortex / gate 计算,mem_out = mem_rmsnorm(r_h)。
-    # neocortex/gate_q 参数仍正常 init/load(ckpt 兼容),只是 forward 不走它们。
-    disable_neo: bool = False
 
-    # v9 freeze flags
-    freeze_gate_q: bool = False      # 测试基线时可冻 gate
-
-    # 编译加速(只对 backbone 单 transformer 块,不包 NeuralMemoryPair —
-    # Hippo 的 vmap+grad inner SGD 跟 Dynamo 的 saved_tensors_hooks 冲突,
-    # 把 NM 排除在 compile 边界外即可。多卡 device_map="auto" 下不安全,自动跳过)。
+    # 编译加速(只对 backbone 单 transformer 块,不包记忆模块。多卡 device_map="auto" 下不安全,自动跳过)。
     compile_backbone_layers: bool = False
 
     # --- 训练 ---
@@ -85,18 +58,41 @@ class XinheConfig:
     grad_accum_steps: int = 1
     gradient_checkpointing: bool = False
     per_segment_checkpoint: bool = False  # v9 必须关:vmap(grad) ↔ checkpoint saved_hooks 冲突
-    # MAC + MAL 混合: NM 输出在 real token 位置直接 side-inject (Titans paper MAL 形态),
-    # 绕过 attention 给 NM → lm_head 一条直接梯度通路。配合 paper-faithful fresh_mem 注入(MAC)。
-    # 实测 0.1 让 recall_probe read first-token 从 baseline 10% 跳到 100% (见 docs/v9.5_iter4)。
-    # 0 = paper-faithful 纯 MAC (旧行为); >0 = MAC + MAL 混合。
-    mem_out_real_alpha: float = 0.0
-    # iter11 A 实验:NM-only aux loss 权重。mem_out 过 frozen lm_head 预测 value token,
-    # 逼 Hippo W 学 key→value 映射(绕过 backbone retrieval)。0 = 关; ~0.5 = 跟主 loss 等权。
+    # NM-only aux loss 权重。mem_out 过 frozen lm_head 预测 value token,
+    # 逼记忆通路学 key→value 映射(绕过 backbone retrieval)。0 = 关; ~0.5 = 跟主 loss 等权。
     nm_aux_weight: float = 0.0
-    # TNT Q-K Projection:retrieve 时 q ← (Σ k_τ k_τ^T) · q,把 q 强制投到已见 keys 的子空间。
-    # M 跨 turn 累加(随 NeuralMemState 一起 carry),episode 边界 detach。
-    # 解 iter4-iter12 read=0% 死锁的核心假设:q 与 k 落在不同子空间,MLP W 无法跨域检索。
-    enable_qk_projection: bool = False
+
+    # --- Margin-Based Shortcut Suppression(直接 attack 'NM-on==NM-zero' 退化解)---
+    # 每 turn 跑两次 forward:NM-on(主,有 grad)+ NM-zero(no_grad,baseline)。
+    # 加 hinge:NM-on loss 必须比 NM-zero loss 至少低 margin,否则给 penalty。
+    # 等价于 "backbone 关掉 mem 也能答对" → 推梯度让 mem 通路必须有用。
+    # 不开 = 0,标准开 = 1.0;margin=0.5 表示要求 mem 提供 ≥0.5 nat 的 loss 下降。
+    shortcut_suppression: bool = False
+    shortcut_margin: float = 0.5
+    shortcut_lambda: float = 1.0
+    # 训练时随机关 mem(让 backbone 不能假设 mem 总在),0=关,0.5=半 step NM-zero forward。
+    # 与 shortcut_suppression 互补:这个是 implicit curriculum,前者是 explicit penalty。
+    memory_dropout: float = 0.0
+
+    # === QueryHead 单全局记忆(目标架构;use_query_head 已固定 True,字段留作 yaml 兼容)===
+    use_query_head: bool = True
+    single_global_memory: bool = True   # 单 QueryHead + 单 HippoDelta(用户 2026-05-27 选定)
+    d_key: int = 256                    # delta key 空间
+    d_value: int = 128                  # delta value 空间(=mem_out 维)
+    n_query: int = 16                   # QueryHead 输出 q 数 = MAC-R 前缀 token 数
+    query_source_layer: int = 0         # 0=embedding(防 MAC-R 循环依赖);>0=backbone 前 j 层(消融)
+    mal_inject_layer: int = -3          # MAL 残差注入层(该层输入 += α·W_mal(mem_out));-3/-4 消融
+    mal_alpha_init: float = -3.0        # MAL α=σ(logit) 起步 σ(-3)≈0.05
+    global_write_layer: int = -1        # 单全局 write 挂第几个 full_attention 物理层(-1=最后一个)
+    pause_mix_gate: bool = True         # 只走 HippoDelta + QueryHead + MAL,纯化变量
+    lambda_div: float = 0.0             # q 多样性 contrastive aux 权重
+    # Gated DeltaNet(plain delta / gated delta 切换)
+    gated_delta: bool = False           # False=纯 delta(boxed,含删旧关联);True=加 g 遗忘门
+    tau_k_init: float = 1.0             # delta key 温度 init(τ=1 → β<1 admissible)
+    beta_bias_init: float = 0.0         # delta W_β bias init
+    delta_backend: str = "auto"         # auto|fla|torch(训练自动强制 torch)
+    spectral_norm_cap: float = 10.0     # delta M 谱范数监控上限(<10×初始)
+
     resume_from: str = ""
     early_stop_loss: float = 0.0
     early_stop_patience: int = 0
@@ -197,17 +193,22 @@ class XinheConfig:
                 "n_heads": "n_heads",
                 "head_dim": "head_dim",
                 "n_persistent_per_layer": "n_persistent_per_layer",
-                "n_mem_tokens": "n_mem_tokens",
-                "hippo_mlp_depth": "hippo_mlp_depth",
-                "hippo_mlp_expansion": "hippo_mlp_expansion",
-                "neo_mlp_depth": "neo_mlp_depth",
-                "neo_mlp_expansion": "neo_mlp_expansion",
-                "hippo_retention": "hippo_retention",
-                "hippo_base_lr": "hippo_base_lr",
-                "mem_chunk_size": "mem_chunk_size",
-                "gate_entropy_lambda": "gate_entropy_lambda",
-                "phase": "phase",
-                "disable_neo": "disable_neo",
+                "use_query_head": "use_query_head",
+                "single_global_memory": "single_global_memory",
+                "d_key": "d_key",
+                "d_value": "d_value",
+                "n_query": "n_query",
+                "query_source_layer": "query_source_layer",
+                "mal_inject_layer": "mal_inject_layer",
+                "mal_alpha_init": "mal_alpha_init",
+                "global_write_layer": "global_write_layer",
+                "pause_mix_gate": "pause_mix_gate",
+                "lambda_div": "lambda_div",
+                "gated_delta": "gated_delta",
+                "tau_k_init": "tau_k_init",
+                "beta_bias_init": "beta_bias_init",
+                "delta_backend": "delta_backend",
+                "spectral_norm_cap": "spectral_norm_cap",
             },
             "training": {
                 "value_weight_cap": "value_weight_cap",
@@ -217,15 +218,16 @@ class XinheConfig:
                 "batch_size": "batch_size",
                 "learning_rate": "learning_rate",
                 "plugin_lr_multiplier": "plugin_lr_multiplier",
-                "freeze_gate_q": "freeze_gate_q",
                 "weight_decay": "weight_decay",
                 "grad_clip": "grad_clip",
                 "grad_accum_steps": "grad_accum_steps",
                 "gradient_checkpointing": "gradient_checkpointing",
                 "per_segment_checkpoint": "per_segment_checkpoint",
-                "mem_out_real_alpha": "mem_out_real_alpha",
                 "nm_aux_weight": "nm_aux_weight",
-                "enable_qk_projection": "enable_qk_projection",
+                "shortcut_suppression": "shortcut_suppression",
+                "shortcut_margin": "shortcut_margin",
+                "shortcut_lambda": "shortcut_lambda",
+                "memory_dropout": "memory_dropout",
                 "compile_backbone_layers": "compile_backbone_layers",
                 "resume_from": "resume_from",
                 "early_stop_loss": "early_stop_loss",

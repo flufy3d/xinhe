@@ -1,15 +1,14 @@
 """
-XinheModel (v9.5) — 顶层模型
+XinheModel — 顶层模型(单全局 QueryHead + HippoDelta 架构)
 
-组合 backbone + 双 NeuralMemory(Hippocampus + Neocortex)per full-attn 层。
-v9.5 paper-faithful 重构:
-  - 删 input-level persistent_mem(soft prompt),改 per-layer K/V(每个 full_attention 层独立,
-    在 attention 内拼接,paper Titans MAC Eq 11-13 形态)
-  - 删 past_snapshots(跨 turn hidden carry,paper 没有这个,跨 turn 走 NM weights 演化)
-  - 保留 fresh_mem(NM 输出承载点,paper M_t(K) 的简化版固定 N_m 位置)
-  - 删 mac_inject_logit gating(实测 inject 全程 = 1.0,直接 += mem_out 即可,paper 形态)
-  - 恢复 LoRA on q/k/v/o:frozen backbone 适配 MAC 输入的根因修复(MAC=producer / LoRA=consumer)
-state 是 XinheMemoryState(per-layer LayerMemState 字典,无 mem_snapshots)。
+组合 backbone + QueryHead + 单全局 HippoDelta + MAC-R/MAL 注入。
+forward:
+  1. embedding 低层 h_pre → QueryHead → q
+  2. retrieve(M_prev, q) → mem_out  ← 唯一一次 read
+  3. MAC-R: W_mac(mem_out) 拼输入序列前缀;MAL: W_mal(mem_out) 中后层残差
+  4. write: global_write_layer 用 real 段 hidden store → M_next
+state 是 XinheMemoryState(per-layer LayerMemState 字典),只在 _global_write_idx 一处持有 HippoDeltaState。
+backbone addons:LoRA(qkvo) + per-layer K/V(可选,Plan B 关停)。
 """
 import torch
 import torch.nn as nn
@@ -20,7 +19,7 @@ from cut_cross_entropy import linear_cross_entropy
 
 from .config import XinheConfig
 from .backbone import BackboneBase
-from .neural_memory_pair import NeuralMemoryPair, LayerMemState, XinheMemoryState
+from .neural_memory_pair import LayerMemState, XinheMemoryState
 
 
 @torch.no_grad()
@@ -42,12 +41,12 @@ def _chunked_argmax(h: torch.Tensor, W: torch.Tensor, v_chunk: int = 4096) -> to
 
 class XinheModel(nn.Module):
     """
-    心核模型 v9: Backbone + ModuleDict[layer_idx → NeuralMemoryPair]
+    心核模型(单全局 QueryHead + HippoDelta):Backbone + 单 HippoDelta + QueryHead + 注入投影。
 
-    forward:
-        embed → backbone.forward_blocks(layer_hook=memory_hook(W))
-             → memory_hook 内 NeuralMemoryPair forward(retrieve+store+gate+alpha)
-             → 末层 hidden → lm_head → logits
+    forward 全程走 `_forward_query_head`:
+        embed → QueryHead → retrieve(M_prev) → MAC-R 前缀注入
+            → backbone.forward_blocks(MAL@mid + write@global_write_idx)
+            → 末层 hidden → lm_head → logits
     """
 
     def __init__(self, config: XinheConfig, backbone: Optional[BackboneBase] = None):
@@ -85,54 +84,14 @@ class XinheModel(nn.Module):
         if n_per_layer > 0 and hasattr(self.backbone, "wrap_persistent_kv"):
             self.backbone.wrap_persistent_kv(n_per_layer)
 
-        # Memory:每个 full-attn 层挂一个 NeuralMemoryPair
+        # 单全局记忆架构:不再 per-full-attn-layer 挂 Pair,只在 _global_write_idx 一处 write,
+        # _forward_query_head 内一次 read。hook_layer_indices 仅用于解析 global_write_layer 物理位置。
         self._hook_layer_indices = self.backbone.get_hook_layer_indices()
         self._hook_layer_set = set(self._hook_layer_indices)
         d_total = config.n_heads * config.head_dim
-        # ModuleDict 的 key 必须是 str
-        self.memory = nn.ModuleDict({
-            str(layer_idx): NeuralMemoryPair(
-                d_total=d_total,
-                n_heads=config.n_heads,
-                d_head=config.head_dim,
-                hippo_mlp_depth=config.hippo_mlp_depth,
-                hippo_mlp_expansion=config.hippo_mlp_expansion,
-                neo_mlp_depth=config.neo_mlp_depth,
-                neo_mlp_expansion=config.neo_mlp_expansion,
-                hippo_retention=config.hippo_retention,
-                hippo_base_lr=config.hippo_base_lr,
-                chunk_size=config.mem_chunk_size,
-                phase=config.phase,
-                gate_entropy_lambda=config.gate_entropy_lambda,
-                disable_neo=getattr(config, "disable_neo", False),
-                enable_qk_projection=getattr(config, "enable_qk_projection", False),
-            )
-            for layer_idx in self._hook_layer_indices
-        })
 
-        # 把 Neo(普通 MLP,无 vmap+grad)也 compile。Hippo 因 inner SGD 仍走 eager,
-        # 同一 pair forward 内的 Neo 单独 compile 可独立加速。
-        if (getattr(config, "compile_backbone_layers", False)
-                and torch.cuda.device_count() <= 1):
-            try:
-                for pair in self.memory.values():
-                    pair.neocortex = torch.compile(
-                        pair.neocortex, mode="default", fullgraph=False, dynamic=False,
-                    )
-                print(f"[torch.compile] 已编译 {len(self.memory)} 个 Neo 路径")
-            except Exception as e:
-                print(f"[torch.compile neo] 跳过(异常: {e})")
-
-        # Hippo NM compile:lazy trace 在 forward 首次入口(配 Dynamo 三连让 outer loop 稳态)
-        hippo_compile_on = sum(
-            1 for pair in self.memory.values()
-            if getattr(pair.hippocampus, "use_compile_chunk_loop", False)
-        )
-        if hippo_compile_on > 0:
-            print(f"[torch.compile] 已编译 {hippo_compile_on} 个 Hippo 路径")
-
-        # 投影:d_total ↔ hidden_size(NeuralMemoryPair 在 d_total 子空间工作,
-        # backbone 输出是 hidden_size 维度。两者通常相等,但保留投影以备 head_dim 配置不齐)
+        # 投影:d_total ↔ hidden_size(NM 在 d_total 子空间工作,backbone 输出是 hidden_size 维度。
+        # 两者通常相等,但保留投影以备 head_dim 配置不齐)
         if d_total == config.hidden_size:
             self._d_total_in = nn.Identity()
             self._d_total_out = nn.Identity()
@@ -144,18 +103,53 @@ class XinheModel(nn.Module):
 
         self.lm_head = self.backbone.get_lm_head()
 
-        # MAC: fresh_mem (NM 输出承载) — paper M_t(K) 简化为 N_m 个固定位置
-        # 每 turn 末插 N_mem 个 fresh 位置,NM forward 把 mem_out 写到这 N_mem 位置
-        # 注:input-level persistent_mem (soft prompt) 已删,改用 per-layer K/V(在 attention 内拼接)
-        # 注:past_snapshots (跨 turn hidden carry) 已删,跨 turn 走 NM weights 演化(paper way)
-        self.n_mem_tokens = int(getattr(config, "n_mem_tokens", 0))
-        if self.n_mem_tokens > 0:
-            self.mem_token_init = nn.Parameter(
-                torch.randn(self.n_mem_tokens, config.hidden_size)
-                * (config.hidden_size ** -0.5)
-            )
-        else:
-            self.register_parameter("mem_token_init", None)
+        # === QueryHead 单全局记忆(目标架构;唯一 forward 路径)===
+        # use_query_head 已单值化为 True,留作 ckpt/yaml 兼容标记。
+        from .query_head import QueryHead
+        from .neural_memory_pair import AdaptiveRMSNorm
+        from .hippo_delta import HippoDelta
+        self.use_query_head = True
+        self.n_query = int(getattr(config, "n_query", 16))
+        d_key = int(getattr(config, "d_key", 256))
+        d_value = int(getattr(config, "d_value", 128))
+        self.global_hippo = HippoDelta(
+            d_model=d_total, d_key=d_key, d_value=d_value, n_heads=config.n_heads,
+            tau_k_init=float(getattr(config, "tau_k_init", 1.0)),
+            beta_bias_init=float(getattr(config, "beta_bias_init", 0.0)),
+            gated=bool(getattr(config, "gated_delta", False)),
+            delta_backend=str(getattr(config, "delta_backend", "auto")),
+            spectral_norm_cap=float(getattr(config, "spectral_norm_cap", 10.0)),
+        )
+        mem_dim = d_value
+        self.query_head = QueryHead(config.hidden_size, d_key, self.n_query)
+        # 注入投影:mem_out(mem_dim=d_value) → hidden
+        self.W_mac = nn.Linear(mem_dim, config.hidden_size, bias=False)
+        self.W_mal = nn.Linear(mem_dim, config.hidden_size, bias=False)
+        # W_mac 非零:MAC-R 是主表达通路,零 init 切断 QueryHead 梯度(dLoss/dmem=dLoss/dmac·W_mac=0)
+        nn.init.xavier_uniform_(self.W_mac.weight)
+        # W_mal 零:残差零起步不扰 frozen backbone(配 α=σ(-3)≈0.05);梯度仍会从 0 长出
+        nn.init.zeros_(self.W_mal.weight)
+        self.mal_alpha_logit = nn.Parameter(
+            torch.tensor(float(getattr(config, "mal_alpha_init", -3.0)))
+        )
+        self.global_mem_rmsnorm = AdaptiveRMSNorm(mem_dim)
+        n_layers = self.backbone.get_num_layers()
+        gw = int(getattr(config, "global_write_layer", -1))
+        self._global_write_idx = self._hook_layer_indices[gw] if gw < 0 else gw
+        assert self._global_write_idx in self._hook_layer_set, \
+            f"global_write_layer 解析到 {self._global_write_idx},不是 full_attention 层"
+        mal = int(getattr(config, "mal_inject_layer", -3))
+        self._mal_target_idx = (n_layers + mal) if mal < 0 else mal
+        # 自检:MAL 目标层类型(Qwen3.5 是 full/linear 混合;落在 linear 信号可能被 token-mix 稀释,
+        # forward_blocks 的 hook 仍对每层都调用,只是观察用)
+        try:
+            _layers = self.backbone.model.model.layers
+            self._mal_target_layer_type = getattr(_layers[self._mal_target_idx], "layer_type", "unknown")
+        except Exception:
+            self._mal_target_layer_type = "unknown"
+        print(f"[QueryHead 单全局/delta] write@L{self._global_write_idx} "
+              f"MAL@L{self._mal_target_idx}({self._mal_target_layer_type}) "
+              f"n_query={self.n_query} d_key={d_key} mem_dim={mem_dim}")
 
         self._pad_token_id: Optional[int] = None
 
@@ -168,6 +162,9 @@ class XinheModel(nn.Module):
         weights: Optional[torch.Tensor] = None,
         mem_alpha_override: Optional[float] = None,
         compute_logits: bool = True,
+        *,
+        mem_mac_override: Optional[float] = None,
+        mem_mal_override: Optional[float] = None,
     ) -> dict:
         """
         参数:
@@ -176,10 +173,15 @@ class XinheModel(nn.Module):
             labels: (B, T) 可选
             pad_token_id: padding 屏蔽
             weights: (B, T) per-token loss 权重
-            mem_alpha_override: float|None。给 learning_session 阶段 1 传 0.0 走干净路径
+            mem_alpha_override: float|None。NM-zero(0.0)同时关 MAC-R 与 MAL
             compute_logits: True 时材化 (B,T,V) logits(eval/tests 路径);
                             False 时走 cut_cross_entropy 快路径,result["logits"]=None,
                             correct/total 用 chunked argmax 算(省 ~3GB / 4 turns)。
+            mem_mac_override: 仅 probe/debug 用。独立控制 MAC-R 前缀 alpha;非 None 时
+                              覆盖 mem_alpha_override 对 MAC-R 的作用。
+            mem_mal_override: 仅 probe/debug 用。独立控制 MAL 残差 alpha;非 None 时
+                              覆盖 mem_alpha_override 对 MAL 的作用。
+                              两者 default None → 现有 trainer/eval 路径完全不受影响。
 
         返回 dict:
             logits, state_next, aux_loss, loss(labels 给定时), correct, total
@@ -191,9 +193,13 @@ class XinheModel(nn.Module):
             return checkpoint(
                 self._forward_impl,
                 input_ids, state, labels, weights, mem_alpha_override, compute_logits,
+                mem_mac_override, mem_mal_override,
                 use_reentrant=False,
             )
-        return self._forward_impl(input_ids, state, labels, weights, mem_alpha_override, compute_logits)
+        return self._forward_impl(
+            input_ids, state, labels, weights, mem_alpha_override, compute_logits,
+            mem_mac_override, mem_mal_override,
+        )
 
     def _forward_impl(
         self,
@@ -203,104 +209,139 @@ class XinheModel(nn.Module):
         weights: Optional[torch.Tensor],
         mem_alpha_override: Optional[float],
         compute_logits: bool = True,
+        mem_mac_override: Optional[float] = None,
+        mem_mal_override: Optional[float] = None,
     ) -> dict:
+        # 已单值化:统一走 QueryHead 单全局路径
+        return self._forward_query_head(
+            input_ids, state, labels, weights, mem_alpha_override, compute_logits,
+            mem_mac_override, mem_mal_override,
+        )
+
+    def _global_read(self, q, old_hippo):
+        """单全局 read (delta):HippoDelta.retrieve。返回 (B,n_q,d_value)。"""
+        M = old_hippo.M if old_hippo is not None else None
+        return self.global_hippo.retrieve(M, q)
+
+    def _global_write_step(self, x_write, old_hippo):
+        """单全局 write (delta):HippoDelta.write。返回新 hippo state。"""
+        return self.global_hippo.write(x_write, old_hippo)
+
+    def _forward_query_head(
+        self,
+        input_ids: torch.Tensor,
+        state: XinheMemoryState,
+        labels: Optional[torch.Tensor],
+        weights: Optional[torch.Tensor],
+        mem_alpha_override: Optional[float],
+        compute_logits: bool = True,
+        mem_mac_override: Optional[float] = None,
+        mem_mal_override: Optional[float] = None,
+    ) -> dict:
+        """单全局 QueryHead forward(唯一 forward 路径):
+          1. embedding 低层 h_pre → QueryHead → q
+          2. global_hippo.retrieve(M_prev, q) → mem_out  ← 唯一一次 read
+          3. MAC-R: W_mac(mem_out) 拼输入序列前缀;MAL: W_mal(mem_out) 中后层残差(同一 mem_out)
+          4. write: global_write 层用 real 段 hidden store → M_next(供下一 turn read)
+        mem_alpha_override=0.0(NM-zero)同时关 MAC-R 与 MAL,验证 backbone 没偷记。
+        mem_mac_override / mem_mal_override(probe 用):独立 ablate MAC vs MAL,非 None 时
+        覆盖 mem_alpha_override 对该通路的作用。
+        """
         B, T = input_ids.shape
         device = input_ids.device
         pad_token_id = self._pad_token_id
+        content_emb = self.backbone.embed(input_ids)            # (B, T, hidden)
 
-        content_emb = self.backbone.embed(input_ids)  # (B, T, hidden_size)
+        # 1. 低层 h_pre 的"最后一个非 pad token" → q(右 pad 时 [:, -1] 会取到 pad)
+        if pad_token_id is not None:
+            last_idx = (input_ids != pad_token_id).long().sum(dim=1).clamp(min=1) - 1
+            h_last = content_emb[torch.arange(B, device=device), last_idx]   # (B, hidden)
+        else:
+            h_last = content_emb[:, -1]
+        q = self.query_head(h_last)                             # (B, n_q, d_total)
 
-        # v9.5 paper-faithful 序列布局(从前到后):
-        #   [fresh_mem (N_m), real (T)]
-        # input-level persistent_mem 已删 → 改 per-layer K/V(每个 full_attention 层 attention 内拼接)
-        # past_snapshots 已删 → 跨 turn carry 走 NM weights 演化(paper way)
-        # fresh_mem 仍在 real 前面 → 因果 mask 让 real 能 attend 到 fresh_mem
-        # NeuralMemory 在每层只把 mem_out 写到 fresh_mem 位置,其他位置 hidden 不动
-        # → memory 信息通过 attention(real → fresh_mem)进入 real 表示
-        N_m = self.n_mem_tokens if self.mem_token_init is not None else 0
+        # 2. 单次 read:retrieve_only(M_prev)。Phase 2 pause mix_gate → mem_out = rmsnorm(r_h)
+        gkey = self._global_write_idx
+        old_layer = (state.get(gkey, LayerMemState(None, None))
+                     if state is not None else LayerMemState(None, None))
+        old_hippo = old_layer.hippo
+        r_h = self._global_read(q, old_hippo)               # (B, n_q, d_value)
+        mem_out = self.global_mem_rmsnorm(r_h)
 
-        if N_m > 0:
-            fresh = self.mem_token_init.to(content_emb.dtype).unsqueeze(0).expand(B, -1, -1)
-            content_emb = torch.cat([fresh, content_emb], dim=1)
+        # 3. MAC-R 前缀(动态投影,QueryHead retrieve 的 mem_out → hidden)
+        mac_tokens = self.W_mac(mem_out)                        # (B, n_q, hidden)
+        # MAC-R alpha 路由:mem_mac_override(probe)优先;退化到 mem_alpha_override(NM-zero)
+        mac_alpha_val = mem_mac_override if mem_mac_override is not None else mem_alpha_override
+        if mac_alpha_val is not None:
+            mac_tokens = float(mac_alpha_val) * mac_tokens
+        N_m = self.n_query
+        content_emb = torch.cat([mac_tokens.to(content_emb.dtype), content_emb], dim=1)
+        fresh_start, fresh_end, real_start, real_end = 0, N_m, N_m, N_m + T
 
-        # 关键索引(loss 切片 + 每层 NM 写入定位用)
-        fresh_start = 0
-        fresh_end = N_m
-        real_start = fresh_end
-        real_end = real_start + T
-
-        # Memory hook(pure MAC):
-        #   1. NM forward:得 mem_out (full sequence,所有位置都有)
-        #   2. 只把 mem_out[fresh_start:fresh_end] 加到 hidden 同位置
-        #   3. real 位置不变 — 它们通过 attention 自己去 query fresh_mem
-        # 注意 NM 仍读全序列(包括 fresh_mem 自己的 init),所以 fresh_mem 位置的 mem_out
-        #   = "NM 对当前 query=mem_init 的回应",物理意义:memory 把检索结果写进笔记本
-        hook_layer_set = self._hook_layer_set
         new_layers: dict[int, LayerMemState] = {}
         aux_loss_terms: list[torch.Tensor] = []
+        lambda_div = float(getattr(self.config, "lambda_div", 0.0))
+        if lambda_div > 0:
+            from .query_head import QueryHead as _QH
+            # L_q-div = -λ·diversity(diversity↑ → loss↓,逼不同 turn 的 q 分离,防 mode collapse)
+            aux_loss_terms.append(-lambda_div * _QH.cosine_diversity(q))
+        # nm_aux(简化版,单全局):mac_tokens 经 lm_head 预测当前 turn value 首 token
+        # 逼 mem 通路必须含 value 信息(否则 mac_tokens 经 lm_head 不会预测对 → loss 大)
+        # 任何 override(NM-zero 或 probe MAC/MAL 独立 ablation)都跳过 nm_aux(避免 ablation 测出虚高数字)
+        _any_override = (mem_alpha_override is not None
+                         or mem_mac_override is not None
+                         or mem_mal_override is not None)
         nm_aux_weight = float(getattr(self.config, "nm_aux_weight", 0.0))
+        if (nm_aux_weight > 0 and labels is not None and weights is not None
+                and not _any_override):
+            vmask = (weights > 0.5)                                     # (B, T) value-span 位置
+            has_v = vmask.any(dim=1)                                    # (B,)
+            if has_v.any():
+                first_pos = vmask.long().argmax(dim=1)                  # (B,) 首个 value 位置
+                v_tok = labels.gather(1, first_pos.unsqueeze(1)).squeeze(1)  # (B,) value 首 token id
+                n_q = mac_tokens.shape[1]
+                tgt = v_tok.unsqueeze(1).expand(-1, n_q).reshape(-1)
+                tgt = torch.where(
+                    has_v.unsqueeze(1).expand(-1, n_q).reshape(-1),
+                    tgt, torch.full_like(tgt, -100),
+                )
+                mac_flat = mac_tokens.reshape(-1, mac_tokens.size(-1)).to(torch.bfloat16)
+                nm_ce = linear_cross_entropy(
+                    mac_flat, self.lm_head.weight, tgt,
+                    ignore_index=-100, reduction="mean",
+                )
+                aux_loss_terms.append(nm_aux_weight * nm_ce)
+        mal_target = self._mal_target_idx
 
         def memory_hook(hidden_states: torch.Tensor, layer_idx: int) -> torch.Tensor:
-            if layer_idx not in hook_layer_set:
-                return hidden_states
-            pair: NeuralMemoryPair = self.memory[str(layer_idx)]
-            old_state = state.get(layer_idx, LayerMemState(None, None))
-            x_in = self._d_total_in(hidden_states)
-            _x_out, new_state, aux = pair(x_in, layer_state=old_state)
-            new_layers[layer_idx] = new_state
-            aux_loss_terms.append(aux["gate_entropy_reg_loss"])
-            if N_m == 0:
-                return hidden_states  # 没启 mem tokens → memory 通路无写入点(纯 baseline)
-            mem_proj = self._d_total_out(aux["mem_out"])  # (B, T_ext, hidden)
-
-            # NM-only aux loss (A 实验):mem_proj 的 real 段过 frozen lm_head 预测 value token。
-            # 目的:逼 Hippo W 学 "name token → value token" 直读映射,绕过 backbone retrieval。
-            # 只在 value-span position 算(weights > 0.5 排除 distract lm_only=0.04),
-            # 否则 NM 会被教成 distract 复读机。cut CE 避免材化 (B,T,V) logits。
-            if nm_aux_weight > 0.0 and labels is not None:
-                mem_real = mem_proj[:, real_start:real_end, :]
-                shift_mem = mem_real[:, :-1, :].contiguous().view(-1, mem_real.size(-1))
-                shift_lbl = labels[:, 1:].contiguous().view(-1)
-                valid = shift_lbl != -100
-                if weights is not None:
-                    shift_w = weights[:, 1:].contiguous().view(-1)
-                    value_mask = (shift_w > 0.5) & valid
+            # MAL:中后层残差注入(mem_out 池化广播到 real 段;与 MAC-R 同源 mem_out,不抢 credit)
+            if layer_idx == mal_target:
+                # MAL alpha 路由:mem_mal_override(probe)优先;退化到 mem_alpha_override(NM-zero);
+                # 二者皆 None 时走学习参数 σ(mal_alpha_logit)
+                mal_alpha_val = mem_mal_override if mem_mal_override is not None else mem_alpha_override
+                if mal_alpha_val is None:
+                    alpha = torch.sigmoid(self.mal_alpha_logit)
                 else:
-                    value_mask = valid
-                if value_mask.any():
-                    # cut CE 要求 embedding bf16/fp16;mem_out 经 RMSNorm 可能是 fp32
-                    sel_h = shift_mem[value_mask].contiguous().to(torch.bfloat16)
-                    sel_l = shift_lbl[value_mask].contiguous()
-                    nm_ce = linear_cross_entropy(
-                        sel_h, self.lm_head.weight, sel_l,
-                        ignore_index=-100, reduction="mean",
-                    )
-                    aux_loss_terms.append(nm_aux_weight * nm_ce)
-            # MAC (paper-faithful): fresh_mem 位置 += mem_out (sigmoid gating 实测≈1, 直接加)
-            # MAL (iter4): real 位置 += alpha * mem_out_real, alpha>0 时启用,给 NM 直通 lm_head
-            # learning_session phase 1 走 mem_alpha_override=0.0 屏蔽两路注入 (NM-zero eval 也走这)
-            fresh_proj = mem_proj[:, fresh_start:fresh_end, :]
-            real_proj = mem_proj[:, real_start:real_end, :]
-            if mem_alpha_override is not None:
-                fresh_proj = float(mem_alpha_override) * fresh_proj
-                real_proj = float(mem_alpha_override) * real_proj
-            delta = torch.zeros_like(hidden_states)
-            delta[:, fresh_start:fresh_end, :] = fresh_proj
-            real_alpha = float(getattr(self.config, "mem_out_real_alpha", 0.0))
-            if real_alpha > 0:
-                delta[:, real_start:real_end, :] = real_alpha * real_proj
-            return hidden_states + delta
+                    alpha = float(mal_alpha_val)
+                mal_vec = self.W_mal(mem_out).mean(dim=1, keepdim=True)      # (B, 1, hidden)
+                delta = torch.zeros_like(hidden_states)
+                delta[:, real_start:real_end, :] = alpha * mal_vec
+                hidden_states = hidden_states + delta
+            # write:单全局 M 更新(只在 global_write 层 = full_attention 物理层)
+            if layer_idx == gkey:
+                x_write = self._d_total_in(hidden_states[:, real_start:real_end, :])
+                new_hippo = self._global_write_step(x_write, old_hippo)
+                new_layers[gkey] = LayerMemState(hippo=new_hippo, neo=None)
+            return hidden_states
 
-        # 标准因果 mask(只覆盖 fresh_mem 前缀 + real 段)
+        # ===== mask / forward / slice / loss 与旧路径同口径 =====
         T_ext = content_emb.shape[1]
         causal = torch.triu(
             torch.full((T_ext, T_ext), float("-inf"), device=device, dtype=content_emb.dtype),
             diagonal=1,
         )
         if pad_token_id is not None:
-            padding_mask = (input_ids != pad_token_id)             # (B, T)
-            # 顺序: [fresh_mem(N_m) | real(T)]
-            # fresh_mem 段永远 valid;real 段按 input_ids 判 pad
+            padding_mask = (input_ids != pad_token_id)
             pre_valid = torch.ones(B, real_start, dtype=torch.bool, device=device)
             padding_mask = torch.cat([pre_valid, padding_mask], dim=1)
             pad_col = torch.zeros(B, 1, T_ext, device=device, dtype=content_emb.dtype)
@@ -308,20 +349,15 @@ class XinheModel(nn.Module):
             mask = causal.unsqueeze(0).unsqueeze(0) + pad_col.unsqueeze(2)
         else:
             mask = causal.unsqueeze(0).unsqueeze(0)
-
         position_ids = torch.arange(T_ext, dtype=torch.long, device=device).unsqueeze(0)
 
         content_output = self.backbone.forward_blocks(
             content_emb, attention_mask=mask, position_ids=position_ids,
             layer_hook=memory_hook,
         )
-
-        # 切回真实 token 段(loss 只在 T 上)
         content_output = content_output[:, real_start:real_end, :]
 
-        # 聚合 state next:per-layer NM state(跨 turn 通过 NM weights 演化承载,无 mem_snapshots)
-        # 没经过 hook 的 layer_idx 沿用原 state(若有)
-        merged: dict[int, LayerMemState] = dict(state.layers) if state.layers else {}
+        merged = dict(state.layers) if (state is not None and state.layers) else {}
         merged.update(new_layers)
         state_next = XinheMemoryState(merged)
 
@@ -334,13 +370,8 @@ class XinheModel(nn.Module):
         )
 
         if compute_logits:
-            # eval/tests 路径:材化 (B,T,V) logits(由调用方读 result["logits"] argmax)
             logits = self.lm_head(content_output)
-            result = {
-                "logits": logits,
-                "state_next": state_next,
-                "aux_loss": aux_loss,
-            }
+            result = {"logits": logits, "state_next": state_next, "aux_loss": aux_loss}
             if labels is not None:
                 shift_logits = logits[:, :-1, :].contiguous()
                 shift_labels = labels[:, 1:].contiguous()
@@ -368,45 +399,29 @@ class XinheModel(nn.Module):
                     result["total"] = torch.tensor(0, device=ref_device)
             return result
 
-        # 训练快路径:cut_cross_entropy 不材化 (B,T,V) logits → 省 ~3GB / 4 turns
-        result = {
-            "logits": None,
-            "state_next": state_next,
-            "aux_loss": aux_loss,
-        }
+        result = {"logits": None, "state_next": state_next, "aux_loss": aux_loss}
         if labels is None:
             return result
-
-        shift_h = content_output[:, :-1, :].contiguous()           # (B, T-1, D)
-        shift_labels = labels[:, 1:].contiguous()                  # (B, T-1)
-        flat_h = shift_h.view(-1, shift_h.size(-1))                # (B*(T-1), D)
-        flat_labels = shift_labels.view(-1)                        # (B*(T-1),)
+        shift_h = content_output[:, :-1, :].contiguous()
+        shift_labels = labels[:, 1:].contiguous()
+        flat_h = shift_h.view(-1, shift_h.size(-1))
+        flat_labels = shift_labels.view(-1)
         valid_mask = flat_labels != -100
         valid_count = valid_mask.sum()
-
         if valid_count == 0:
             result["loss"] = torch.tensor(0.0, device=ref_device, requires_grad=True)
             result["correct"] = torch.tensor(0, device=ref_device)
             result["total"] = torch.tensor(0, device=ref_device)
             return result
-
-        lm_w = self.lm_head.weight  # (V, D)
+        lm_w = self.lm_head.weight
         if weights is not None:
-            per_token = linear_cross_entropy(
-                flat_h, lm_w, flat_labels,
-                ignore_index=-100, reduction="none",
-            )  # (B*(T-1),) — ignored 位置 cut CE 自动给 0
+            per_token = linear_cross_entropy(flat_h, lm_w, flat_labels, ignore_index=-100, reduction="none")
             shift_weights = weights[:, 1:].contiguous().view(-1).to(per_token.dtype)
             shift_weights = shift_weights * valid_mask.to(shift_weights.dtype)
             w_sum = shift_weights.sum().clamp(min=1e-8)
             ce_loss = (per_token * shift_weights).sum() / w_sum
         else:
-            ce_loss = linear_cross_entropy(
-                flat_h, lm_w, flat_labels,
-                ignore_index=-100, reduction="mean",
-            )
-
-        # chunked argmax(no_grad,不材化 (N, V))
+            ce_loss = linear_cross_entropy(flat_h, lm_w, flat_labels, ignore_index=-100, reduction="mean")
         valid_h = flat_h[valid_mask].detach()
         preds = _chunked_argmax(valid_h, lm_w)
         targets = flat_labels[valid_mask]
@@ -416,16 +431,11 @@ class XinheModel(nn.Module):
         return result
 
     def setup_device(self, device: torch.device):
-        if torch.cuda.device_count() > 1:
-            self.memory.to(device)
-            if not isinstance(self._d_total_in, nn.Identity):
-                self._d_total_in.to(device)
-                self._d_total_out.to(device)
-        else:
-            self.to(device)
+        # 单全局架构没有 per-layer memory ModuleDict,整 module 一并搬到设备
+        self.to(device)
 
     def init_state(self, batch_size: int = 1) -> XinheMemoryState:
-        """创建空白初始状态。NeuralMemoryPair forward 内 lazy init weights。"""
+        """创建空白初始状态(HippoDelta 在 first write 内 lazy init M)。"""
         return XinheMemoryState.init(self._hook_layer_indices)
 
     @torch.no_grad()
@@ -498,7 +508,7 @@ class XinheModel(nn.Module):
             del result
 
         # 关键:state 演化必须用 turn_max_tokens padded 输入,匹配训练分布。
-        # NM chunk_size=mem_chunk_size,变长输入触发的 inner SGD 与训练不一致,
+        # 变长 chat 输入下 delta 写入分布与训练不一致,
         # 实测变长 chat 跨 turn 召回 6%,padded 后 100%(scripts/_scratch probe 验证)。
         seg_len = getattr(self.config, "turn_max_tokens", 128)
         pad_id = getattr(self, "_pad_token_id", None)
@@ -521,17 +531,20 @@ class XinheModel(nn.Module):
         return generated, state_next
 
     def get_trainable_params(self) -> list[nn.Parameter]:
-        """收集所有可训练参数(memory + d_total 投影 + MAC 参数 + LoRA + per-layer K/V)。
+        """收集所有可训练参数:单全局 QueryHead/HippoDelta/W_mac/W_mal/MAL α/d_total 投影 + LoRA + per-layer K/V。
 
         策略:用 backbone.parameters() requires_grad 过滤,自动覆盖 LoRA 注入的 lora_A/B
         和后续 per-layer K/V 包装的 K_pers/V_pers(它们都在 backbone 子模块内)。
         """
-        params = [p for p in self.memory.parameters() if p.requires_grad]
+        params: list[nn.Parameter] = []
         if not isinstance(self._d_total_in, nn.Identity):
             params += [p for p in self._d_total_in.parameters() if p.requires_grad]
             params += [p for p in self._d_total_out.parameters() if p.requires_grad]
-        if self.mem_token_init is not None and self.mem_token_init.requires_grad:
-            params.append(self.mem_token_init)
+        # 单全局:QueryHead + HippoDelta + 注入投影(W_mac/W_mal) + MAL α
+        for mod in (self.query_head, self.global_hippo, self.W_mac, self.W_mal, self.global_mem_rmsnorm):
+            params += [p for p in mod.parameters() if p.requires_grad]
+        if self.mal_alpha_logit.requires_grad:
+            params.append(self.mal_alpha_logit)
         # LoRA 注入的 lora_A/B + 后续 per-layer K/V 的 K_pers/V_pers 都挂在 backbone 内
         params += [p for p in self.backbone.parameters() if p.requires_grad]
         return params

@@ -30,12 +30,10 @@ stages:
       grad_accum_steps: 2
       plugin_lr_multiplier: 1.0
       value_weight_cap: 1.0
-      phase: "P-cap"
       per_segment_checkpoint: false
       max_steps: 2000
       warmup_steps: 50
       weight_decay: 0.1
       use_joint_early_stop: false
-      mem_out_real_alpha: 0.1   # iter4 突破: MAC + MAL 混合,NM 输出直通 lm_head(详见 docs/v9.5_iter4)
     val_sets:
       - {name: "probe_val", path: "data/recall_probe/val.jsonl"}

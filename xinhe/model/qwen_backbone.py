@@ -42,13 +42,13 @@ class QwenBackbone(nn.Module, BackboneBase):
             for param in self.model.parameters():
                 param.requires_grad = False
 
-        # 局部 torch.compile:只编 full_attention 层(我们挂 NeuralMemoryPair 的层)。
+        # 局部 torch.compile:只编 full_attention 层(MAL/write 注入的层)。
         # 跳过 linear_attention 层 — 它们用 fla.modules.FusedRMSNormGated(Triton),
         # 让 Dynamo 在 backward 时遭遇 fla.utils.get_multiprocessor_count(@functools.cache)
         # 和 triton 的 cuda_utils.get_device_properties(C 扩展)→ Dynamo warn_once 噪音。
         # 让 linear_attention 走 eager 反而能享受 FLA Triton 内核的原生加速。
-        # NeuralMemoryPair 的 hook 也不进 compile 边界 → 不触发 Dynamo ↔ vmap+grad 的
-        # saved_tensors_hooks 冲突。多卡 device_map="auto" 时跳过(compile 跨设备不稳)。
+        # 记忆模块(QueryHead/HippoDelta/W_mac/W_mal)的 hook 也不进 compile 边界。
+        # 多卡 device_map="auto" 时跳过(compile 跨设备不稳)。
         if (getattr(config, "compile_backbone_layers", False)
                 and torch.cuda.device_count() <= 1):
             try:

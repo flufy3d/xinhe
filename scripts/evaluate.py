@@ -38,45 +38,26 @@ from xinhe.model.xinhe_model import XinheModel
 def load_model_and_tokenizer(config, checkpoint_path, device):
     model = XinheModel(config)
 
-    # eval 关 NM 的 torch.compile:Dynamo 在 no_grad 下 trace NeuralMemState pytree
-    # 触发 side_effects.codegen_save_tempvars AssertionError(cls_source 缺失)
-    # 训练期 grad 路径无此问题,只 eval 关
-    for pair in model.memory.values():
-        pair.hippocampus.use_compile_chunk_loop = False
-
     if checkpoint_path:
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-        if "memory_pair_state" not in checkpoint:
+        if "qhead_state" not in checkpoint:
             raise RuntimeError(
-                "checkpoint 缺少 'memory_pair_state' 键。仅兼容 v9+ 格式。"
+                "checkpoint 缺少 'qhead_state' 键。仅兼容单全局架构 ckpt。"
             )
-        mem_state = dict(checkpoint["memory_pair_state"])
-        # legacy ckpt 残留 alpha_logit(已被 Phase 0 alpha 清理移除),pop 掉避免 strict=True 失败
-        legacy_alpha_keys = [k for k in mem_state if k.endswith(".alpha_logit")]
-        for k in legacy_alpha_keys:
-            mem_state.pop(k)
-        if legacy_alpha_keys:
-            print(f"  [legacy] 跳过 ckpt 中已移除的 alpha_logit 键 ({len(legacy_alpha_keys)} 个)")
-
-        # ckpt 在 compile_backbone_layers=True 下保存时,neocortex 子模块被 OptimizedModule
-        # 包了一层,key 带 `_orig_mod.` 前缀。eval 关 compile 时 strip 掉这层。
-        orig_mod_keys = [k for k in mem_state if "._orig_mod." in k]
-        if orig_mod_keys and not getattr(config, "compile_backbone_layers", False):
-            for k in orig_mod_keys:
-                mem_state[k.replace("._orig_mod.", ".")] = mem_state.pop(k)
-            print(f"  [legacy] 剥离 _orig_mod. 前缀 ({len(orig_mod_keys)} 个,compile 关闭兼容)")
-
-        model.memory.load_state_dict(mem_state, strict=True)
-        # v9.5 MAC 参数(mem_token_init)可选加载
-        for key in ("mem_token_init",):
-            param = getattr(model, key, None)
-            if param is not None and key in checkpoint:
-                with torch.no_grad():
-                    param.copy_(checkpoint[key].to(param.device))
-        # v9.5 backbone addons(LoRA + per-layer K/V),strict=False 兼容旧 ckpt
+        # backbone addons(LoRA + per-layer K/V),strict=False 兼容老 backbone
         if "backbone_addons_state" in checkpoint:
             addons = {k: v.to(device) for k, v in checkpoint["backbone_addons_state"].items()}
             model.backbone.load_state_dict(addons, strict=False)
+        # 单全局模块:QueryHead + HippoDelta + 注入投影 + MAL α
+        qh = checkpoint["qhead_state"]
+        model.query_head.load_state_dict(qh["query_head"])
+        model.W_mac.load_state_dict(qh["W_mac"])
+        model.W_mal.load_state_dict(qh["W_mal"])
+        model.global_mem_rmsnorm.load_state_dict(qh["global_mem_rmsnorm"])
+        with torch.no_grad():
+            model.mal_alpha_logit.copy_(qh["mal_alpha_logit"].to(model.mal_alpha_logit.device))
+        model.global_hippo.load_state_dict(qh["global_hippo"])
+        print(f"  [QueryHead] 单全局模块加载(hippo_impl={qh.get('hippo_impl')})")
 
     model.to(device)
     model.eval()

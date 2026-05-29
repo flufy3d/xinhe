@@ -21,3 +21,23 @@ _PROJECT_ROOT = _Path(__file__).resolve().parent.parent
 _TRITON_CACHE = _PROJECT_ROOT / ".cache" / "triton"
 _TRITON_CACHE.mkdir(parents=True, exist_ok=True)
 _os.environ.setdefault("TRITON_CACHE_DIR", str(_TRITON_CACHE))
+
+# CUDA prime:在 fla import 之前 prime CUDA(touch 一个 tensor),让 triton 检测到 cuda。
+if _torch.cuda.is_available():
+    try:
+        _torch.cuda.init()
+        _ = _torch.zeros(1, device="cuda")
+    except Exception:  # pragma: no cover
+        pass
+
+# fla 0.5.0 兼容 monkey-patch:
+# fla.utils 在 import time 通过 triton runtime 检测 device,若 triton driver 还没 active
+# (Linux + 新 torch 常见)会 fallback 到 'cpu',然后把 device_torch_lib 设成 torch.cpu,
+# 后续在 ChunkGatedDeltaRuleFunction.apply 等地方调 torch.cpu.device(idx) → torch 2.11+
+# 已移除该 API,抛 AttributeError。
+# 修法:让 torch.cpu.device 成为 no-op context(cpu 没有 device index 概念,nullcontext 安全)。
+# 仅当 fla / torch 版本对齐(fla 自己检测对 cuda)时 device_torch_lib 才指向 torch.cuda,
+# 此 patch 不会被调用,纯防御。
+import contextlib as _ctx
+if not hasattr(_torch.cpu, "device"):
+    _torch.cpu.device = lambda index=0: _ctx.nullcontext()

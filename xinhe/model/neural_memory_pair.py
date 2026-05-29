@@ -1,32 +1,9 @@
-"""NeuralMemoryPair (v9) — Hippocampus(快适配)+ Neocortex(慢知识基底)。
+"""State 容器 + autocast 友好 RMSNorm(单全局 QueryHead/HippoDelta 架构遗留)。
 
-两条路径**训练机制完全不同**(这是 v9 的核心架构选择):
-
-  - Hippocampus(海马):浅 MLP(默认 depth=2 exp=2.0),**TTT inner SGD** 路径。
-    每 token 当作一次 SGD 例子,vmap(grad) 内层算 grad_W,W ← W - lr·grad_W。
-    每 episode 内 fast weights 演化,不带跨 episode 持久状态。
-    走 NeuralMemory.forward,xinhe 内 patch 了 `read_before_write=True`。
-
-  - Neocortex(大脑皮层):深 MLP(默认 depth=4 exp=4.0),**普通 nn.Module + 标准 backprop**。
-    weights 是 nn.Parameter,跨 episode 持久。outer Adam 经 backbone-driven backward
-    更新 — 即"白天活动 → 慢慢沉淀的世界知识"。无 vmap,无 fast weights,无 chunk SGD,
-    扩深(future)只受标准激活内存约束,不会爆 vmap 梯度张量。
-
-  Sleep 阶段(P-cap 之后)是把 Hippo 累积的活动 replay 到 Neo,推动 Neo 权重一次大更新;
-  也通过同样的标准 backprop。
-
-forward:
-  1. r_h, h_new = hippocampus(x, state=h_old, read_before_write=True)   # TTT
-  2. r_n         = neocortex(x)                                           # 普通 fwd
-  3. q = gate_q(x); gate = softmax([⟨q,r_h⟩, ⟨q,r_n⟩] / √d)               # 内容感知
-  4. mem_out = gate·{r_h, r_n} → mem_rmsnorm
-  5. return (x + mem_out, LayerMemState(hippo=h_new, neo=None), aux)
-
-paper-faithful 形态:直接 += mem_out(无 alpha gate)。MAC caller 用 aux["mem_out"] 填
-fresh_mem 位置;NM-zero ablation 走 xinhe_model.py 的 mem_alpha_override 参数(在那里
-零化 fresh_proj),不需要 NeuralMemoryPair 这层介入。
-
-LayerMemState.neo 永远 None(为兼容旧字段保留位置),Neo 没有 episode 内状态。
+老的 NeuralMemoryPair(Hippo TTT + Neo MLP + gate_q)已删,只保留:
+  - `LayerMemState` / `XinheMemoryState`:跨 turn state 容器,被 xinhe_model.py 用
+  - `AdaptiveRMSNorm`:autocast 友好的 RMSNorm,HippoDelta/QueryHead 用
+  - `_logit`:辅助函数,留作可能的旁路 init 使用
 """
 import math
 from dataclasses import dataclass
@@ -35,19 +12,6 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils._pytree import tree_map
-
-from .neural_memory import NeuralMemory, NeuralMemState, mem_state_detach
-from .memory_models import MemoryMLP
-
-
-def _mem_state_to(state: NeuralMemState, device) -> NeuralMemState:
-    """walk NeuralMemState pytree,把所有 tensor leaf 移到 device。"""
-    moved = tree_map(
-        lambda t: t.to(device) if torch.is_tensor(t) else t,
-        tuple(state),
-    )
-    return NeuralMemState(*moved)
 
 
 def _logit(p: float, eps: float = 1e-6) -> float:
@@ -73,46 +37,39 @@ class AdaptiveRMSNorm(nn.RMSNorm):
         return F.rms_norm(x, self.normalized_shape, w, self.eps)
 
 
-def _upgrade_rmsnorms_to_adaptive(module: nn.Module) -> None:
-    """递归把 module 子树里所有 `type(m) is nn.RMSNorm` 实例换成 AdaptiveRMSNorm,
-    γ 数据原封拷过去。Hippo NeuralMemory 内部的 RMSNorm 由此一并升级。"""
-    for name, child in list(module.named_children()):
-        if type(child) is nn.RMSNorm:
-            shape = child.normalized_shape
-            dim = shape[0] if isinstance(shape, (tuple, list)) else int(shape)
-            affine = child.weight is not None
-            new = AdaptiveRMSNorm(dim, eps=child.eps, elementwise_affine=affine)
-            if affine:
-                new.weight.data.copy_(child.weight.data)
-            setattr(module, name, new)
-        else:
-            _upgrade_rmsnorms_to_adaptive(child)
-
-
 @dataclass
 class LayerMemState:
-    """单层 (hippo, neo) 状态。None 表示未初始化,NeuralMemory.forward 内 lazy init。"""
-    hippo: Optional[NeuralMemState] = None
-    neo: Optional[NeuralMemState] = None
+    """单层状态容器。
+
+    单全局架构下,只有 `_global_write_idx` 一层会持有非空 hippo(HippoDeltaState);
+    其它 hook 层始终 None。neo 字段已废弃(老 NeuralMemoryPair 的位),保留位置以兼容
+    旧 ckpt 字段名(load 时会被覆盖为 None)。鸭子类型:hippo 是 HippoDeltaState,
+    自带 .detach() / .to(),无需 pytree walk。
+    """
+    hippo: Optional[object] = None
+    neo: Optional[object] = None
 
     def detach(self) -> "LayerMemState":
+        h, n = self.hippo, self.neo
         return LayerMemState(
-            hippo=mem_state_detach(self.hippo) if self.hippo is not None else None,
-            neo=mem_state_detach(self.neo) if self.neo is not None else None,
+            hippo=(h.detach() if h is not None and hasattr(h, "detach") else h),
+            neo=(n.detach() if n is not None and hasattr(n, "detach") else n),
         )
 
     def to(self, device) -> "LayerMemState":
+        h, n = self.hippo, self.neo
         return LayerMemState(
-            hippo=_mem_state_to(self.hippo, device) if self.hippo is not None else None,
-            neo=_mem_state_to(self.neo, device) if self.neo is not None else None,
+            hippo=(h.to(device) if h is not None and hasattr(h, "to") else h),
+            neo=(n.to(device) if n is not None and hasattr(n, "to") else n),
         )
 
 
 class XinheMemoryState:
     """模型级 state 容器,per-layer LayerMemState 字典。
 
-    v9.5 paper-faithful:删除 mem_snapshots(跨 turn hidden carry,paper 没有,
-    跨 turn 通过 NM weights 演化承载,W 在 episode 内连续 update,turn 之间不重置)。
+    单全局架构下只有 _global_write_idx 那一层真的会被填进 HippoDeltaState,
+    其它 hook 层永远是 LayerMemState(None, None) — 容器形态保留是为了 trainer
+    和 evaluate 的 .detach() / .to() 通用循环代码不用因为架构改造而改 API。
     """
 
     def __init__(
@@ -152,264 +109,3 @@ class XinheMemoryState:
 
     def values(self):
         return self.layers.values()
-
-
-class NeocortexBlock(nn.Module):
-    """Neo: 多头深 MLP,普通 nn.Module + 标准 backprop。
-
-    与 Hippo(TTT inner SGD)对比:
-      - 不持有 episode-scoped fast weights(weights 是 nn.Parameter,跨 episode/batch 持久)
-      - 不走 vmap+grad,前向就是 multi-head GeLU MLP
-      - 显存仅吃常规 activation,扩深不爆
-
-    结构(每 head 独立 MLP weights,广播到 batch 维度):
-      x: (..., d_total)
-      → pre_rmsnorm
-      → split heads: (..., heads, d_head)
-      → for each layer: GeLU(prev) @ W_h    (W_h shape: (heads, d_in, d_out))
-      → merge heads: (..., d_total)
-    """
-
-    def __init__(
-        self,
-        d_total: int,
-        n_heads: int,
-        d_head: int,
-        depth: int,
-        expansion: float,
-        pre_norm: bool = True,
-    ):
-        super().__init__()
-        assert d_total == n_heads * d_head
-        self.d_total = d_total
-        self.n_heads = n_heads
-        self.d_head = d_head
-        self.norm = AdaptiveRMSNorm(d_total) if pre_norm else nn.Identity()
-
-        dim_hidden = int(d_head * expansion)
-        dims = [d_head] + [dim_hidden] * (depth - 1) + [d_head]
-        self.weights = nn.ParameterList([
-            nn.Parameter(torch.empty(n_heads, di, do))
-            for di, do in zip(dims[:-1], dims[1:])
-        ])
-        for w in self.weights:
-            for h in range(n_heads):
-                nn.init.xavier_uniform_(w[h])
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (..., d_total)
-        h = self.norm(x)
-        # split into heads: (..., heads, d_head)
-        leading = h.shape[:-1]
-        h_per_head = h.view(*leading, self.n_heads, self.d_head)
-        for ind, w in enumerate(self.weights):
-            if ind > 0:
-                h_per_head = F.gelu(h_per_head)
-            # einsum: ...hd, hde -> ...he
-            h_per_head = torch.einsum('...hd,hde->...he', h_per_head, w)
-        # merge heads back
-        return h_per_head.reshape(*leading, self.d_total)
-
-
-class NeuralMemoryPair(nn.Module):
-    """挂在单个 full-attn 层上的 Hippo(TTT)+ Neo(static MLP)容器。"""
-
-    def __init__(
-        self,
-        d_total: int,
-        n_heads: int,
-        d_head: int,
-        hippo_mlp_depth: int = 2,
-        hippo_mlp_expansion: float = 2.0,
-        neo_mlp_depth: int = 4,
-        neo_mlp_expansion: float = 4.0,
-        hippo_retention: float = 0.99,
-        hippo_base_lr: float = 1e-2,
-        chunk_size: int = 64,
-        phase: str = "P-cap",
-        gate_entropy_lambda: float = 0.01,
-        disable_neo: bool = False,
-        enable_qk_projection: bool = False,
-    ):
-        super().__init__()
-        assert phase in ("P-cap", "Operational"), f"unknown phase: {phase}"
-        assert d_total == n_heads * d_head, \
-            f"d_total ({d_total}) must equal n_heads ({n_heads}) * d_head ({d_head})"
-        self.d_total = d_total
-        self.n_heads = n_heads
-        self.d_head = d_head
-        self.gate_entropy_lambda = float(gate_entropy_lambda)
-        self.phase = phase
-        self.disable_neo = bool(disable_neo)
-
-        # Hippo:TTT inner SGD via NeuralMemory(快适配,episode 内演化)
-        self.hippocampus = self._build_neural_memory(
-            d_total, n_heads, d_head, hippo_mlp_depth, hippo_mlp_expansion,
-            hippo_retention, hippo_base_lr, chunk_size,
-            enable_qk_projection=enable_qk_projection,
-        )
-        # Neo:普通深 MLP(慢知识基底,outer Adam 慢更新)
-        self.neocortex = NeocortexBlock(
-            d_total, n_heads, d_head,
-            depth=neo_mlp_depth, expansion=neo_mlp_expansion,
-        )
-
-        # 内容感知 gate:q from x;<q, r_h>/<q, r_n> 决定权重
-        self.gate_q = nn.Linear(d_total, d_total, bias=False)
-        nn.init.xavier_uniform_(self.gate_q.weight)
-
-        # 控制 mem_out 跟 attn_out 同量级,避免幅值竞争盖住 backbone
-        self.mem_rmsnorm = AdaptiveRMSNorm(d_total)
-
-        # daytime_plastic_hippo:控制 episode 内 fast weights 是否演化(set_daytime_plastic 切)
-        # daytime_plastic_neo:Neo 是普通 backprop 路径,这个 flag 仅作 API 兼容,
-        #   实际"冻 Neo"应该改 self.neocortex.requires_grad_(False)。
-        self._daytime_plastic_hippo: bool = True
-        self._daytime_plastic_neo: bool = (phase == "P-cap")
-
-        # 旁路诊断:存 detached scalar tensor,trainer log 时才 .item()
-        # 不用 .item() 进 forward,否则每层每 turn 一次 CPU sync,GPU 利用率从 ~80% 跌到 ~10%
-        self.last_mem_out_norm = torch.zeros(1)
-
-        # Hippo NeuralMemory 内部仍是普通 nn.RMSNorm(γ fp32),autocast 下仍报警告。
-        # 升级它们到 AdaptiveRMSNorm:weight 保留 fp32 不动 Adam,forward 即时 cast 走 fused。
-        _upgrade_rmsnorms_to_adaptive(self.hippocampus)
-
-    @staticmethod
-    def _build_neural_memory(
-        d_total: int,
-        n_heads: int,
-        d_head: int,
-        depth: int,
-        expansion: float,
-        retention: float,
-        base_lr: float,
-        chunk_size: int,
-        enable_qk_projection: bool = False,
-    ) -> NeuralMemory:
-        mlp = MemoryMLP(dim=d_head, depth=depth, expansion_factor=expansion)
-        nm = NeuralMemory(
-            dim=d_total,
-            dim_head=d_head,
-            heads=n_heads,
-            chunk_size=chunk_size,
-            # batch_size = chunk_size:每个 chunk 边界触发 update_after_final_store,
-            # 把 last_update(decay-dep)拷回 state.weights → 跨 forward 时下一次 read 能看见
-            # 不设此项时 state.weights 永远是 input 权重,decay 不进 read 通路 → to_decay_factor
-            # 永远收不到梯度,paper 的 input-dependent forget gate 失效。
-            batch_size=chunk_size,
-            model=mlp,
-            init_decay_bias=_logit(1.0 - retention),  # init retention = 1 - sigmoid(bias)
-            default_step_transform_max_lr=base_lr,
-            qk_rmsnorm=True,
-            per_head_learned_parameters=True,
-            momentum=True,
-            momentum_order=1,
-            pre_rmsnorm=True,
-            post_rmsnorm=False,
-            enable_qk_projection=enable_qk_projection,
-        )
-        # to_decay_factor: input-dependent forget gate(paper Table 5 ablation 中单一最大贡献项)。
-        # init bias 已用 _logit(1 - retention) 设(Hippo retention=0.99 → bias≈-4.6),
-        # 让外层 backprop 从 init 起步学习,模型可学"什么时候忘什么"。
-        # 旧版冻结 → Hippo 永远是常数 retention,违反 paper 核心设计。
-        # NeuralMemory 用 `repeat(p, '... -> h ...', h=heads)` 把单 head 参数广播成
-        # (H, ...) 后塞进 nn.Parameter,这是 expanded view → 同一物理内存被 H 个位置共享。
-        # Adam 等 in-place optimizer 会触发 "more than one element refers to single memory location"
-        # 这里强制 clone 出 contiguous Parameter,断开 view-share。
-        new_params = nn.ParameterList([
-            nn.Parameter(p.detach().clone().contiguous(), requires_grad=p.requires_grad)
-            for p in nm.memory_model_parameters
-        ])
-        nm.memory_model_parameters = new_params
-        return nm
-
-    def set_daytime_plastic(
-        self,
-        hippo: Optional[bool] = None,
-        neo: Optional[bool] = None,
-    ) -> None:
-        """切换白天可塑性。learning_session 阶段 1 应都设为 False(走干净 forward)。"""
-        if hippo is not None:
-            self._daytime_plastic_hippo = bool(hippo)
-        if neo is not None:
-            self._daytime_plastic_neo = bool(neo)
-
-    @property
-    def daytime_plastic_hippo(self) -> bool:
-        return self._daytime_plastic_hippo
-
-    @property
-    def daytime_plastic_neo(self) -> bool:
-        return self._daytime_plastic_neo
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        layer_state: Optional[LayerMemState] = None,
-    ) -> tuple[torch.Tensor, LayerMemState, dict]:
-        """
-        x:           (B, T, d_total)
-        layer_state: 上一次 forward 的 LayerMemState,None 时 lazy init
-
-        返回:
-            x_out:      (B, T, d_total) — 已加 mem_out 残差(paper-faithful 直接 +=)
-            new_state:  LayerMemState(hippo=NeuralMemState, neo=None)
-            aux:        {"gate_entropy_reg_loss": Tensor, "mem_out": Tensor, ...}
-        """
-        if layer_state is None:
-            layer_state = LayerMemState(None, None)
-
-        h_old = layer_state.hippo
-
-        # 1. Hippo:TTT inner SGD,read_before_write=True → retrieve 用入口 weights
-        r_h, h_new = self.hippocampus(x, state=h_old, read_before_write=True)
-        if not self._daytime_plastic_hippo:
-            h_new = h_old
-
-        if self.disable_neo:
-            # paper-faithful Titans MAC:仅 Hippo 路径,无 gate / Neo
-            mem_out = self.mem_rmsnorm(r_h)
-            self.last_mem_out_norm = mem_out.detach().float().norm()
-            x_out = x + mem_out
-            zero = torch.zeros((), device=x.device, dtype=x.dtype)
-            aux = {
-                "gate_entropy": zero,
-                "gate_entropy_reg_loss": zero,
-                "gate_mean_h": torch.ones((), device=x.device, dtype=x.dtype),
-                "gate_mean_n": zero,
-                "mem_out": mem_out,
-            }
-            return x_out, LayerMemState(hippo=h_new, neo=None), aux
-
-        # 2. Neo:普通 multi-head MLP,无 state、无 vmap、无 chunk SGD
-        r_n = self.neocortex(x)
-
-        # 3. 内容感知 gate:用 x 投影出 q,跟 r_h / r_n 点积取置信度
-        q = self.gate_q(x)
-        scale = 1.0 / math.sqrt(q.shape[-1])
-        logit_h = (q * r_h).sum(dim=-1, keepdim=True) * scale
-        logit_n = (q * r_n).sum(dim=-1, keepdim=True) * scale
-        gate = torch.softmax(torch.cat([logit_h, logit_n], dim=-1), dim=-1)  # (B, T, 2)
-
-        # 4. mem_out + RMSNorm
-        mem_out = gate[..., 0:1] * r_h + gate[..., 1:2] * r_n
-        mem_out = self.mem_rmsnorm(mem_out)
-        # 旁路诊断:存 scalar tensor,延迟 .item() 到 trainer log block(避免 forward 里 CPU sync)
-        self.last_mem_out_norm = mem_out.detach().float().norm()
-
-        # 5. paper-faithful 直接 += mem_out(无 alpha gate)。
-        # NM-zero ablation 由 caller(xinhe_model.py)在 fresh_proj 位置零化,不在这里介入。
-        x_out = x + mem_out
-
-        # 6. gate 熵正则:防 gate 单边塌缩(λ * (-H) 加入 loss → 等价 λ 最大化 H)
-        gate_entropy = -(gate.clamp_min(1e-9).log() * gate).sum(dim=-1).mean()
-        aux = {
-            "gate_entropy": gate_entropy.detach(),
-            "gate_entropy_reg_loss": -self.gate_entropy_lambda * gate_entropy,
-            "gate_mean_h": gate[..., 0].mean().detach(),
-            "gate_mean_n": gate[..., 1].mean().detach(),
-            "mem_out": mem_out,   # MAC 模式下 caller 从这里取原 mem 输出去填 fresh_mem 位置
-        }
-
-        return x_out, LayerMemState(hippo=h_new, neo=None), aux

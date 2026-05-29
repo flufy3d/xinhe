@@ -7,22 +7,11 @@ backbone:
   hidden_size: 1024
   freeze: true
 
-# v9 NeuralMemoryPair:
-#   - Hippocampus:浅 MLP + TTT inner SGD(episode 内 fast weights 演化)
-#   - Neocortex:深 MLP + 标准 backprop(慢知识基底,outer Adam 经 backbone 慢更新,
-#                无 episode-scoped state,无 vmap+grad,扩深不爆显存)
+# 单全局 QueryHead + HippoDelta 架构:具体 d_key / d_value / n_query 等
+# 在派生入口(pcap_delta.yaml 等)显式设置。
 state:
   n_heads: 16
   head_dim: 64                    # d_total = 16*64 = 1024 = hidden_size
-  hippo_mlp_depth: 2
-  hippo_mlp_expansion: 2.0
-  neo_mlp_depth: 4
-  neo_mlp_expansion: 4.0
-  hippo_retention: 0.999          # α_t init = 1 - sigmoid(_logit(1 - retention)),outer Adam 之后可学
-  hippo_base_lr: 5.0e-3           # θ_t = sigmoid(Linear(x)) * base_lr,每步 inner SGD 上限
-  mem_chunk_size: 128             # turn 内 inner SGD 步数 = turn_max_tokens / chunk
-  gate_entropy_lambda: 0.0       # 默认关;若监控到 H(gate)<0.4(单边塌缩)再开 0.01-0.05
-  phase: "P-cap"                  # P-cap | Operational
 
 # v9.5 LoRA(frozen backbone 适配 MAC OOD 输入的根因修复,与 NM/MAC 协同)
 # qkvo,rank=16/alpha=32,零初始化保证启动期 frozen backbone 行为不变。

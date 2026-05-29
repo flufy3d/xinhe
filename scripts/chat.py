@@ -114,36 +114,30 @@ def main():
 
     model = XinheModel(config)
 
-    # chat 关 NM 的 torch.compile(同 evaluate.py:Dynamo 在 no_grad pytree 上撞 AssertionError)
-    for pair in model.memory.values():
-        pair.hippocampus.use_compile_chunk_loop = False
-
-    # 加载训练好的 checkpoint
+    # 加载训练好的 checkpoint(单全局架构)
     if checkpoint:
         # 若用户显式指定了 --config，但与 checkpoint 配置不一致，给出提示
         ckpt_cfg = checkpoint.get("config")
         if config_explicit and isinstance(ckpt_cfg, XinheConfig):
             if (ckpt_cfg.backbone_type != config.backbone_type) or (ckpt_cfg.hidden_size != config.hidden_size):
                 print("  警告: --config 与 checkpoint 不匹配。")
-        if "memory_pair_state" not in checkpoint:
+        if "qhead_state" not in checkpoint:
             raise RuntimeError(
-                "checkpoint 缺少 'memory_pair_state' 键。v9 不兼容 v8 hippocampus_state。"
+                "checkpoint 缺少 'qhead_state' 键。仅兼容单全局架构 ckpt。"
             )
-        # ckpt 是 compile 状态下保存的(key 含 `_orig_mod.`);chat 关了 compile,目标 module 没这个前缀
-        def _strip_orig_mod(sd: dict) -> dict:
-            return {k.replace("_orig_mod.", ""): v for k, v in sd.items()}
-        model.memory.load_state_dict(_strip_orig_mod(checkpoint["memory_pair_state"]), strict=True)
-        # v9.5 MAC 参数(mem_token_init)
-        for key in ("mem_token_init",):
-            param = getattr(model, key, None)
-            if param is not None and key in checkpoint:
-                with torch.no_grad():
-                    param.copy_(checkpoint[key].to(param.device))
-        # v9.5 backbone addons(LoRA + per-layer K/V)— 不加这个 LoRA 权重不生效,行为像 base Qwen
+        # backbone addons(LoRA + per-layer K/V)— 不加这个 LoRA 权重不生效,行为像 base Qwen
         if "backbone_addons_state" in checkpoint:
-            addons = {k: v.to(device) for k, v in
-                      _strip_orig_mod(checkpoint["backbone_addons_state"]).items()}
+            addons = {k: v.to(device) for k, v in checkpoint["backbone_addons_state"].items()}
             model.backbone.load_state_dict(addons, strict=False)
+        # 单全局模块
+        qh = checkpoint["qhead_state"]
+        model.query_head.load_state_dict(qh["query_head"])
+        model.W_mac.load_state_dict(qh["W_mac"])
+        model.W_mal.load_state_dict(qh["W_mal"])
+        model.global_mem_rmsnorm.load_state_dict(qh["global_mem_rmsnorm"])
+        with torch.no_grad():
+            model.mal_alpha_logit.copy_(qh["mal_alpha_logit"].to(model.mal_alpha_logit.device))
+        model.global_hippo.load_state_dict(qh["global_hippo"])
         print(f"  checkpoint 已加载: {args.checkpoint}")
 
     model.to(device)

@@ -1,0 +1,46 @@
+# 本地 5080 16GB mini-train 入口(skeleton-only,shortcut suppression 默认开)。
+# 内存预算实测(scripts/probe/mem_sweep.py @ seg=256):
+#   batch=1 tbptt=4 shortcut=on → ~8 GB ✓
+#   batch=1 tbptt=8 shortcut=on → 10.19 GB ✓
+#   batch=2 tbptt=4 shortcut=on → 9.97 GB ✓
+#   ↑ 三者都安全;turn_max_tokens 缩到 256(原 768)是 5080 上跑 shortcut 的关键。
+#
+# 实测出处:见 nm_debug_bench step 0-11 全 PASS + min_arch_test --shortcut(grad)单 episode
+#         200 步内 NM-on>NM-zero,gap=+0.99 nat。
+#
+# 跑训练:
+#   wsl bash -c "source /mnt/d/Projects/xinhe/.venv-linux/bin/activate && \
+#                cd /mnt/d/Projects/xinhe && \
+#                PYTHONUNBUFFERED=1 python -u scripts/train.py \
+#                  --config configs/pcap_skeleton_5080.yaml"
+base: qwen3.5-0.8b.yaml
+
+curriculum_file: curriculum_pcap_skeleton.yaml
+
+state:
+  n_persistent_per_layer: 4
+
+training:
+  grad_accum_steps: 4
+  dtype: bfloat16
+  compile_backbone_layers: false   # 5080 上 compile + dual backward 易冲突;关掉求稳
+
+stage_overrides:
+  pcap_skeleton:
+    learning_rate: 7.0e-5
+    warmup_steps: 50
+    weight_decay: 0.1
+    batch_size: 1
+    grad_accum_steps: 2
+    turn_max_tokens: 256           # ← 关键!原 768 跑不动 shortcut;256 是 sweep 测过的安全值
+    max_turns_per_episode: 16
+    tbptt_turns: 4                 # ← 从 8 降到 4,留 mem 给 shortcut dual backward
+    value_weight_cap: 5.0
+    max_steps: 300                 # mini-train:看 gap 趋势 + 验证 shortcut 稳定,不追求收敛
+    nm_aux_weight: 0.5
+    # Margin-Based Shortcut Suppression:让 backbone 在 NM-zero 路径不能 shortcut
+    # margin 0.5 = mem 必须提供 ≥0.5 nat loss 下降才不被推
+    shortcut_suppression: true
+    shortcut_margin: 0.5
+    shortcut_lambda: 1.0
+    memory_dropout: 0.0            # 与 shortcut explicit 互补;先不开,看纯 shortcut 效果

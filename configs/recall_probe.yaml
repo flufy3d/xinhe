@@ -8,7 +8,7 @@
 #
 # 实验设计:
 #   - tbptt_turns=4 == max_turns_per_episode=4 → 全 BPTT,梯度可达 turn 0 的 W 更新
-#   - turn 短(96 token cap)+ disable_neo + N_p=4 + N_m=16(与 ablation v3 一致)
+#   - turn 短(96 token cap)+ N_p=4(与 ablation v3 一致)
 #   - 2000 step,bs=4*accum=2,有效 batch=8 episode/step ≈ 16000 episode 训过(3.2 epoch)
 #
 # 判定标准:
@@ -32,12 +32,8 @@ base: qwen3.5-0.8b.yaml
 curriculum_file: curriculum_recall_probe.yaml
 
 state:
-  # 与 v3 (disable_neo) 一致 — 纯 Hippo 路径,不让 Neo MLP 干扰
+  # 纯 HippoDelta 路径(单全局)— 不让 backbone 占主
   n_persistent_per_layer: 4
-  n_mem_tokens: 16
-  hippo_base_lr: 1.0e-2
-  mem_chunk_size: 128
-  disable_neo: true
 
 training:
   grad_accum_steps: 2

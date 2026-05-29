@@ -6,8 +6,6 @@ curriculum_file: curriculum_pcap_skeleton.yaml
 
 state:
   n_persistent_per_layer: 4
-  n_mem_tokens: 16
-  disable_neo: false
 
 training:
   grad_accum_steps: 4
@@ -26,14 +24,6 @@ stage_overrides:
     tbptt_turns: 8
     value_weight_cap: 5.0
     max_steps: 1200
-    # iter11 A 实验:MAL alpha=0 关 real 直接注入。NM-aux 让 W 学输出 = value embedding,
-    # 若再走 hidden += alpha * value_embedding 会推 backbone hidden 到 vocab space,
-    # backbone LM 整体崩(iter11a step 400 实测 NM-on 0% / NM-zero 41%, ΔNM -41pp)。
-    # 改走纯 MAC:fresh_mem prefix 携带 W 的 value embedding,backbone real 经 attention 取。
-    mem_out_real_alpha: 0.0
     # NM-only aux loss。mem_out 过 frozen lm_head 预测 value token,
-    # 逼 Hippo W 学 key→value 映射。0 关,~0.5 跟主 loss 等权。
+    # 逼记忆通路学 key→value 映射。0 关,~0.5 跟主 loss 等权。
     nm_aux_weight: 0.5
-    # TNT Q-K Projection (iter14):retrieve 时 q ← M·q,M = Σ k_τ k_τ^T 跨 turn carry。
-    # 解 iter4-13 read=0% 死锁的核心假设:冻 backbone 下 q 与 k 落在不同子空间,M·q 把 q 投回 keys 子空间。
-    enable_qk_projection: true

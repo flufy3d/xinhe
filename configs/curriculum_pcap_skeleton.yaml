@@ -30,12 +30,10 @@ stages:
       turn_max_tokens: 768
       plugin_lr_multiplier: 1.0
       value_weight_cap: 1.0
-      phase: "P-cap"
       per_segment_checkpoint: false
       max_steps: 2000
       warmup_steps: 100
       weight_decay: 0.1
       use_joint_early_stop: false
-      mem_out_real_alpha: 0.1
     val_sets:
       - {name: "skeleton_val", path: "data/skeleton/val.jsonl"}
