@@ -112,7 +112,7 @@ def test_dataset_loads_jsonl(tmp_path, tokenizer):
     path = tmp_path / "test.jsonl"
     path.write_text(json.dumps(sample, ensure_ascii=False) + "\n", encoding="utf-8")
 
-    ds = ConversationDataset(str(path), tokenizer, turn_max_tokens=64, max_turns_per_episode=4)
+    ds = ConversationDataset(str(path), tokenizer, turn_max_tokens=64, max_turns_per_episode=4, use_cache=False)
     assert len(ds) == 1
     ep = ds[0]
     assert len(ep) == 4   # padded to max_turns_per_episode

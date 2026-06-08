@@ -52,12 +52,14 @@ def make_dataloaders(config, tokenizer):
         tokenizer=tokenizer,
         turn_max_tokens=config.turn_max_tokens,
         max_turns_per_episode=config.max_turns_per_episode,
+        cache_slot="train",
     )
     val_dataset = ConversationDataset(
         data_path=config.val_path,
         tokenizer=tokenizer,
         turn_max_tokens=config.turn_max_tokens,
         max_turns_per_episode=config.max_turns_per_episode,
+        cache_slot="val",
     ) if Path(config.val_path).exists() else None
 
     train_loader = DataLoader(

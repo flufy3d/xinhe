@@ -17,12 +17,81 @@ DataLoader 工作:
       "lm_only"  → lm_weight=0.3, value tokens 也用 0.3（无 value 加权）
       "false"    → labels 全 -100, 不算 loss
 """
+import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Optional, Union
 
 import torch
 from torch.utils.data import Dataset
+
+
+# ── episode 缓存:首次构建后 pickle 到 .cache/episodes/<slot>_<hash>.pt ──
+# tokenizer / turn 限制 / 数据源 + mtime 任一变就 miss 重建;重启训练直接 torch.load
+# 几秒过 tokenize 阶段。
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def _resolve_cache_dir() -> Path:
+    """episode cache 路径解析:
+    - 默认:`<project>/.cache/episodes`(Windows native / Linux native VM,ext4 / NTFS 速度可)
+    - **WSL + 项目在 /mnt/<drive>/**:走 home ext4(`~/.cache/xinhe/episodes`),
+      避开 9P 协议大文件读慢(实测 4.8 GB cache load 在 /mnt/d/ 要 17 分钟,
+      home ext4 同样大小 < 1 分钟)。
+    - 环境变量 `XINHE_CACHE_DIR` 强制覆盖(remote VM 想统一路径时用)。
+    """
+    env_override = os.environ.get("XINHE_CACHE_DIR")
+    if env_override:
+        return Path(env_override).expanduser()
+    default = PROJECT_ROOT / ".cache" / "episodes"
+    # 检测 WSL:/proc/sys/kernel/osrelease 含 "WSL"/"microsoft"
+    try:
+        rel = Path("/proc/sys/kernel/osrelease").read_text().lower()
+        is_wsl = ("wsl" in rel) or ("microsoft" in rel)
+    except Exception:
+        is_wsl = False
+    # WSL 项目根在 /mnt/<drive>/ 才需要绕,native /home/ /root/ 不用
+    if is_wsl and str(PROJECT_ROOT).startswith("/mnt/"):
+        return Path.home() / ".cache" / "xinhe" / "episodes"
+    return default
+
+
+CACHE_DIR = _resolve_cache_dir()
+
+
+def _make_cache_key(payload: dict) -> str:
+    """16 位 sha1 摘要,key 由调用方按 dataset 类别构造。"""
+    blob = json.dumps(payload, sort_keys=True, default=str).encode()
+    return hashlib.sha1(blob).hexdigest()[:16]
+
+
+def _slot_cache_path(slot: str, key: str) -> Path:
+    """同一 slot 同时只保留 1 份 cache。改 config → 新 hash → 落新文件 → 旧同槽自动清。"""
+    return CACHE_DIR / f"{slot}_{key}.pt"
+
+
+def _purge_slot_orphans(slot: str, keep_path: Path) -> None:
+    """删 CACHE_DIR 下所有 `{slot}_*.pt` 除 keep_path 外的文件。"""
+    if not CACHE_DIR.exists():
+        return
+    keep = keep_path.resolve()
+    deleted = []
+    for f in CACHE_DIR.glob(f"{slot}_*.pt"):
+        if f.resolve() == keep:
+            continue
+        try:
+            sz = f.stat().st_size
+            f.unlink()
+            deleted.append((f.name, sz))
+        except OSError:
+            pass
+    if deleted:
+        mb = sum(sz for _, sz in deleted) / (1 << 20)
+        names = ", ".join(n for n, _ in deleted)
+        print(f"  [cache prune] slot={slot!r} 清 {len(deleted)} 个旧 cache "
+              f"({mb:.0f} MB): {names}")
 
 
 # ── ChatML fallback template (用于没有 chat_template 的 tokenizer) ──
@@ -193,7 +262,14 @@ class ConversationDataset(Dataset):
         tokenizer,
         turn_max_tokens: int = 256,
         max_turns_per_episode: int = 16,
+        use_cache: bool = True,
+        cache_slot: str = "single",
     ):
+        """use_cache:  True 时把构建好的 episodes pickle 到
+                       .cache/episodes/<slot>_<hash>.pt;tokenizer / turn 限制 /
+                       数据源 + mtime 任一变就 miss 重建。
+           cache_slot: 同 slot 同时只保留 1 份 cache(落新文件自动删旧同槽);
+                       caller 用不同 slot(如 "train"/"val")避免互删。"""
         self.tokenizer = tokenizer
         self.turn_max_tokens = turn_max_tokens
         self.max_turns_per_episode = max_turns_per_episode
@@ -215,6 +291,25 @@ class ConversationDataset(Dataset):
         self.episodes = []
         data_path = Path(data_path)
 
+        # ── 缓存命中:直接 torch.load 跳过 tokenize ──
+        cache_path: Optional[Path] = None
+        if use_cache and data_path.exists():
+            key = _make_cache_key({
+                "schema_version": "dwe-1",  # delta-w-end 数据 schema 标识
+                "tokenizer": getattr(tokenizer, "name_or_path", str(tokenizer)),
+                "turn_max": turn_max_tokens,
+                "max_turns": max_turns_per_episode,
+                "data_path": str(data_path.resolve()),
+                "mtime": data_path.stat().st_mtime,
+            })
+            cache_path = _slot_cache_path(cache_slot, key)
+            if cache_path.exists():
+                blob = torch.load(cache_path, weights_only=False)
+                self.episodes = blob["episodes"]
+                self._stats = blob.get("stats", self._stats)
+                self._report_truncation_stats(f"{cache_slot} [cache] {data_path}")
+                return
+
         if data_path.exists():
             with open(data_path, "r", encoding="utf-8") as f:
                 for line in f:
@@ -225,6 +320,12 @@ class ConversationDataset(Dataset):
                     episode = self._process_conversation(item)
                     if episode and len(episode) >= 2:
                         self.episodes.append(episode)
+
+        # ── 落盘缓存 + 清旧同槽 ──
+        if cache_path is not None and self.episodes:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save({"episodes": self.episodes, "stats": self._stats}, cache_path)
+            _purge_slot_orphans(cache_slot, keep_path=cache_path)
 
         self._report_truncation_stats(str(data_path))
 
