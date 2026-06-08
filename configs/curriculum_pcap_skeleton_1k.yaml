@@ -1,0 +1,33 @@
+# 1K pool curriculum:1000 episodes + 2000 步 → 每 ep 见 2 次
+# v5 用 200 ep × 5 visits read=0%(memorize 但不 generalize)。v6 加大 diversity 逼 NM 学通用 retrieve。
+training_defaults:
+  learning_rate: 1.0e-4
+  grad_clip: 1.0
+  gradient_checkpointing: false
+  log_every: 20
+  eval_every: 500
+  save_every: 500
+
+stages:
+  - name: "pcap_skeleton"
+    data:
+      kind: "mix_dynamic"
+      sources:
+        - {path: "data/skeleton/train.jsonl", ratio: 1.0, tag: "skeleton"}
+      val_sources:
+        - {path: "data/skeleton/val.jsonl",   ratio: 1.0, tag: "skeleton"}
+      num_train: 1000         # ← 200 → 1000:5x 多样性逼 generalize
+      num_val: 200
+      seed: 42
+    training:
+      max_turns_per_episode: 8
+      turn_max_tokens: 256
+      plugin_lr_multiplier: 1.0
+      value_weight_cap: 5.0
+      per_segment_checkpoint: false
+      max_steps: 2000          # 1000 ep × 2 visits = 2000
+      warmup_steps: 100
+      weight_decay: 0.1
+      use_joint_early_stop: false
+    val_sets:
+      - {name: "skeleton_val", path: "data/skeleton/val.jsonl"}

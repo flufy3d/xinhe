@@ -1,0 +1,34 @@
+# 50 ep from val.jsonl 作训练池(eval 同源 = memorize proof)
+# n_eps=10 probe 用 30 visits/ep × 200 steps → 100%
+# v7 用 50 ep × 30 visits = 1500 steps → 验证 mechanism 在 50 distinct 上仍 100%
+training_defaults:
+  learning_rate: 3.0e-4
+  grad_clip: 1.0
+  gradient_checkpointing: false
+  log_every: 20
+  eval_every: 500
+  save_every: 500
+
+stages:
+  - name: "pcap_skeleton"
+    data:
+      kind: "mix_dynamic"
+      sources:
+        - {path: "data/skeleton/val.jsonl", ratio: 1.0, tag: "skeleton"}   # ← 训练读 val.jsonl
+      val_sources:
+        - {path: "data/skeleton/val.jsonl",   ratio: 1.0, tag: "skeleton"}
+      num_train: 50         # ← 训练 50 ep
+      num_val: 50           # ← eval 同 50 ep(因为 seed 一致,会取同样的 50)
+      seed: 42
+    training:
+      max_turns_per_episode: 8
+      turn_max_tokens: 256
+      plugin_lr_multiplier: 1.0
+      value_weight_cap: 5.0
+      per_segment_checkpoint: false
+      max_steps: 1500
+      warmup_steps: 50
+      weight_decay: 0.1
+      use_joint_early_stop: false
+    val_sets:
+      - {name: "skeleton_val", path: "data/skeleton/val.jsonl"}

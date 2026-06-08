@@ -1,0 +1,46 @@
+# v15 backbone-aware query — query_source_layer 真实现
+#
+# v14 用 mean-pool of RAW embedding 喂 QueryHead,read first-token 仍 0%
+# 假设:raw embedding 没经过 attention,QueryHead 单 Linear 无法语义对齐
+#       "我家狗" 和 "我家宠物" 的 raw embedding 差太远
+#
+# v15 让 query 经 backbone 前 N 层(attention-processed)再喂 QueryHead
+# N=2(共 24 层,8% 额外 forward 开销)— semantic-aware query
+# 仍 mean-pool(v14 验证有效)+ 50% MAL inject(v13 验证有效)
+#
+# 实现:xinhe_model.py 加 partial forward,跑 backbone 前 N 层无 mac prefix(无循环)
+# 然后 q = QueryHead(mean_pool(h_after_N_layers))。完整 forward 照常加 mac prefix
+base: qwen3.5-0.8b.yaml
+curriculum_file: curriculum_pcap_skeleton_gen_v11.yaml  # 复用 v11 数据 10k ep
+
+state:
+  n_persistent_per_layer: 0
+  mal_alpha_init: 0.0          # v13/v14 验证有效,保留
+  query_pool: "mean"           # v14 验证有效,保留
+  query_source_layer: 2        # ★ 关键:跑 backbone 前 2 层产 h_pre
+
+lora:
+  rank: 4
+
+training:
+  grad_accum_steps: 4
+  dtype: bfloat16
+  compile_backbone_layers: false
+
+stage_overrides:
+  pcap_skeleton:
+    learning_rate: 3.0e-4
+    warmup_steps: 100
+    weight_decay: 0.1
+    batch_size: 1
+    grad_accum_steps: 2
+    turn_max_tokens: 256
+    max_turns_per_episode: 8
+    tbptt_turns: 8
+    value_weight_cap: 5.0
+    max_steps: 3000
+    nm_aux_weight: 1.0
+    shortcut_suppression: true
+    shortcut_margin: 0.3
+    shortcut_lambda: 2.0
+    memory_dropout: 0.0

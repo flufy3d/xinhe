@@ -1,0 +1,33 @@
+# Mini-pool curriculum:200 episodes + 1000 步 → 每 ep 平均见 5 次
+# 用于验证 "data diversity vs steps" 假设(over-fit probe 已证明 mechanism work)。
+training_defaults:
+  learning_rate: 3.0e-4
+  grad_clip: 1.0
+  gradient_checkpointing: false
+  log_every: 10
+  eval_every: 200
+  save_every: 200
+
+stages:
+  - name: "pcap_skeleton"
+    data:
+      kind: "mix_dynamic"
+      sources:
+        - {path: "data/skeleton/train.jsonl", ratio: 1.0, tag: "skeleton"}
+      val_sources:
+        - {path: "data/skeleton/val.jsonl",   ratio: 1.0, tag: "skeleton"}
+      num_train: 200          # ← 50000 → 200:每个 episode 平均见 5 次
+      num_val: 200
+      seed: 42
+    training:
+      max_turns_per_episode: 8
+      turn_max_tokens: 256
+      plugin_lr_multiplier: 1.0
+      value_weight_cap: 5.0
+      per_segment_checkpoint: false
+      max_steps: 1000
+      warmup_steps: 50
+      weight_decay: 0.1
+      use_joint_early_stop: false
+    val_sets:
+      - {name: "skeleton_val", path: "data/skeleton/val.jsonl"}

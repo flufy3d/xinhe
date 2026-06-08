@@ -80,9 +80,17 @@ class XinheConfig:
     d_key: int = 256                    # delta key 空间
     d_value: int = 128                  # delta value 空间(=mem_out 维)
     n_query: int = 16                   # QueryHead 输出 q 数 = MAC-R 前缀 token 数
-    query_source_layer: int = 0         # 0=embedding(防 MAC-R 循环依赖);>0=backbone 前 j 层(消融)
+    query_source_layer: int = 0         # 0=embedding(防 MAC-R 循环依赖);>0=backbone 前 j 层(消融);⚠ 当前 dead config
+    query_pool: str = "mean"            # query 池化:"mean"(default)over 所有非 pad token / "last"(legacy)只用最后一个
+    read_mode: str = "query_head"       # "query_head"(单全局 MAC/MAL)/ "per_layer_delta"(v19:每 full-attn 层 Delta read,回 delta-w-end 已证 95%+ 的机制)
+    read_scale_init: float = -3.0       # per_layer_delta:每层 read 注入强度 σ(read_scale) 起步
     mal_inject_layer: int = -3          # MAL 残差注入层(该层输入 += α·W_mal(mem_out));-3/-4 消融
     mal_alpha_init: float = -3.0        # MAL α=σ(logit) 起步 σ(-3)≈0.05
+    mem_type: str = "hippo"             # "hippo"(default,delta-rule)/ "cross_attn"(v16 softmax retrieval)
+    mem_max_slots: int = 32             # cross_attn 仅:buffer 大小(circular,满后丢最旧)
+    mem_write_pool: str = "mean"        # cross_attn 仅:write turn 池化方式 "mean"/"last"
+    mac_disabled: bool = False          # v17:True 时禁 MAC-R 前缀(N_m=0,不 cat 到 input),验证 MAC=毒 假设
+                                        # nm_aux 仍保留(W_mac 作纯监督信号,不进主路径);MAL 是 read 唯一通路
     global_write_layer: int = -1        # 单全局 write 挂第几个 full_attention 物理层(-1=最后一个)
     pause_mix_gate: bool = True         # 只走 HippoDelta + QueryHead + MAL,纯化变量
     lambda_div: float = 0.0             # q 多样性 contrastive aux 权重
@@ -199,8 +207,15 @@ class XinheConfig:
                 "d_value": "d_value",
                 "n_query": "n_query",
                 "query_source_layer": "query_source_layer",
+                "query_pool": "query_pool",
+                "read_mode": "read_mode",
+                "read_scale_init": "read_scale_init",
                 "mal_inject_layer": "mal_inject_layer",
                 "mal_alpha_init": "mal_alpha_init",
+                "mem_type": "mem_type",
+                "mem_max_slots": "mem_max_slots",
+                "mem_write_pool": "mem_write_pool",
+                "mac_disabled": "mac_disabled",
                 "global_write_layer": "global_write_layer",
                 "pause_mix_gate": "pause_mix_gate",
                 "lambda_div": "lambda_div",

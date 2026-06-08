@@ -38,27 +38,36 @@ def run_one(config_path: str, device: str):
     B, T = 1, 8
     ids1 = torch.randint(5, 2000, (B, T), device=dev)
     ids2 = torch.randint(5, 2000, (B, T), device=dev)
+    ids3 = torch.randint(5, 2000, (B, T), device=dev)
     ac = (torch.amp.autocast("cuda", dtype=torch.bfloat16) if dev.type == "cuda"
           else contextlib.nullcontext())
 
-    # 2-turn TBPTT(都 grad on),loss 在 turn2(read 上一 turn write 的 M)→ 反传到 write 投影
+    # 3-turn TBPTT(都 grad on),loss 在 turn3(retrieve 2 个 entry,cross_attn 走 softmax)
+    # cross_attn 单 entry softmax=1 退化为常数无 grad → 必须 ≥2 entry 才测出 QueryHead grad
     with ac:
         o1 = model(ids1, model.init_state(B).to(dev), pad_token_id=0)
-        o2 = model(ids2, o1["state_next"], labels=ids2.clone(), pad_token_id=0)
-    o2["loss"].backward()
+        o2 = model(ids2, o1["state_next"], pad_token_id=0)
+        o3 = model(ids3, o2["state_next"], labels=ids3.clone(), pad_token_id=0)
+    o3["loss"].backward()
 
-    hs = o1["state_next"].layers[gk].hippo
+    hs = o2["state_next"].layers[gk].hippo
     g_qh = sum((p.grad.norm().item() for p in model.query_head.parameters() if p.grad is not None), 0.0)
     g_mac = model.W_mac.weight.grad.norm().item() if model.W_mac.weight.grad is not None else 0.0
-    print(f"[delta] loss={o2['loss'].item():.3f} | hippo={type(hs).__name__} "
+    print(f"[delta] loss={o3['loss'].item():.3f} | hippo={type(hs).__name__} "
           f"| logits={tuple(o1['logits'].shape)} | QueryHead_grad={g_qh:.2f} | W_mac_grad={g_mac:.2f}")
     assert g_qh > 0 and g_mac > 0, "read / MAC-R 梯度通路断"
     assert gk in o1["state_next"].layers, "write 层未写入 state"
     g_wk = model.global_hippo.W_k.weight.grad.norm().item()
-    sn = model.global_hippo.last_M_specnorm.item()
-    print(f"        delta W_k_grad={g_wk:.2f} | M_specnorm={sn:.2f}")
-    assert g_wk > 0, "delta W_k 无梯度(write→read TBPTT 没接上)"
-    assert sn < model.global_hippo.spectral_norm_cap * 5, "M 谱范数异常(可能爆炸)"
+    # cross_attn 没 last_M_specnorm,只有 last_attn_max;按 mem_type 分支
+    if hasattr(model.global_hippo, "last_M_specnorm"):
+        sn = model.global_hippo.last_M_specnorm.item()
+        print(f"        delta W_k_grad={g_wk:.2f} | M_specnorm={sn:.2f}")
+        assert sn < model.global_hippo.spectral_norm_cap * 5, "M 谱范数异常(可能爆炸)"
+    else:
+        an = float(model.global_hippo.last_attn_max.item())
+        ns = int(model.global_hippo.last_n_slots)
+        print(f"        cross_attn W_k_grad={g_wk:.2f} | attn_max={an:.3f} | n_slots={ns}")
+    assert g_wk > 0, "W_k 无梯度(write→read TBPTT 没接上)"
 
     # NM-zero:mem 通路置零,forward 不崩(read≈0 的 sanity 由 probe 在真权重上验)
     with ac, torch.no_grad():

@@ -1,0 +1,45 @@
+# v2 mini-train(5080 16GB)— 在 v1 上做两处关键修复:
+#   1. tbptt_turns 4→8:val 距离分布 1-8 占 94%,tbptt=4 只覆盖到 67% → 写 turn 上的 W 梯度被截断
+#                       per memory feedback_tbptt_must_cover_distance
+#   2. max_steps 300→1500:v1 step 200+ gap 才偶尔翻正,但 LR cosine 衰减,后半段学不动
+#                          v2 拉长到 1500 给 backbone 充分时间 commit 到 mem 通路
+# 其他保持 v1:turn_max=256, batch=1, grad_accum=2, shortcut_margin=0.5, lambda=1.0
+#
+# 内存预算(per scripts/probe/mem_sweep.py):
+#   batch=1 tbptt=8 shortcut=on → 10.19 GB ✓ (5080 16GB 有余)
+#
+# 跑训练(WSL):
+#   bash scripts/_launch_train_5080.sh  # 默认读 pcap_skeleton_5080.yaml
+#   或:
+#   PYTHONUNBUFFERED=1 python -u scripts/train.py \
+#       --config configs/pcap_skeleton_5080_v2.yaml --from-stage pcap_skeleton
+base: qwen3.5-0.8b.yaml
+
+curriculum_file: curriculum_pcap_skeleton.yaml
+
+state:
+  n_persistent_per_layer: 4
+
+training:
+  grad_accum_steps: 4
+  dtype: bfloat16
+  compile_backbone_layers: false
+
+stage_overrides:
+  pcap_skeleton:
+    learning_rate: 7.0e-5
+    warmup_steps: 100              # ← v1 50 → 100 配合更长训练
+    weight_decay: 0.1
+    batch_size: 1
+    grad_accum_steps: 2
+    turn_max_tokens: 256           # 5080 上 shortcut dual backward 的安全值
+    max_turns_per_episode: 16
+    tbptt_turns: 8                 # ← 4 → 8:覆盖 94% 的 write→read 距离
+    value_weight_cap: 5.0
+    max_steps: 1500                # ← 300 → 1500:5x 步数让 backbone commit 到 mem
+    nm_aux_weight: 0.5
+    # Shortcut suppression(同 v1):
+    shortcut_suppression: true
+    shortcut_margin: 0.5
+    shortcut_lambda: 1.0
+    memory_dropout: 0.0

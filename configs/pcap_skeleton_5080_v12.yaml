@@ -1,0 +1,49 @@
+# v12 cross-window NM(5080 16GB)— 强制 NM 是 read 唯一通路
+#
+# v11 失败诊断:max_turns=8 + tbptt=8 → 整 ep 在 attention 窗内,
+# backbone+attention 自己就能 in-context-recall,NM 多余。read=0% 不解。
+#
+# v12 关键改动:
+#   - tbptt: 8 → 4(窗口缩半)
+#   - max_turns: 8 → 16(长 ep 不截断)
+#   - 长 ep 的 write-read 距离若 > 4,attention 窗口看不到 write turn 的内容
+#     → NM 是唯一信道,被迫学起来
+#   - nm_aux 1.0 → 2.0 强化 W 编码 value
+#   - 其他保 v11(shortcut ON + 10k ep + NaN-skip + LoRA r=4)
+#
+# 风险:
+#   - tbptt < write-read 距离:outer 梯度教不到 write turn 的 W 更新
+#     但 nm_aux 在 write turn 直接 train W → 应该撑得起
+#   - 部分短 ep(<4 turn)NM 不起效,只对 17% 长 ep 有效
+base: qwen3.5-0.8b.yaml
+
+curriculum_file: curriculum_pcap_skeleton_gen_v12.yaml
+
+state:
+  n_persistent_per_layer: 0
+
+lora:
+  rank: 4
+
+training:
+  grad_accum_steps: 4
+  dtype: bfloat16
+  compile_backbone_layers: false
+
+stage_overrides:
+  pcap_skeleton:
+    learning_rate: 3.0e-4
+    warmup_steps: 100
+    weight_decay: 0.1
+    batch_size: 1
+    grad_accum_steps: 2
+    turn_max_tokens: 256
+    max_turns_per_episode: 16     # ← v11 8 → 16:长 ep 不截
+    tbptt_turns: 4                # ← v11 8 → 4:强制 cross-window
+    value_weight_cap: 5.0
+    max_steps: 3000
+    nm_aux_weight: 2.0            # ← v11 1.0 → 2.0:W 更强编码 value
+    shortcut_suppression: true
+    shortcut_margin: 0.3
+    shortcut_lambda: 2.0
+    memory_dropout: 0.0

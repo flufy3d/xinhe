@@ -1,0 +1,33 @@
+# v11 NaN 诊断:同 v11 配置但 num_train=1000(同 v10),max_steps=50,log_every=1
+# 若不 NaN → 问题在多余 9000 ep;若 NaN → venv/code 问题
+training_defaults:
+  learning_rate: 3.0e-4
+  grad_clip: 1.0
+  gradient_checkpointing: false
+  log_every: 1
+  eval_every: 5000
+  save_every: 5000
+
+stages:
+  - name: "pcap_skeleton"
+    data:
+      kind: "mix_dynamic"
+      sources:
+        - {path: "data/skeleton/train.jsonl", ratio: 1.0, tag: "skeleton"}
+      val_sources:
+        - {path: "data/skeleton/val.jsonl",   ratio: 1.0, tag: "skeleton"}
+      num_train: 1000
+      num_val: 50
+      seed: 42
+    training:
+      max_turns_per_episode: 8
+      turn_max_tokens: 256
+      plugin_lr_multiplier: 1.0
+      value_weight_cap: 5.0
+      per_segment_checkpoint: false
+      max_steps: 50
+      warmup_steps: 100
+      weight_decay: 0.1
+      use_joint_early_stop: false
+    val_sets:
+      - {name: "skeleton_val", path: "data/skeleton/val.jsonl"}

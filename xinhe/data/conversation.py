@@ -35,7 +35,39 @@ from torch.utils.data import Dataset
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-CACHE_DIR = PROJECT_ROOT / ".cache" / "episodes"
+
+
+def _resolve_cache_dir() -> Path:
+    """episode cache 路径解析:
+    - 默认:`<project>/.cache/episodes`(Windows native / Linux native VM,ext4 / NTFS 速度可)
+    - **WSL + 项目在 /mnt/<drive>/**:走 home ext4(`~/.cache/xinhe/episodes`),
+      避开 9P 协议大文件读慢(实测 4.8 GB cache load 在 /mnt/d/ 要 17 分钟,
+      home ext4 同样大小 < 1 分钟)。
+    - 环境变量 `XINHE_CACHE_DIR` 强制覆盖(remote VM 想统一路径时用)。
+    """
+    env_override = _os_getenv("XINHE_CACHE_DIR")
+    if env_override:
+        return Path(env_override).expanduser()
+    default = PROJECT_ROOT / ".cache" / "episodes"
+    # 检测 WSL:/proc/sys/kernel/osrelease 含 "WSL"/"microsoft"
+    try:
+        rel = Path("/proc/sys/kernel/osrelease").read_text().lower()
+        is_wsl = ("wsl" in rel) or ("microsoft" in rel)
+    except Exception:
+        is_wsl = False
+    # WSL 项目根在 /mnt/<drive>/ 才需要绕,native /home/ /root/ 不用
+    proj_str = str(PROJECT_ROOT)
+    if is_wsl and proj_str.startswith("/mnt/"):
+        return Path.home() / ".cache" / "xinhe" / "episodes"
+    return default
+
+
+def _os_getenv(k: str) -> str | None:
+    import os
+    return os.environ.get(k)
+
+
+CACHE_DIR = _resolve_cache_dir()
 
 
 def _make_cache_key(payload: dict) -> str:

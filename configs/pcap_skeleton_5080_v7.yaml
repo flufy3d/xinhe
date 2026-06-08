@@ -1,0 +1,34 @@
+# v7 mini-train(5080 16GB)— Memorize proof:50 ep × 30 visits = 1500 steps
+# 目标:证明 mechanism 能 memorize 50 distinct (entity, value) 对(扩 n_eps=10 probe 5x)
+# train/eval 同 50 ep,纯 memorize 测试。若 read ≥ 90%,机制在 50 上 work,
+# 下一步用 100 ep × 30 visits 检验 scaling,然后 200 ep × 30 visits...
+base: qwen3.5-0.8b.yaml
+
+curriculum_file: curriculum_pcap_skeleton_50val.yaml
+
+state:
+  n_persistent_per_layer: 0
+
+lora:
+  rank: 0
+
+training:
+  grad_accum_steps: 4
+  dtype: bfloat16
+  compile_backbone_layers: false
+
+stage_overrides:
+  pcap_skeleton:
+    learning_rate: 3.0e-4
+    warmup_steps: 50
+    weight_decay: 0.1
+    batch_size: 1
+    grad_accum_steps: 2
+    turn_max_tokens: 256
+    max_turns_per_episode: 8
+    tbptt_turns: 8
+    value_weight_cap: 5.0
+    max_steps: 1500
+    nm_aux_weight: 1.0
+    shortcut_suppression: false        # backbone frozen → shortcut no-op,关掉省 50% 时间
+    memory_dropout: 0.0

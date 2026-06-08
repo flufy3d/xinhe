@@ -1,0 +1,46 @@
+# v20 真训练 — 第一个把"per-layer Delta read 能 scale 泛化"落到真 checkpoint 的 run。
+#
+# 依据(本 session 探针,全部未见实体/值,dict_split 实测分离 value 重叠 0/315):
+#   memorize 5ep 100步打满 100% → 机制健康,read=0% 不是架构 bug。
+#   泛化 scaling N=30/150/500/1000 = val 21/29.5/50/63%,单调上升未收敛 → 纯 scale 可行。
+#   v19b read=0% 真因 = 读路径欠训(num_train=10000×1000步×ga2 = 0.2 visits/ep)。
+# v20 修方:num_train=2000 + max_steps=14000(ga=2 → ~14 visits/ep)+ shortcut(真训练原生,
+#   探针双 forward 在 16G OOM spill 跑不了)+ read_scale_init=0(出死区)。save_every=1000 中途可停。
+
+base: qwen3.5-0.8b.yaml
+curriculum_file: curriculum_pcap_skeleton_gen_v20.yaml
+
+state:
+  read_mode: per_layer_delta
+  n_heads: 16
+  head_dim: 128
+  read_scale_init: 0.0
+  beta_bias_init: -2.0
+  delta_backend: auto
+  n_persistent_per_layer: 0
+
+lora:
+  rank: 16
+  alpha: 32
+
+training:
+  grad_accum_steps: 4
+  dtype: bfloat16
+  compile_backbone_layers: false
+
+stage_overrides:
+  pcap_skeleton:
+    learning_rate: 3.0e-4
+    warmup_steps: 200
+    weight_decay: 0.1
+    batch_size: 1
+    grad_accum_steps: 2
+    turn_max_tokens: 256
+    max_turns_per_episode: 8
+    tbptt_turns: 8
+    value_weight_cap: 5.0
+    max_steps: 14000
+    shortcut_suppression: true
+    shortcut_margin: 0.3
+    shortcut_lambda: 2.0
+    memory_dropout: 0.0

@@ -1,0 +1,32 @@
+# 诊断 v11_diag2:10000 ep / log_every=1 / 5 步 — 看 NaN 出现位点
+base: qwen3.5-0.8b.yaml
+curriculum_file: curriculum_pcap_skeleton_gen_v11_diag2.yaml
+
+state:
+  n_persistent_per_layer: 0
+
+lora:
+  rank: 4
+
+training:
+  grad_accum_steps: 4
+  dtype: bfloat16
+  compile_backbone_layers: false
+
+stage_overrides:
+  pcap_skeleton:
+    learning_rate: 3.0e-4
+    warmup_steps: 100
+    weight_decay: 0.1
+    batch_size: 1
+    grad_accum_steps: 2
+    turn_max_tokens: 256
+    max_turns_per_episode: 8
+    tbptt_turns: 8
+    value_weight_cap: 5.0
+    max_steps: 60
+    nm_aux_weight: 1.0
+    shortcut_suppression: false
+    shortcut_margin: 0.3
+    shortcut_lambda: 2.0
+    memory_dropout: 0.0

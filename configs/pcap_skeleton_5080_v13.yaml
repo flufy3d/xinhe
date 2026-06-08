@@ -1,0 +1,43 @@
+# v13 强 MAL inject(5080 16GB)— 提 NM 残差贡献比从 5% 到 50%
+#
+# v11 失败诊断:read=0% 在 NM-on 和 NM-zero 都 0% → NM 在残差里只占 sigmoid(-3)=5%
+# 即使 NM 编码了 value,首 token logit 95% 由 backbone 决定 → read 永远 0%
+#
+# v13 改动:mal_alpha_init: -3.0 → 0.0(sigmoid(0)=50%,MAL 注入贡献 10x)
+# 其他保 v11(tbptt 8 + max_turns 8 + nm_aux 1.0 + 10k ep + shortcut ON + NaN-skip)
+#
+# 风险:50% inject 可能干扰 backbone 已学的 chat format(NM 输出抢 credit)
+#       但 v9.5 memory 注 W_mac 已是 xavier 非零(主通路),W_mal 零 init,加 sigmoid 控
+#       sigmoid 还可学,只是起点变 50%
+base: qwen3.5-0.8b.yaml
+curriculum_file: curriculum_pcap_skeleton_gen_v11.yaml  # 复用 v11 curriculum(10k ep)
+
+state:
+  n_persistent_per_layer: 0
+  mal_alpha_init: 0.0       # ← v11 默认 -3.0 → 0.0:sigmoid(0)=50% inject
+
+lora:
+  rank: 4
+
+training:
+  grad_accum_steps: 4
+  dtype: bfloat16
+  compile_backbone_layers: false
+
+stage_overrides:
+  pcap_skeleton:
+    learning_rate: 3.0e-4
+    warmup_steps: 100
+    weight_decay: 0.1
+    batch_size: 1
+    grad_accum_steps: 2
+    turn_max_tokens: 256
+    max_turns_per_episode: 8
+    tbptt_turns: 8
+    value_weight_cap: 5.0
+    max_steps: 3000
+    nm_aux_weight: 1.0
+    shortcut_suppression: true
+    shortcut_margin: 0.3
+    shortcut_lambda: 2.0
+    memory_dropout: 0.0

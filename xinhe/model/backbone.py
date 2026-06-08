@@ -30,11 +30,13 @@ class BackboneBase(ABC):
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
         layer_hook: Optional[callable] = None,
+        n_layers: Optional[int] = None,
     ) -> torch.Tensor:
         """transformer blocks 前向传播, (B, T, D) -> (B, T, D)
 
         position_ids: (1, T) 自定义位置索引 (用于 RoPE)。None 时默认 0..T-1。
         layer_hook: 可选回调 (hidden_states, layer_idx) → hidden_states，每层之前调用。
+        n_layers: 仅跑前 N 层 + 跳过 final norm(v15 query_source_layer);None=完整。
         """
         ...
 

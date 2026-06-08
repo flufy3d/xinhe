@@ -1,0 +1,37 @@
+# v6 mini-train(5080 16GB)— 增加数据多样性逼 generalize:
+# v5 (200 ep × 5 visits) 验证 mechanism work 但 read=0%(memorize 训练池,val 不通)。
+# 推测:N=200 太小,模型用 W_mac 走 shortcut(任意 query → 训练池里的 value)。
+# v6:N=1000 ep + 2000 steps(每 ep 见 2 次)→ shortcut 失效,必须学 generalizable retrieve。
+# LR 降到 1e-4(从 3e-4)避免 200 ep 时观察到的震荡。
+base: qwen3.5-0.8b.yaml
+
+curriculum_file: curriculum_pcap_skeleton_1k.yaml
+
+state:
+  n_persistent_per_layer: 0
+
+lora:
+  rank: 0
+
+training:
+  grad_accum_steps: 4
+  dtype: bfloat16
+  compile_backbone_layers: false
+
+stage_overrides:
+  pcap_skeleton:
+    learning_rate: 1.0e-4         # ← v5 3e-4 → 1e-4(更稳)
+    warmup_steps: 100
+    weight_decay: 0.1
+    batch_size: 1
+    grad_accum_steps: 2
+    turn_max_tokens: 256
+    max_turns_per_episode: 8
+    tbptt_turns: 8
+    value_weight_cap: 5.0
+    max_steps: 2000
+    nm_aux_weight: 1.0
+    shortcut_suppression: true
+    shortcut_margin: 0.3
+    shortcut_lambda: 2.0
+    memory_dropout: 0.0

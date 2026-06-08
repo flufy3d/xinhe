@@ -1,0 +1,41 @@
+# v14 query-pool fix — query 从 last-token 改 mean-pool
+#
+# 关键 bug 发现:v11/v12/v13 read=0% 根因不是 NM 强度,是 QueryHead 输入是
+#   embedding[最后非 pad token] —— 几乎所有 read question 最后 token 是 "?" 或 "\n"
+#   QueryHead 无法区分不同 question 的语义 → 同样 query → 同样 retrieve → NM 无效
+#
+# v14 改:query 改用 mean-pool of all non-pad embedding(捕获 user msg 全局)
+# 保 50% MAL inject(v13 验证有些信号)
+base: qwen3.5-0.8b.yaml
+curriculum_file: curriculum_pcap_skeleton_gen_v11.yaml
+
+state:
+  n_persistent_per_layer: 0
+  mal_alpha_init: 0.0       # ← 保 v13 的 50% inject
+  query_pool: "mean"        # ← 关键 fix:全输入 mean pool,不再用 last-token embedding
+
+lora:
+  rank: 4
+
+training:
+  grad_accum_steps: 4
+  dtype: bfloat16
+  compile_backbone_layers: false
+
+stage_overrides:
+  pcap_skeleton:
+    learning_rate: 3.0e-4
+    warmup_steps: 100
+    weight_decay: 0.1
+    batch_size: 1
+    grad_accum_steps: 2
+    turn_max_tokens: 256
+    max_turns_per_episode: 8
+    tbptt_turns: 8
+    value_weight_cap: 5.0
+    max_steps: 3000
+    nm_aux_weight: 1.0
+    shortcut_suppression: true
+    shortcut_margin: 0.3
+    shortcut_lambda: 2.0
+    memory_dropout: 0.0

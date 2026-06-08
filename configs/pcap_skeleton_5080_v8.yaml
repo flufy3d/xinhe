@@ -1,0 +1,34 @@
+# v8 mini-train(5080 16GB)— 10 ep × 250 visits 推 memorize 到 99%
+# v7 50 ep × 30 visits → 12% memorize。每 visit ~0.4% recall。99% 需 ~250 visits/ep。
+# v8 缩 ep 数 5x,加 visits 8x:总 step=2500,~100 min。
+# 若 ≥90% 即证明 mechanism 可饱和;之后再扩 ep 数 + 比例增 step。
+base: qwen3.5-0.8b.yaml
+
+curriculum_file: curriculum_pcap_skeleton_10val.yaml
+
+state:
+  n_persistent_per_layer: 0
+
+lora:
+  rank: 0
+
+training:
+  grad_accum_steps: 4
+  dtype: bfloat16
+  compile_backbone_layers: false
+
+stage_overrides:
+  pcap_skeleton:
+    learning_rate: 3.0e-4
+    warmup_steps: 50
+    weight_decay: 0.1
+    batch_size: 1
+    grad_accum_steps: 2
+    turn_max_tokens: 256
+    max_turns_per_episode: 8
+    tbptt_turns: 8
+    value_weight_cap: 5.0
+    max_steps: 2500
+    nm_aux_weight: 1.0
+    shortcut_suppression: false
+    memory_dropout: 0.0

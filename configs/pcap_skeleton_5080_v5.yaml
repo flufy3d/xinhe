@@ -1,0 +1,38 @@
+# v5 mini-train(5080 16GB)— 关键洞察:over-fit 单 episode 20 步即 100% recall,
+# 证明 mechanism 完全 work。read=0% 三轮失败的真根因 = 数据多样性 vs 训练步数比:
+#   50K episodes / 200 steps = 每 ep 见 0.004 次 → NM 学不到 generalizable matching
+#
+# v5 fix:用 200 episodes 训练池 + 1000 步 = 每 ep 平均见 5 次
+#         若 read > 0%,scaling 到更大 pool 即可
+base: qwen3.5-0.8b.yaml
+
+curriculum_file: curriculum_pcap_skeleton_mini.yaml    # ← 200 ep 池,非 50K
+
+state:
+  n_persistent_per_layer: 0       # 沿用 v4:关 K_pers
+
+lora:
+  rank: 0                          # 沿用 v4:关 LoRA
+
+training:
+  grad_accum_steps: 4
+  dtype: bfloat16
+  compile_backbone_layers: false
+
+stage_overrides:
+  pcap_skeleton:
+    learning_rate: 3.0e-4           # ← 7e-5 → 3e-4(over-fit probe 用的 lr,验证过 work)
+    warmup_steps: 50
+    weight_decay: 0.1
+    batch_size: 1
+    grad_accum_steps: 2
+    turn_max_tokens: 256
+    max_turns_per_episode: 8
+    tbptt_turns: 8
+    value_weight_cap: 5.0
+    max_steps: 1000
+    nm_aux_weight: 1.0
+    shortcut_suppression: true
+    shortcut_margin: 0.3
+    shortcut_lambda: 2.0
+    memory_dropout: 0.0

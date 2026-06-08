@@ -1,0 +1,36 @@
+# v20 curriculum:num_train=2000(比 v11 的 10000 少,但配大步数 → 每 ep ~14 visits)
+# 依据探针 scaling 曲线 N=30/150/500/1000 = val 21/29.5/50/63%(未见实体,仍在涨):
+#   读路径需足够 visits 才练出(v11 的 0.2 visits 是 v19b read=0% 的真因),
+#   entity 又要足够多逼出通用寻址。2000 entity × ~14 visits 是兼顾点。
+# train/val dict_split 完全分离(实测 value 重叠 0/315)。
+training_defaults:
+  learning_rate: 3.0e-4
+  grad_clip: 1.0
+  gradient_checkpointing: false
+  log_every: 50
+  eval_every: 1000
+  save_every: 1000
+
+stages:
+  - name: "pcap_skeleton"
+    data:
+      kind: "mix_dynamic"
+      sources:
+        - {path: "data/skeleton/train.jsonl", ratio: 1.0, tag: "skeleton"}
+      val_sources:
+        - {path: "data/skeleton/val.jsonl",   ratio: 1.0, tag: "skeleton"}
+      num_train: 2000
+      num_val: 200
+      seed: 42
+    training:
+      max_turns_per_episode: 8
+      turn_max_tokens: 256
+      plugin_lr_multiplier: 1.0
+      value_weight_cap: 5.0
+      per_segment_checkpoint: false
+      max_steps: 14000
+      warmup_steps: 200
+      weight_decay: 0.1
+      use_joint_early_stop: false
+    val_sets:
+      - {name: "skeleton_val", path: "data/skeleton/val.jsonl"}

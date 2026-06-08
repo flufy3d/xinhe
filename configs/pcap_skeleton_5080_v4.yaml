@@ -1,0 +1,48 @@
+# v4 mini-train(5080 16GB)— 根因级改动:**关掉 backbone bypass 通路**。
+#
+# v1/v2/v3 共同失败模式:read=0% 三轮无变化。
+# nm_grad_diag.py 证实:
+#   - NM 模块全部有梯度(QueryHead 237, W_mac 126, global_hippo 214)
+#   - read turn ce=10.6(灾难,vs distract 1.5-2.5)
+#   - LoRA grad=289 + K/V_pers grad=277(backbone bypass 通路获得大量梯度)
+# 即使 shortcut suppression 在推,LoRA 1M 参数提供的 bypass 容量足够把 NM 通路边缘化。
+#
+# v4 fix:lora_rank 16 → 0, n_persistent_per_layer 4 → 0
+#   - 这与 min_arch_test --no-lora --no-kpers 一致 — 这个配置在 nm_debug_bench 上唯一让 NM 通路活
+#   - 代价:backbone frozen,无法 fine-tune 适配 skeleton 数据
+#   - 但 Qwen3.5 0.8B 预训练已经有基础中文 LM 能力,frozen 也能做 distract turn
+#
+# 其他保持 v3:max_turns=8, tbptt=8, nm_aux=1.0, shortcut on
+base: qwen3.5-0.8b.yaml
+
+curriculum_file: curriculum_pcap_skeleton.yaml
+
+state:
+  n_persistent_per_layer: 0      # ← v3 4 → 0:关 K_pers,backbone 无法在 per-layer 添加 episode-specific bypass
+
+# LoRA 关掉(必须放 lora: rank: 0,不是 lora_rank,base.yaml 通过 lora.rank 配置)
+lora:
+  rank: 0                          # ← v3 16 → 0
+
+training:
+  grad_accum_steps: 4
+  dtype: bfloat16
+  compile_backbone_layers: false
+
+stage_overrides:
+  pcap_skeleton:
+    learning_rate: 7.0e-5
+    warmup_steps: 100
+    weight_decay: 0.1
+    batch_size: 1
+    grad_accum_steps: 2
+    turn_max_tokens: 256
+    max_turns_per_episode: 8
+    tbptt_turns: 8
+    value_weight_cap: 5.0
+    max_steps: 800
+    nm_aux_weight: 1.0
+    shortcut_suppression: true
+    shortcut_margin: 0.3
+    shortcut_lambda: 2.0
+    memory_dropout: 0.0

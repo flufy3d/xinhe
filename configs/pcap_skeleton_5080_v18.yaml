@@ -1,0 +1,50 @@
+# v18 GATE — 攻"value 存储压缩"根因(白盒 5 探针 2026-06-01 锁定)
+#
+# 根因(已隔离,非猜测):
+#   纯 memory decode lm_head(W_mac(mem_out)) 对未见 value rank~40k/248k≈随机;
+#   连"读 fact turn 自己、同源 query、retrieve 必命中"也 rank~56k → 不是 query/对齐,
+#   是 value 没被可解码地存进 M。关键嫌疑:d_value=128 / n_heads=16 = 每 head 仅 8 维
+#   存 value,把 1024 维 value-residual 压进 8 维/head 再 decode 回 24.8 万词表 → 丢 token identity。
+#
+# v18 改(纯 config,零代码):
+#   mac_disabled: false  → 回 v14 MAC+MAL(MAC 已证明是 overall 增益主力,非毒)
+#   d_value: 1024        → 每 head 64 维存 value(8→64,解压缩)。测"是否压缩瓶颈"。
+#   max_steps: 1000      → GATE(feedback_gate_before_scale):先小跑,跑完重跑 _probe_mem_decode,
+#                          fact_self decode rank 暴跌(<100)→ 存储是根因,scale 到 3000 + 上 embedding-tied decode;
+#                          仍随机 → 压缩不是根因,decode 泛化是根本问题,转 embedding-tie / 重审架构。
+
+base: qwen3.5-0.8b.yaml
+curriculum_file: curriculum_pcap_skeleton_gen_v11.yaml
+
+state:
+  n_persistent_per_layer: 0
+  mal_alpha_init: 0.0       # 50% MAL inject 起步(v14 baseline)
+  query_pool: "mean"        # v14 fix
+  mac_disabled: false       # ← 回 MAC+MAL(v14 架构)
+  d_value: 1024             # ← v18 核心:value 空间 128→1024,解压缩
+
+lora:
+  rank: 4
+
+training:
+  grad_accum_steps: 4
+  dtype: bfloat16
+  compile_backbone_layers: false
+
+stage_overrides:
+  pcap_skeleton:
+    learning_rate: 3.0e-4
+    warmup_steps: 100
+    weight_decay: 0.1
+    batch_size: 1
+    grad_accum_steps: 2
+    turn_max_tokens: 256
+    max_turns_per_episode: 8
+    tbptt_turns: 8
+    value_weight_cap: 5.0
+    max_steps: 1000           # GATE:小跑验证根因再 scale
+    nm_aux_weight: 1.0
+    shortcut_suppression: true
+    shortcut_margin: 0.3
+    shortcut_lambda: 2.0
+    memory_dropout: 0.0

@@ -189,9 +189,14 @@ def main():
                 with torch.amp.autocast(dev.type, dtype=torch.bfloat16):
                     out_zero = model(ids, state, labels=lbl, weights=wts,
                                      pad_token_id=tok.pad_token_id, mem_alpha_override=0.0)
-                loss_zero = out_zero["loss"]            # 不 detach!grad 通到 backbone
-                penalty = torch.clamp(loss - loss_zero + cfg.shortcut_margin, min=0.0)
-                last_gap = float((loss_zero.detach() - loss.detach()).item())
+                # ★ 关键修复:gap 必须用纯 CE,不能用 result["loss"](含 aux_loss)。
+                # NM-zero forward 里 _any_override=True → nm_aux 被跳过,loss_zero 没 aux,
+                # loss_on 有 aux(nm_aux_weight × nm_ce),gap 天然偏负,
+                # penalty 实际在惩罚 nm_aux 项的存在,不是惩罚 NM shortcut。
+                ce_on = out["ce_loss"]
+                ce_zero = out_zero["ce_loss"]            # 不 detach!grad 通到 backbone
+                penalty = torch.clamp(ce_on - ce_zero + cfg.shortcut_margin, min=0.0)
+                last_gap = float((ce_zero.detach() - ce_on.detach()).item())
                 last_penalty = float(penalty.detach().item())
                 loss = loss + cfg.shortcut_lambda * penalty
 

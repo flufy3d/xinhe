@@ -1,0 +1,52 @@
+# v3 mini-train(5080 16GB)— 真正修复 TBPTT 信号路径问题。
+#
+# 根因分析(v2 step 200 eval 后):
+#   - read first-token: NM-on=NM-zero=0%(完全没召回信号)
+#   - write first-token: NM-on=NM-zero(差异 <1%,NM 在 write 上也没真正起作用)
+#   - 即使修了 shortcut gap 用 ce_loss 的 bug,signal 仍然为 0
+#
+# 根因:**TBPTT 把 write 和 read 隔到不同 block**,write turn 的 W 更新
+#       永远收不到后续 read turn 的梯度。tbptt=8 看似覆盖 90% 距离,但每个 episode
+#       的第一个 tbptt block(turn 1-8)里的 write,如果 read 在 block 2(turn 9-16),
+#       梯度被 detach 切断,write 学不到要存什么。
+#
+# v3 fix:max_turns_per_episode 16 → 8 + tbptt=8。每个 episode 完全在 1 个 tbptt
+#         block 内,write→read 梯度无阻畅通。代价:val 距离 8-11 的 13% case 训不到,
+#         但 87% 覆盖足够 break 0% barrier。
+#
+# 其他改动(配合 v3 的更强 NM 推力):
+#   - nm_aux_weight 0.5 → 1.0          直接监督翻倍
+#   - shortcut_lambda 1.0 → 2.0        penalty 翻倍
+#   - shortcut_margin 0.5 → 0.3        门槛降低
+#   - max_steps 1500 → 800             3 个 ckpt 节点(200/400/600/800)够看趋势
+#
+# 内存预算:max_turns 减半,但 tbptt=8 不变,内存基本与 v2 持平 (~10 GB)
+base: qwen3.5-0.8b.yaml
+
+curriculum_file: curriculum_pcap_skeleton.yaml
+
+state:
+  n_persistent_per_layer: 4
+
+training:
+  grad_accum_steps: 4
+  dtype: bfloat16
+  compile_backbone_layers: false
+
+stage_overrides:
+  pcap_skeleton:
+    learning_rate: 7.0e-5
+    warmup_steps: 100
+    weight_decay: 0.1
+    batch_size: 1
+    grad_accum_steps: 2
+    turn_max_tokens: 256
+    max_turns_per_episode: 8       # ← v2 16 → 8:确保 write/read 同一 tbptt block
+    tbptt_turns: 8
+    value_weight_cap: 5.0
+    max_steps: 800
+    nm_aux_weight: 1.0             # ← v2 0.5 → 1.0
+    shortcut_suppression: true
+    shortcut_margin: 0.3           # ← v2 0.5 → 0.3
+    shortcut_lambda: 2.0           # ← v2 1.0 → 2.0
+    memory_dropout: 0.0

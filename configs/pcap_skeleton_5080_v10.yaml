@@ -1,0 +1,40 @@
+# v10 mini-train(5080 16GB)— 真泛化 + 新假设:
+#   - LoRA rank=4(小,够 format 不够 memorize bypass)
+#   - shortcut ON(终于有 trainable bypass 可推)
+#   - memory_dropout=0(recall 必须靠 NM,dropout 浪费信号)
+#   - 1000 train ep × 3 visits = 3000 steps,~4 小时
+#
+# v10 是 v5/v6(无 LoRA 跑死)和 v7/v8(有 memorize 无 generalize)的中间方案
+# 假设:LoRA 太小无法 memorize,只能学 format;NM 主导 recall;shortcut 推 backbone 不要 bypass
+base: qwen3.5-0.8b.yaml
+
+curriculum_file: curriculum_pcap_skeleton_gen_fast.yaml
+
+state:
+  n_persistent_per_layer: 0       # K_pers 仍关(防 per-layer bypass)
+
+lora:
+  rank: 4                          # ← v7-v9 0 → 4:小 LoRA,够 format,不够 memorize
+
+training:
+  grad_accum_steps: 4
+  dtype: bfloat16
+  compile_backbone_layers: false
+
+stage_overrides:
+  pcap_skeleton:
+    learning_rate: 3.0e-4
+    warmup_steps: 100
+    weight_decay: 0.1
+    batch_size: 1
+    grad_accum_steps: 2
+    turn_max_tokens: 256
+    max_turns_per_episode: 8
+    tbptt_turns: 8
+    value_weight_cap: 5.0
+    max_steps: 3000
+    nm_aux_weight: 1.0
+    shortcut_suppression: true      # ← 与 LoRA 配合,推 backbone 不要 bypass
+    shortcut_margin: 0.3
+    shortcut_lambda: 2.0
+    memory_dropout: 0.0             # ← 0:NM 必须 100% 工作(recall 任务靠 NM,dropout 会浪费 30% 信号)

@@ -1,0 +1,56 @@
+# v17 MAC-disabled — 用户提出的根本架构假设验证
+#
+# 假设(用户 2026-05-31 提出):
+#   MAC 在冻结 backbone + LoRA r=4 下是毒。
+#   MAC 要求 backbone 24 层 attention 学会 attend mem-prefix tokens,
+#   LoRA r=4(~5M trainable params)调不动 chat-format prior。
+#   v9.5 iter4 MAC+MAL 破 100% 是因为旧架构 paper-faithful + 双 NM 容量远大;
+#   v10-v16 single-global + LoRA r=4 上,MAC 通路完全死,MAL 又被 mal_alpha_init=-3 压住。
+#   v13 唯一非零 read 是 mal_alpha_init=0(50% MAL)+ 强 NM 残差;v16(D cross-attn 也是 MAC 路径)完全 bypass。
+#
+# v17 改:
+#   mac_disabled: true  → 主路径不再 prepend mac_tokens(N_m=0,real_start=0)
+#                         backbone 只看 content tokens,LoRA 不用为 mem-prefix 分化 attention
+#                         nm_aux 仍保留(W_mac 作纯监督信号训 mem 通路学 value)
+#   mal_alpha_init: 0.0  → MAL 50% 残差注入起步(v14 最好配置,read 通路唯一信号)
+#   query_pool: "mean"   → v14 验证最佳
+#
+# 判读(step 1000, n=50):
+#   - read first-token > 0% → MAC=毒 假设成立,转 v18 加多层 MAL
+#   - read = 0% + overall Δ ≈ 0 → MAC 不是主因,转排除路径
+#   - overall Δ 不掉太多(> +2pp)→ MAC 至少不是 overall 主功臣
+
+base: qwen3.5-0.8b.yaml
+curriculum_file: curriculum_pcap_skeleton_gen_v11.yaml
+
+state:
+  n_persistent_per_layer: 0
+  mal_alpha_init: 0.0       # 50% MAL inject 起步(v14 baseline,read 唯一通路)
+  query_pool: "mean"        # v14 fix
+  mac_disabled: true        # ← v17 核心改动:关 MAC 主路径
+
+lora:
+  rank: 4
+
+training:
+  grad_accum_steps: 4
+  dtype: bfloat16
+  compile_backbone_layers: false
+
+stage_overrides:
+  pcap_skeleton:
+    learning_rate: 3.0e-4
+    warmup_steps: 100
+    weight_decay: 0.1
+    batch_size: 1
+    grad_accum_steps: 2
+    turn_max_tokens: 256
+    max_turns_per_episode: 8
+    tbptt_turns: 8
+    value_weight_cap: 5.0
+    max_steps: 3000
+    nm_aux_weight: 1.0        # 保留:训 W_mac→lm_head 通路学 value 预测(独立监督)
+    shortcut_suppression: true
+    shortcut_margin: 0.3
+    shortcut_lambda: 2.0
+    memory_dropout: 0.0

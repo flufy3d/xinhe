@@ -1,0 +1,49 @@
+# v21 = v20 单变量改动:schedule horizon 14000 → 40000(其余全同 v20)。
+#
+# 动机(本 session v20 曲线):per-layer Delta read 在真 checkpoint 通了,100% 记忆驱动
+#   (NM-zero read=0%),且 novel-value 整串解码随 visits 自解(val fg 1.8→10.9%)。
+#   但 v20 cosine→14000 后段 LR 饿死(step12500 已 8.7e-6),val read 卡 ~11%。
+#   v21 把 horizon 拉到 40000:从 v20 step_14000 resume(load_checkpoint 不覆盖 config,
+#   LambdaLR 用新 max_steps 重算 → LR 自动回到 ~2.2e-4),让 read 路径在健康 LR 多跑
+#   ~26 visits(总 ~40)。测「持续 LR 下多 visits 能否把 val 顶过 11% 往探针预测的高位爬」。
+#   涨 → scaling 成立,再叠 entity scale 冲 95;平 → 换能力杠杆(更强 read/更大 backbone)。
+# 启动:--config configs/pcap_skeleton_5080_v21.yaml --from-stage pcap_skeleton \
+#       --resume checkpoints/xinhe_step_14000.pt   (无 --reset-step,LR 自动回升)
+
+base: qwen3.5-0.8b.yaml
+curriculum_file: curriculum_pcap_skeleton_gen_v21.yaml
+
+state:
+  read_mode: per_layer_delta
+  n_heads: 16
+  head_dim: 128
+  read_scale_init: 0.0
+  beta_bias_init: -2.0
+  delta_backend: auto
+  n_persistent_per_layer: 0
+
+lora:
+  rank: 16
+  alpha: 32
+
+training:
+  grad_accum_steps: 4
+  dtype: bfloat16
+  compile_backbone_layers: false
+
+stage_overrides:
+  pcap_skeleton:
+    learning_rate: 3.0e-4
+    warmup_steps: 200
+    weight_decay: 0.1
+    batch_size: 1
+    grad_accum_steps: 2
+    turn_max_tokens: 256
+    max_turns_per_episode: 8
+    tbptt_turns: 8
+    value_weight_cap: 5.0
+    max_steps: 40000
+    shortcut_suppression: true
+    shortcut_margin: 0.3
+    shortcut_lambda: 2.0
+    memory_dropout: 0.0

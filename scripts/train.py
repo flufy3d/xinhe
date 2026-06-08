@@ -285,25 +285,18 @@ def train_curriculum(base_config, stages, args):
 
     if init_ckpt:
         ckpt = torch.load(init_ckpt, map_location=base_config.device, weights_only=False)
-        if "qhead_state" not in ckpt:
+        addon = ckpt.get("addon_state") or ckpt.get("qhead_state")
+        if addon is None:
             raise RuntimeError(
-                f"checkpoint {init_ckpt} 缺少 'qhead_state' 键。单全局架构不兼容 v9.5 memory_pair_state,"
-                "请从零重训。"
+                f"checkpoint {init_ckpt} 缺少 'addon_state'/'qhead_state' 键,不兼容当前架构,请从零重训。"
             )
-        # 单全局模块加载:QueryHead + HippoDelta + 注入投影 + MAL α
-        qh = ckpt["qhead_state"]
-        model.query_head.load_state_dict(qh["query_head"])
-        model.W_mac.load_state_dict(qh["W_mac"])
-        model.W_mal.load_state_dict(qh["W_mal"])
-        model.global_mem_rmsnorm.load_state_dict(qh["global_mem_rmsnorm"])
-        with torch.no_grad():
-            model.mal_alpha_logit.copy_(qh["mal_alpha_logit"].to(model.mal_alpha_logit.device))
-        model.global_hippo.load_state_dict(qh["global_hippo"])
+        # addon 模块加载(query_head 或 per_layer_delta,由 read_mode 决定)
+        model.load_addon_state_dict(addon)
         # backbone addons(LoRA + per-layer K/V)
         if "backbone_addons_state" in ckpt:
             addons = {k: v.to(base_config.device) for k, v in ckpt["backbone_addons_state"].items()}
             model.backbone.load_state_dict(addons, strict=False)
-        print(f"[课程学习] 从 {init_ckpt} 加载权重")
+        print(f"[课程学习] 从 {init_ckpt} 加载权重(read_mode={addon.get('read_mode', 'query_head')})")
 
     trainer = None
 

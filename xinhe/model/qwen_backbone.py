@@ -98,6 +98,7 @@ class QwenBackbone(nn.Module, BackboneBase):
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
         layer_hook: Optional[callable] = None,
+        n_layers: Optional[int] = None,
     ) -> torch.Tensor:
         # Qwen 使用 RoPE，需要构建 position embeddings
         seq_len = hidden_states.shape[1]
@@ -108,6 +109,9 @@ class QwenBackbone(nn.Module, BackboneBase):
 
         # 逐层跑 transformer blocks（多卡时跟随 layer 设备移动）
         for layer_idx, layer in enumerate(self.model.model.layers):
+            # n_layers 早退:仅跑前 N 层(v15 query_source_layer 用)
+            if n_layers is not None and layer_idx >= n_layers:
+                break
             # State read hook（在 backbone 层之前，checkpoint 之外）
             if layer_hook is not None:
                 hidden_states = layer_hook(hidden_states, layer_idx)
@@ -133,7 +137,9 @@ class QwenBackbone(nn.Module, BackboneBase):
                     position_embeddings=position_embeddings,
                 )
 
-        hidden_states = self.model.model.norm(hidden_states)
+        # 早退路径跳过 final norm(让 caller 决定要不要 RMSNorm)
+        if n_layers is None:
+            hidden_states = self.model.model.norm(hidden_states)
         return hidden_states
 
     @staticmethod

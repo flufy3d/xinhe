@@ -103,23 +103,57 @@ class XinheModel(nn.Module):
 
         self.lm_head = self.backbone.get_lm_head()
 
+        # v19:read_mode=per_layer_delta → 回 delta-w-end 的 per-layer 全参 Delta read
+        # (本 session 白盒证明单全局 MAC/MAL 压缩 decode 不泛化;delta-w-end 该机制曾达 95%+)
+        self.read_mode = str(getattr(config, "read_mode", "query_head"))
+        if self.read_mode == "per_layer_delta":
+            from .hippocampus import Hippocampus
+            self.hippocampus = Hippocampus(
+                hidden_size=config.hidden_size,
+                n_heads=config.n_heads,
+                head_dim=config.head_dim,
+                n_layers=len(self._hook_layer_indices),
+                read_scale_init=float(getattr(config, "read_scale_init", -3.0)),
+                beta_bias_init=float(getattr(config, "beta_bias_init", 0.0)),
+                delta_backend=str(getattr(config, "delta_backend", "auto")),
+            )
+            self._hook_idx_map = {l: i for i, l in enumerate(self._hook_layer_indices)}
+            self._pld_key = self._hook_layer_indices[-1]   # 单 W 存这个 slot(read 各层共享同一 W)
+            print(f"[Hippocampus per-layer-delta] hook={self._hook_layer_indices} "
+                  f"H={config.n_heads} head_dim={config.head_dim} "
+                  f"read_scale_init={getattr(config, 'read_scale_init', -3.0)} "
+                  f"W=(B,{config.n_heads},{config.head_dim},{config.head_dim})")
+            self._pad_token_id = None
+            return   # 跳过下方 QueryHead 单全局构建
+
         # === QueryHead 单全局记忆(目标架构;唯一 forward 路径)===
         # use_query_head 已单值化为 True,留作 ckpt/yaml 兼容标记。
         from .query_head import QueryHead
         from .neural_memory_pair import AdaptiveRMSNorm
         from .hippo_delta import HippoDelta
+        from .cross_attn_mem import CrossAttnMem
         self.use_query_head = True
         self.n_query = int(getattr(config, "n_query", 16))
         d_key = int(getattr(config, "d_key", 256))
         d_value = int(getattr(config, "d_value", 128))
-        self.global_hippo = HippoDelta(
-            d_model=d_total, d_key=d_key, d_value=d_value, n_heads=config.n_heads,
-            tau_k_init=float(getattr(config, "tau_k_init", 1.0)),
-            beta_bias_init=float(getattr(config, "beta_bias_init", 0.0)),
-            gated=bool(getattr(config, "gated_delta", False)),
-            delta_backend=str(getattr(config, "delta_backend", "auto")),
-            spectral_norm_cap=float(getattr(config, "spectral_norm_cap", 10.0)),
-        )
+        mem_type = str(getattr(config, "mem_type", "hippo"))
+        self._mem_type = mem_type
+        if mem_type == "cross_attn":
+            # v16 D 路径:softmax cross-attention NM,替代 HippoDelta 线性 retrieve
+            self.global_hippo = CrossAttnMem(
+                d_model=d_total, d_key=d_key, d_value=d_value,
+                max_slots=int(getattr(config, "mem_max_slots", 32)),
+                pool=str(getattr(config, "mem_write_pool", "mean")),
+            )
+        else:
+            self.global_hippo = HippoDelta(
+                d_model=d_total, d_key=d_key, d_value=d_value, n_heads=config.n_heads,
+                tau_k_init=float(getattr(config, "tau_k_init", 1.0)),
+                beta_bias_init=float(getattr(config, "beta_bias_init", 0.0)),
+                gated=bool(getattr(config, "gated_delta", False)),
+                delta_backend=str(getattr(config, "delta_backend", "auto")),
+                spectral_norm_cap=float(getattr(config, "spectral_norm_cap", 10.0)),
+            )
         mem_dim = d_value
         self.query_head = QueryHead(config.hidden_size, d_key, self.n_query)
         # 注入投影:mem_out(mem_dim=d_value) → hidden
@@ -212,19 +246,157 @@ class XinheModel(nn.Module):
         mem_mac_override: Optional[float] = None,
         mem_mal_override: Optional[float] = None,
     ) -> dict:
+        if getattr(self, "read_mode", "query_head") == "per_layer_delta":
+            return self._forward_per_layer_delta(
+                input_ids, state, labels, weights, mem_alpha_override, compute_logits,
+            )
         # 已单值化:统一走 QueryHead 单全局路径
         return self._forward_query_head(
             input_ids, state, labels, weights, mem_alpha_override, compute_logits,
             mem_mac_override, mem_mal_override,
         )
 
+    def _forward_per_layer_delta(
+        self,
+        input_ids: torch.Tensor,
+        state: XinheMemoryState,
+        labels: Optional[torch.Tensor],
+        weights: Optional[torch.Tensor],
+        mem_alpha_override: Optional[float],
+        compute_logits: bool = True,
+    ) -> dict:
+        """v19 per-layer Delta read(移植 delta-w-end):
+        每个 full-attn hook 层 read_layer 注入 → backbone forward → 末尾一次 write_from_content。
+        mem_alpha_override=0.0 → read 关(NM-zero ablation,供 shortcut gap + 三口径 eval);write 不受影响。"""
+        from .hippo_delta import HippoDeltaState
+        B, T = input_ids.shape
+        device = input_ids.device
+        pad_token_id = self._pad_token_id
+        content_emb = self.backbone.embed(input_ids)               # (B,T,hidden)
+
+        # W_prev(单 W,read 各层共享):从 state 取,缺失则空白
+        old = state.get(self._pld_key) if state is not None else None
+        W_prev = (old.hippo.M if (old is not None and getattr(old, "hippo", None) is not None
+                                  and getattr(old.hippo, "M", None) is not None) else None)
+        if W_prev is None:
+            W_prev = self.hippocampus.blank_state(B, device=device)
+        W_prev = W_prev.to(device)
+
+        read_mul = 1.0 if mem_alpha_override is None else float(mem_alpha_override)
+        hook_set = self._hook_layer_set
+        hook_idx_map = self._hook_idx_map
+
+        def read_hook(hidden_states, layer_idx):
+            if layer_idx not in hook_set:
+                return hidden_states
+            return self.hippocampus.read_layer(
+                hidden_states, W_prev, hook_idx_map[layer_idx], read_scale_mul=read_mul,
+            )
+
+        causal = torch.triu(
+            torch.full((T, T), float("-inf"), device=device, dtype=content_emb.dtype), diagonal=1,
+        )
+        if pad_token_id is not None:
+            padding_mask = (input_ids != pad_token_id)
+            pad_col = torch.zeros(B, 1, T, device=device, dtype=content_emb.dtype)
+            pad_col.masked_fill_(~padding_mask.unsqueeze(1), float("-inf"))
+            mask = causal.unsqueeze(0).unsqueeze(0) + pad_col.unsqueeze(2)
+        else:
+            mask = causal.unsqueeze(0).unsqueeze(0)
+        position_ids = torch.arange(T, dtype=torch.long, device=device).unsqueeze(0)
+
+        content_output = self.backbone.forward_blocks(
+            content_emb, attention_mask=mask, position_ids=position_ids, layer_hook=read_hook,
+        )
+
+        # write(不依赖 read_mul:NM-zero 的 state 仍正常演进,与 NM-on 一致)
+        W_next = self.hippocampus.write_from_content(W_prev, content_output)
+        merged = dict(state.layers) if (state is not None and state.layers) else {}
+        merged[self._pld_key] = LayerMemState(hippo=HippoDeltaState(M=W_next, seq_index=0), neo=None)
+        state_next = XinheMemoryState(merged)
+
+        ref_device = content_output.device
+        ref_dtype = content_output.dtype
+        aux_loss = torch.zeros((), device=ref_device, dtype=ref_dtype)
+        return self._build_lm_result(content_output, labels, weights, compute_logits, state_next, aux_loss)
+
+    def _build_lm_result(self, content_output, labels, weights, compute_logits, state_next, aux_loss):
+        """content_output → logits/loss/ce_loss/correct/total(与 _forward_query_head 同口径)。"""
+        ref_device = content_output.device
+        if compute_logits:
+            logits = self.lm_head(content_output)
+            result = {"logits": logits, "state_next": state_next, "aux_loss": aux_loss}
+            if labels is not None:
+                shift_logits = logits[:, :-1, :].contiguous()
+                shift_labels = labels[:, 1:].contiguous()
+                valid_count = (shift_labels != -100).sum()
+                if valid_count > 0:
+                    flat_logits = shift_logits.view(-1, shift_logits.size(-1))
+                    flat_labels = shift_labels.view(-1)
+                    if weights is not None:
+                        shift_weights = weights[:, 1:].contiguous().view(-1).to(flat_logits.dtype)
+                        safe_labels = flat_labels.clamp(min=0)
+                        per_token = F.cross_entropy(flat_logits, safe_labels, reduction="none")
+                        w_sum = shift_weights.sum().clamp(min=1e-8)
+                        ce_loss = (per_token * shift_weights).sum() / w_sum
+                    else:
+                        ce_loss = F.cross_entropy(flat_logits, flat_labels, ignore_index=-100)
+                    valid_mask = flat_labels != -100
+                    preds = flat_logits[valid_mask].argmax(dim=-1)
+                    result["correct"] = (preds == flat_labels[valid_mask]).sum()
+                    result["total"] = valid_count
+                    result["ce_loss"] = ce_loss
+                    result["loss"] = ce_loss + aux_loss
+                else:
+                    result["loss"] = torch.tensor(0.0, device=ref_device, requires_grad=True)
+                    result["ce_loss"] = result["loss"]
+                    result["correct"] = torch.tensor(0, device=ref_device)
+                    result["total"] = torch.tensor(0, device=ref_device)
+            return result
+
+        result = {"logits": None, "state_next": state_next, "aux_loss": aux_loss}
+        if labels is None:
+            return result
+        shift_h = content_output[:, :-1, :].contiguous()
+        shift_labels = labels[:, 1:].contiguous()
+        flat_h = shift_h.view(-1, shift_h.size(-1))
+        flat_labels = shift_labels.view(-1)
+        valid_mask = flat_labels != -100
+        valid_count = valid_mask.sum()
+        if valid_count == 0:
+            result["loss"] = torch.tensor(0.0, device=ref_device, requires_grad=True)
+            result["ce_loss"] = result["loss"]
+            result["correct"] = torch.tensor(0, device=ref_device)
+            result["total"] = torch.tensor(0, device=ref_device)
+            return result
+        lm_w = self.lm_head.weight
+        if weights is not None:
+            per_token = linear_cross_entropy(flat_h, lm_w, flat_labels, ignore_index=-100, reduction="none")
+            shift_weights = weights[:, 1:].contiguous().view(-1).to(per_token.dtype)
+            shift_weights = shift_weights * valid_mask.to(shift_weights.dtype)
+            w_sum = shift_weights.sum().clamp(min=1e-8)
+            ce_loss = (per_token * shift_weights).sum() / w_sum
+        else:
+            ce_loss = linear_cross_entropy(flat_h, lm_w, flat_labels, ignore_index=-100, reduction="mean")
+        valid_h = flat_h[valid_mask].detach()
+        preds = _chunked_argmax(valid_h, lm_w)
+        result["correct"] = (preds == flat_labels[valid_mask]).sum()
+        result["total"] = valid_count
+        result["ce_loss"] = ce_loss
+        result["loss"] = ce_loss + aux_loss
+        return result
+
     def _global_read(self, q, old_hippo):
-        """单全局 read (delta):HippoDelta.retrieve。返回 (B,n_q,d_value)。"""
+        """单全局 read:dispatch by mem_type。返回 (B,n_q,d_value)。
+        HippoDelta 接口要传 M 张量;CrossAttnMem 直接传整 state(含 K_buf/V_buf)。
+        """
+        if self._mem_type == "cross_attn":
+            return self.global_hippo.retrieve(old_hippo, q)
         M = old_hippo.M if old_hippo is not None else None
         return self.global_hippo.retrieve(M, q)
 
     def _global_write_step(self, x_write, old_hippo):
-        """单全局 write (delta):HippoDelta.write。返回新 hippo state。"""
+        """单全局 write:两者接口一致(传 x + state,返回新 state)。"""
         return self.global_hippo.write(x_write, old_hippo)
 
     def _forward_query_head(
@@ -252,12 +424,45 @@ class XinheModel(nn.Module):
         pad_token_id = self._pad_token_id
         content_emb = self.backbone.embed(input_ids)            # (B, T, hidden)
 
-        # 1. 低层 h_pre 的"最后一个非 pad token" → q(右 pad 时 [:, -1] 会取到 pad)
-        if pad_token_id is not None:
-            last_idx = (input_ids != pad_token_id).long().sum(dim=1).clamp(min=1) - 1
-            h_last = content_emb[torch.arange(B, device=device), last_idx]   # (B, hidden)
+        # 1. h_pre → q。两层配置:
+        #   (a) query_source_layer = 0(legacy):h_pre 直接用 content_emb(raw embedding)
+        #   (b) query_source_layer > 0(v15):跑 backbone 前 N 层产生 h_pre
+        #       — 让 q 包含 attention-based semantic processing
+        #       — 不能 N==full,否则与 MAC-R 循环依赖(后续 forward 含 mac prefix)
+        #   query_pool ∈ {"mean", "last"}:对 h_pre 的池化方式
+        query_source_layer = int(getattr(self.config, "query_source_layer", 0))
+        query_pool = getattr(self.config, "query_pool", "mean")
+        if query_source_layer > 0:
+            # v15 路径:partial forward 跑前 N 层(不含 mac prefix,无循环依赖)
+            T_clean = content_emb.shape[1]
+            causal_clean = torch.triu(
+                torch.full((T_clean, T_clean), float("-inf"), device=device, dtype=content_emb.dtype),
+                diagonal=1,
+            )
+            if pad_token_id is not None:
+                padding_mask_clean = (input_ids != pad_token_id)
+                pad_col_clean = torch.zeros(B, 1, T_clean, device=device, dtype=content_emb.dtype)
+                pad_col_clean.masked_fill_(~padding_mask_clean.unsqueeze(1), float("-inf"))
+                mask_clean = causal_clean.unsqueeze(0).unsqueeze(0) + pad_col_clean.unsqueeze(2)
+            else:
+                mask_clean = causal_clean.unsqueeze(0).unsqueeze(0)
+            position_ids_clean = torch.arange(T_clean, dtype=torch.long, device=device).unsqueeze(0)
+            h_pre_seq = self.backbone.forward_blocks(
+                content_emb, attention_mask=mask_clean, position_ids=position_ids_clean,
+                layer_hook=None, n_layers=query_source_layer,
+            )                                                       # (B, T, hidden) — semantic-aware
         else:
-            h_last = content_emb[:, -1]
+            h_pre_seq = content_emb                                 # (B, T, hidden) — raw embedding
+        # 池化
+        if pad_token_id is not None:
+            mask_pool = (input_ids != pad_token_id).to(h_pre_seq.dtype).unsqueeze(-1)  # (B, T, 1)
+            if query_pool == "last":
+                last_idx = (input_ids != pad_token_id).long().sum(dim=1).clamp(min=1) - 1
+                h_last = h_pre_seq[torch.arange(B, device=device), last_idx]
+            else:  # "mean"
+                h_last = (h_pre_seq * mask_pool).sum(dim=1) / mask_pool.sum(dim=1).clamp(min=1.0)
+        else:
+            h_last = h_pre_seq.mean(dim=1) if query_pool == "mean" else h_pre_seq[:, -1]
         q = self.query_head(h_last)                             # (B, n_q, d_total)
 
         # 2. 单次 read:retrieve_only(M_prev)。Phase 2 pause mix_gate → mem_out = rmsnorm(r_h)
@@ -269,14 +474,22 @@ class XinheModel(nn.Module):
         mem_out = self.global_mem_rmsnorm(r_h)
 
         # 3. MAC-R 前缀(动态投影,QueryHead retrieve 的 mem_out → hidden)
-        mac_tokens = self.W_mac(mem_out)                        # (B, n_q, hidden)
+        mac_tokens = self.W_mac(mem_out)                        # (B, n_q, hidden) — nm_aux 仍要用
         # MAC-R alpha 路由:mem_mac_override(probe)优先;退化到 mem_alpha_override(NM-zero)
         mac_alpha_val = mem_mac_override if mem_mac_override is not None else mem_alpha_override
         if mac_alpha_val is not None:
             mac_tokens = float(mac_alpha_val) * mac_tokens
-        N_m = self.n_query
-        content_emb = torch.cat([mac_tokens.to(content_emb.dtype), content_emb], dim=1)
-        fresh_start, fresh_end, real_start, real_end = 0, N_m, N_m, N_m + T
+        # v17:mac_disabled=True 时关停 MAC 主路径(不 cat 到序列前缀)
+        # backbone 不再 attend mac_token prefix,LoRA r=4 不用为它分化 attention heads;
+        # MAL 成为 mem→logits 的唯一通路;nm_aux 仍可用 mac_tokens 作监督信号
+        mac_disabled = bool(getattr(self.config, "mac_disabled", False))
+        if mac_disabled:
+            N_m = 0
+            fresh_start, fresh_end, real_start, real_end = 0, 0, 0, T
+        else:
+            N_m = self.n_query
+            content_emb = torch.cat([mac_tokens.to(content_emb.dtype), content_emb], dim=1)
+            fresh_start, fresh_end, real_start, real_end = 0, N_m, N_m, N_m + T
 
         new_layers: dict[int, LayerMemState] = {}
         aux_loss_terms: list[torch.Tensor] = []
@@ -392,9 +605,11 @@ class XinheModel(nn.Module):
                     targets = flat_labels[valid_mask]
                     result["correct"] = (preds == targets).sum()
                     result["total"] = valid_count
+                    result["ce_loss"] = ce_loss              # 纯 CE,不含 aux(给 shortcut suppression 算 gap 用)
                     result["loss"] = ce_loss + aux_loss
                 else:
                     result["loss"] = torch.tensor(0.0, device=ref_device, requires_grad=True)
+                    result["ce_loss"] = result["loss"]
                     result["correct"] = torch.tensor(0, device=ref_device)
                     result["total"] = torch.tensor(0, device=ref_device)
             return result
@@ -410,6 +625,7 @@ class XinheModel(nn.Module):
         valid_count = valid_mask.sum()
         if valid_count == 0:
             result["loss"] = torch.tensor(0.0, device=ref_device, requires_grad=True)
+            result["ce_loss"] = result["loss"]
             result["correct"] = torch.tensor(0, device=ref_device)
             result["total"] = torch.tensor(0, device=ref_device)
             return result
@@ -427,6 +643,7 @@ class XinheModel(nn.Module):
         targets = flat_labels[valid_mask]
         result["correct"] = (preds == targets).sum()
         result["total"] = valid_count
+        result["ce_loss"] = ce_loss                          # 纯 CE,不含 aux(给 shortcut suppression 算 gap 用)
         result["loss"] = ce_loss + aux_loss
         return result
 
@@ -537,6 +754,11 @@ class XinheModel(nn.Module):
         和后续 per-layer K/V 包装的 K_pers/V_pers(它们都在 backbone 子模块内)。
         """
         params: list[nn.Parameter] = []
+        if getattr(self, "read_mode", "query_head") == "per_layer_delta":
+            # v19:Hippocampus(per-layer q/o + 写侧 k/v/β + read_scale)+ LoRA
+            params += [p for p in self.hippocampus.parameters() if p.requires_grad]
+            params += [p for p in self.backbone.parameters() if p.requires_grad]
+            return params
         if not isinstance(self._d_total_in, nn.Identity):
             params += [p for p in self._d_total_in.parameters() if p.requires_grad]
             params += [p for p in self._d_total_out.parameters() if p.requires_grad]
@@ -548,6 +770,35 @@ class XinheModel(nn.Module):
         # LoRA 注入的 lora_A/B + 后续 per-layer K/V 的 K_pers/V_pers 都挂在 backbone 内
         params += [p for p in self.backbone.parameters() if p.requires_grad]
         return params
+
+    def addon_state_dict(self) -> dict:
+        """架构无关的 addon 模块权重(供 trainer 存 / eval 加载)。LoRA 等 backbone addons 由 trainer 单独存。"""
+        if getattr(self, "read_mode", "query_head") == "per_layer_delta":
+            return {"read_mode": "per_layer_delta", "hippocampus": self.hippocampus.state_dict()}
+        return {
+            "read_mode": "query_head",
+            "hippo_impl": "delta",
+            "query_head": self.query_head.state_dict(),
+            "W_mac": self.W_mac.state_dict(),
+            "W_mal": self.W_mal.state_dict(),
+            "global_mem_rmsnorm": self.global_mem_rmsnorm.state_dict(),
+            "mal_alpha_logit": self.mal_alpha_logit.detach().cpu(),
+            "global_hippo": self.global_hippo.state_dict(),
+        }
+
+    def load_addon_state_dict(self, d: dict):
+        """加载 addon_state_dict() 存的权重(read_mode 缺失视为旧 query_head ckpt)。"""
+        mode = d.get("read_mode", "query_head")
+        if mode == "per_layer_delta":
+            self.hippocampus.load_state_dict(d["hippocampus"])
+            return
+        self.query_head.load_state_dict(d["query_head"])
+        self.W_mac.load_state_dict(d["W_mac"])
+        self.W_mal.load_state_dict(d["W_mal"])
+        self.global_mem_rmsnorm.load_state_dict(d["global_mem_rmsnorm"])
+        with torch.no_grad():
+            self.mal_alpha_logit.copy_(d["mal_alpha_logit"].to(self.mal_alpha_logit.device))
+        self.global_hippo.load_state_dict(d["global_hippo"])
 
     def get_trainable_param_count(self) -> int:
         return sum(p.numel() for p in self.get_trainable_params())

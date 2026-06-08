@@ -40,24 +40,15 @@ def load_model_and_tokenizer(config, checkpoint_path, device):
 
     if checkpoint_path:
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-        if "qhead_state" not in checkpoint:
-            raise RuntimeError(
-                "checkpoint 缺少 'qhead_state' 键。仅兼容单全局架构 ckpt。"
-            )
+        addon = checkpoint.get("addon_state") or checkpoint.get("qhead_state")
+        if addon is None:
+            raise RuntimeError("checkpoint 缺少 'addon_state'/'qhead_state' 键,不兼容。")
         # backbone addons(LoRA + per-layer K/V),strict=False 兼容老 backbone
         if "backbone_addons_state" in checkpoint:
             addons = {k: v.to(device) for k, v in checkpoint["backbone_addons_state"].items()}
             model.backbone.load_state_dict(addons, strict=False)
-        # 单全局模块:QueryHead + HippoDelta + 注入投影 + MAL α
-        qh = checkpoint["qhead_state"]
-        model.query_head.load_state_dict(qh["query_head"])
-        model.W_mac.load_state_dict(qh["W_mac"])
-        model.W_mal.load_state_dict(qh["W_mal"])
-        model.global_mem_rmsnorm.load_state_dict(qh["global_mem_rmsnorm"])
-        with torch.no_grad():
-            model.mal_alpha_logit.copy_(qh["mal_alpha_logit"].to(model.mal_alpha_logit.device))
-        model.global_hippo.load_state_dict(qh["global_hippo"])
-        print(f"  [QueryHead] 单全局模块加载(hippo_impl={qh.get('hippo_impl')})")
+        model.load_addon_state_dict(addon)
+        print(f"  [addon] 加载(read_mode={addon.get('read_mode', 'query_head')})")
 
     model.to(device)
     model.eval()

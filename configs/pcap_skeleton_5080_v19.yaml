@@ -1,0 +1,47 @@
+# v19 GATE — 回 delta-w-end 的 per-layer Delta read + 当前抗过拟合训练(A 路径)
+#
+# 本 session 5 探针锁定:当前单全局 MAC/MAL 压缩 decode 对 novel value 不泛化(纯 decode rank~42k)。
+# delta-w-end 的 per-layer 全参 Delta read 曾达 95-98% recall;其"换问法就崩"是数据窄(100% 模板)
+# + 无 shortcut 抑制的过拟合问题。当前 repo 已建好泛化武器(shortcut suppression + 多样化数据
+# distractor/改写 query + 三口径 eval)。v19 = 把"能召回的 read"嫁接到"能治泛化的训练"上。
+#
+# GATE 判据(≤1000 步,skeleton-only):val free-gen recall>0 且 _probe_mem_decode fact_self rank<100。
+# 达标才 scale 到 3000 + 全 curriculum + C(语义 query)ablation。
+
+base: qwen3.5-0.8b.yaml
+curriculum_file: curriculum_pcap_skeleton_gen_v11.yaml
+
+state:
+  read_mode: per_layer_delta   # ← v19 核心:每 full-attn 层全参 Delta read(回 v5c 机制)
+  n_heads: 16
+  head_dim: 128                # W=(B,16,128,128);value 128/head(vs 单全局 8/head)
+  read_scale_init: -3.0        # 每层 read 注入 σ(-3)≈0.05 起步,梯度从 0 长出
+  beta_bias_init: -2.0         # 写门控 β=σ(-2)≈0.12 起步(delta-w-end base 值)
+  delta_backend: auto          # 训练自动强制 torch;推理 FLA
+  n_persistent_per_layer: 0
+
+lora:
+  rank: 16                     # ← 回 v5c 的 r=16(单全局退化到了 r=4)
+  alpha: 32
+
+training:
+  grad_accum_steps: 4
+  dtype: bfloat16
+  compile_backbone_layers: false
+
+stage_overrides:
+  pcap_skeleton:
+    learning_rate: 3.0e-4
+    warmup_steps: 100
+    weight_decay: 0.1
+    batch_size: 1
+    grad_accum_steps: 2
+    turn_max_tokens: 256
+    max_turns_per_episode: 8
+    tbptt_turns: 8
+    value_weight_cap: 5.0
+    max_steps: 1000            # GATE:小跑验证再 scale
+    shortcut_suppression: true # 治 v5c 的"模板填值"shortcut(NM-zero forward = read 关)
+    shortcut_margin: 0.3
+    shortcut_lambda: 2.0
+    memory_dropout: 0.0

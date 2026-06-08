@@ -81,6 +81,12 @@ class Trainer:
         self._ema_loss = None
         self._ema_acc = None
 
+        # Margin-Based Shortcut Suppression 监控
+        self._last_shortcut_gap: float | None = None
+        self._last_shortcut_penalty: float | None = None
+        self._ema_shortcut_gap: float | None = None
+        self._ema_shortcut_penalty: float | None = None
+
     def _apply_freezes(self, config: XinheConfig):
         """单全局架构没有 per-layer memory ModuleDict;freeze 钩子保留作占位,Plan B 不用。"""
         # plugin_lr_multiplier=0 走 _build_optimizer 时 lr=0,等效冻结 memory 组。
@@ -242,12 +248,17 @@ class Trainer:
                         pad_token_id=self.pad_token_id, weights=weights,
                         compute_logits=False, mem_alpha_override=0.0,
                     )
-                loss_zero = result_zero["loss"]    # 不 detach!grad 通到 backbone
+                # ★ 关键修复:gap 必须用纯 CE loss 比,不能用含 aux_loss 的 result["loss"]。
+                # 原因:NM-zero forward 里 _any_override=True → nm_aux 被跳过 → loss_zero 没 aux,
+                # loss_on 有 aux(nm_aux_weight × nm_ce,可能 1-2 nat),gap 天然偏负,
+                # shortcut penalty 实际在惩罚 nm_aux 项的存在,不是惩罚 NM shortcut!
+                ce_on = result["ce_loss"]
+                ce_zero = result_zero["ce_loss"]    # 不 detach!grad 通到 backbone
                 margin = self.config.shortcut_margin
                 lam = self.config.shortcut_lambda
-                penalty = torch.clamp(turn_loss - loss_zero + margin, min=0.0)
-                # gap > 0 = mem 真有用;gap ≤ 0 = mem 没用(penalty 在推梯度让它变有用)
-                self._last_shortcut_gap = float((loss_zero.detach() - turn_loss.detach()).item())
+                penalty = torch.clamp(ce_on - ce_zero + margin, min=0.0)
+                # gap > 0 = mem 真有用(NM-on CE 比 NM-zero CE 低);gap ≤ 0 = mem 没用
+                self._last_shortcut_gap = float((ce_zero.detach() - ce_on.detach()).item())
                 self._last_shortcut_penalty = float(penalty.detach().item())
                 turn_loss = turn_loss + lam * penalty
 
@@ -399,6 +410,19 @@ class Trainer:
         if self._accum_count < self.config.grad_accum_steps:
             return
 
+        # ★ NaN-skip:任意可训练 grad 出现 nan/inf 则跳过本次 optimizer step
+        # 保住 weights 干净;下一 batch 大概率不再 NaN(单 ep 触发的话)
+        nan_param = None
+        for n, p in self.model.named_parameters():
+            if p.requires_grad and p.grad is not None and not torch.isfinite(p.grad).all():
+                nan_param = n
+                break
+        if nan_param is not None:
+            print(f"  [NaN-skip] step {self.global_step+1} grad 含 nan/inf at '{nan_param}',zero_grad 跳过")
+            self.optimizer.zero_grad()
+            self._accum_count = 0
+            return
+
         torch.nn.utils.clip_grad_norm_(
             self.model.get_trainable_params(),
             self.config.grad_clip,
@@ -420,17 +444,33 @@ class Trainer:
             self._ema_loss = alpha * last_loss + (1 - alpha) * self._ema_loss
             self._ema_acc = alpha * last_acc + (1 - alpha) * self._ema_acc
 
+        # Shortcut Suppression EMA(只在 shortcut on 时更新)
+        if self.config.shortcut_suppression and self._last_shortcut_gap is not None:
+            if self._ema_shortcut_gap is None:
+                self._ema_shortcut_gap = self._last_shortcut_gap
+                self._ema_shortcut_penalty = self._last_shortcut_penalty or 0.0
+            else:
+                self._ema_shortcut_gap = (alpha * self._last_shortcut_gap
+                                          + (1 - alpha) * self._ema_shortcut_gap)
+                self._ema_shortcut_penalty = (alpha * (self._last_shortcut_penalty or 0.0)
+                                              + (1 - alpha) * (self._ema_shortcut_penalty or 0.0))
+
         if self.global_step % self.config.log_every == 0:
             lr = self.scheduler.get_last_lr()[0]
             # 通路效度指标:LoRA/K_pers 梯度 norm 是否在学
             grads = getattr(self, "_last_mac_grads", None) or {}
             def _fg(k): return grads.get(k)
             def _fmt(v): return f"{v:.1e}" if isinstance(v, float) else "—"
+            short_str = ""
+            if self.config.shortcut_suppression and self._ema_shortcut_gap is not None:
+                short_str = (f" gap={self._ema_shortcut_gap:+.3f} "
+                             f"pen={self._ema_shortcut_penalty:.3f}")
             print(
                 f"  [Step {self.global_step}] ema_loss={self._ema_loss:.4f} "
                 f"ema_acc={self._ema_acc:.2%} lr={lr:.2e} "
                 f"|g_lora|={_fmt(_fg('lora'))} "
                 f"|g_kp|={_fmt(_fg('K_pers'))}"
+                f"{short_str}"
             )
 
         if self.global_step % self.config.save_every == 0:
@@ -456,6 +496,8 @@ class Trainer:
         self._early_stopped = False
         self._ema_loss = None
         self._ema_acc = None
+        self._ema_shortcut_gap = None
+        self._ema_shortcut_penalty = None
 
         if getattr(self, "_compiled", False):
             try:
@@ -495,18 +537,9 @@ class Trainer:
         }
         if backbone_addons:
             checkpoint["backbone_addons_state"] = backbone_addons
-        # 单全局模块:QueryHead + HippoDelta + 注入投影(W_mac/W_mal) + MAL α
-        m = self.model
-        qh = {
-            "hippo_impl": "delta",
-            "query_head": m.query_head.state_dict(),
-            "W_mac": m.W_mac.state_dict(),
-            "W_mal": m.W_mal.state_dict(),
-            "global_mem_rmsnorm": m.global_mem_rmsnorm.state_dict(),
-            "mal_alpha_logit": m.mal_alpha_logit.detach().cpu(),
-            "global_hippo": m.global_hippo.state_dict(),
-        }
-        checkpoint["qhead_state"] = qh
+        # addon 模块(架构无关):query_head 模式 = QueryHead/W_mac/W_mal/MAL α/HippoDelta;
+        # per_layer_delta 模式 = Hippocampus。由 model.addon_state_dict() 统一给出。
+        checkpoint["addon_state"] = self.model.addon_state_dict()
 
         torch.save(checkpoint, path)
         print(f"  [Checkpoint] 保存到 {path} "
@@ -516,10 +549,10 @@ class Trainer:
         """加载 checkpoint(单全局架构;只读 qhead_state + backbone_addons_state)。"""
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
 
-        if "qhead_state" not in checkpoint:
+        addon = checkpoint.get("addon_state") or checkpoint.get("qhead_state")
+        if addon is None:
             raise RuntimeError(
-                "checkpoint 缺少 'qhead_state' 键。单全局架构不兼容 v9.5 memory_pair_state,"
-                "请从零重训。"
+                "checkpoint 缺少 'addon_state'/'qhead_state' 键,不兼容当前架构,请从零重训。"
             )
 
         # backbone addons(LoRA + per-layer K/V),strict=False 兼容老 backbone
@@ -531,17 +564,8 @@ class Trainer:
             print(f"[Checkpoint] LoRA/K_pers 加载 {len(addons)} 个张量 "
                   f"(unexpected={len(unexpected)})")
 
-        # 单全局模块
-        qh = checkpoint["qhead_state"]
-        m = self.model
-        m.query_head.load_state_dict(qh["query_head"])
-        m.W_mac.load_state_dict(qh["W_mac"])
-        m.W_mal.load_state_dict(qh["W_mal"])
-        m.global_mem_rmsnorm.load_state_dict(qh["global_mem_rmsnorm"])
-        with torch.no_grad():
-            m.mal_alpha_logit.copy_(qh["mal_alpha_logit"].to(m.mal_alpha_logit.device))
-        m.global_hippo.load_state_dict(qh["global_hippo"])
-        print(f"[Checkpoint] QueryHead 单全局模块加载(hippo_impl={qh.get('hippo_impl')})")
+        self.model.load_addon_state_dict(addon)
+        print(f"[Checkpoint] addon 加载(read_mode={addon.get('read_mode', 'query_head')})")
 
         self.global_step = checkpoint["global_step"]
 

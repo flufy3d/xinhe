@@ -1,0 +1,45 @@
+# v19b GATE — 修 read_scale 死区(v19 诊断:read_scale 冻死 -3.003=5% 注入,read-turn recall train 也 0%)
+#
+# v19 发现:per-layer read 的 q/k/v 投影在学(范数~36),但 read_scale=σ(-3)=5% 注入太弱,
+# 读路径在"信号死区"(failure_postmortem.md 头号失败模式)—— recall turn first-token 连 train
+# 都 0%,read_scale 1000 步几乎没动(-3.0→-3.003)。chicken-and-egg:read 弱→无梯度压力长大。
+# 修:read_scale_init -3 → 0(σ=0.5,50% 注入,day0 就压过 backbone,逼学 content addressing)。
+# 其余同 v19。NaN-skip 护稳;若早期爆则回退 read_scale_init=-1。
+
+base: qwen3.5-0.8b.yaml
+curriculum_file: curriculum_pcap_skeleton_gen_v11.yaml
+
+state:
+  read_mode: per_layer_delta
+  n_heads: 16
+  head_dim: 128
+  read_scale_init: 0.0         # ← v19b 核心修复:5% → 50% 注入,出死区
+  beta_bias_init: -2.0
+  delta_backend: auto
+  n_persistent_per_layer: 0
+
+lora:
+  rank: 16
+  alpha: 32
+
+training:
+  grad_accum_steps: 4
+  dtype: bfloat16
+  compile_backbone_layers: false
+
+stage_overrides:
+  pcap_skeleton:
+    learning_rate: 3.0e-4
+    warmup_steps: 100
+    weight_decay: 0.1
+    batch_size: 1
+    grad_accum_steps: 2
+    turn_max_tokens: 256
+    max_turns_per_episode: 8
+    tbptt_turns: 8
+    value_weight_cap: 5.0
+    max_steps: 1000
+    shortcut_suppression: true
+    shortcut_margin: 0.3
+    shortcut_lambda: 2.0
+    memory_dropout: 0.0

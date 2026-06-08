@@ -27,9 +27,10 @@ class TinyBackbone(nn.Module, BackboneBase):
     def embed(self, input_ids):
         return self._embed(input_ids)
 
-    def forward_blocks(self, hidden_states, attention_mask=None, position_ids=None, layer_hook=None):
+    def forward_blocks(self, hidden_states, attention_mask=None, position_ids=None, layer_hook=None, n_layers=None):
+        n = N_LAYERS if n_layers is None else min(n_layers, N_LAYERS)
         if layer_hook is not None:
-            for i in range(N_LAYERS):
+            for i in range(n):
                 hidden_states = layer_hook(hidden_states, i)
         return self._block(hidden_states)
 

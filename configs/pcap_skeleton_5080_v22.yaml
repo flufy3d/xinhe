@@ -1,0 +1,47 @@
+# v22 = v20 单变量实验:仅 shortcut_suppression OFF,其余全同 v20(含 max_steps=14000 cosine,
+#   复用 v20 curriculum 不变 → 任意 step 的 LR 与 v20 完全一致,可在同 step 直接对比)。
+#
+# 动机(2026-06-05 诊断):探针 RUN1 证 per_layer_delta 不开 shortcut 也用记忆(N=1000 shortcut-OFF
+#   val memory Δ=+44%,NM-zero 仅 ~11% 不 bypass);real v20 shortcut-ON 只 Δ+16%。怀疑 shortcut
+#   (旧 MAC 防 bypass 必需,见 project_v11)在 per_layer_delta 上过度压制真记忆。
+# 判据:v22 在 step3000/6000 的 by_recall read Δ 若 >> v20 同 step(7.3/9.1)→ shortcut 是凶手,
+#   去 shortcut retrain 可把真天花板从 16% 抬向 44%+;NM-zero 须仍低(全 curriculum + distractor
+#   下不 bypass = RUN1 clean-data 结论在真 pipeline 复现)。跑到信号明朗即停(~step6000),不必满 14000。
+
+base: qwen3.5-0.8b.yaml
+curriculum_file: curriculum_pcap_skeleton_gen_v20.yaml
+
+state:
+  read_mode: per_layer_delta
+  n_heads: 16
+  head_dim: 128
+  read_scale_init: 0.0
+  beta_bias_init: -2.0
+  delta_backend: auto
+  n_persistent_per_layer: 0
+
+lora:
+  rank: 16
+  alpha: 32
+
+training:
+  grad_accum_steps: 4
+  dtype: bfloat16
+  compile_backbone_layers: false
+
+stage_overrides:
+  pcap_skeleton:
+    learning_rate: 3.0e-4
+    warmup_steps: 200
+    weight_decay: 0.1
+    batch_size: 1
+    grad_accum_steps: 2
+    turn_max_tokens: 256
+    max_turns_per_episode: 8
+    tbptt_turns: 8
+    value_weight_cap: 5.0
+    max_steps: 14000
+    shortcut_suppression: false
+    shortcut_margin: 0.3
+    shortcut_lambda: 2.0
+    memory_dropout: 0.0

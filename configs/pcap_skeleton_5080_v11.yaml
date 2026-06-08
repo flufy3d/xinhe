@@ -1,0 +1,45 @@
+# v11 mini-train(5080 16GB)— 抗 memorize:扩数据规模 10x 防 train ep 完全 memorize
+#
+# v10 (1000 ep × 3 visits) 失败诊断:LoRA r=4 容量足够 memorize 1000 ep,
+# train gap +1.1 但 val Δ=0 全崩。NM 学到的 query 是 entity-specific 不可泛化。
+#
+# v11 策略:
+#   - num_train: 1000 → 10000 (10x diversity)
+#   - 每 ep 仅 ~0.6 visits(无重复 reinforcement → 必须学 meta-pattern)
+#   - 其余不变(LoRA r=4 + shortcut + nm_aux=1.0)
+#   - 3000 步预算不变 ~5h
+#
+# 关键预期:val read first-token Δ 在 step 500 应 > 0,step 1000/1500 单调爬
+# 若仍崩塌 → 不是 capacity 问题,是 NM 架构 / 数据结构问题(写 task-invariant query 失败)
+base: qwen3.5-0.8b.yaml
+
+curriculum_file: curriculum_pcap_skeleton_gen_v11.yaml
+
+state:
+  n_persistent_per_layer: 0       # K_pers 仍关
+
+lora:
+  rank: 4                          # 保持 r=4
+
+training:
+  grad_accum_steps: 4
+  dtype: bfloat16
+  compile_backbone_layers: false
+
+stage_overrides:
+  pcap_skeleton:
+    learning_rate: 3.0e-4
+    warmup_steps: 100
+    weight_decay: 0.1
+    batch_size: 1
+    grad_accum_steps: 2
+    turn_max_tokens: 256
+    max_turns_per_episode: 8
+    tbptt_turns: 8
+    value_weight_cap: 5.0
+    max_steps: 3000
+    nm_aux_weight: 1.0
+    shortcut_suppression: true       # ← NaN-skip patch 已加,fresh init 可承受
+    shortcut_margin: 0.3
+    shortcut_lambda: 2.0
+    memory_dropout: 0.0

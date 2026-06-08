@@ -1,0 +1,47 @@
+# v9 真泛化训练(5080 16GB)— 用户提点:NM 必须能 memorize NEW content,
+# 不能只 memorize 训练池。kill v7/v8 cheating,直接测 train.jsonl → val.jsonl 跨集泛化。
+#
+# 配置:
+#   - train.jsonl 抽 2000 ep(seed=42)
+#   - val.jsonl 不重叠
+#   - 10000 步,每 ep 平均 5 visits(可 generalize 同时数据多样性强)
+#   - 没 LoRA / K_pers(避免 backbone bypass shortcut)
+#   - shortcut OFF(backbone 冻结时 no-op)
+#   - nm_aux=1.0 强监督 NM 输出含 value 信息
+#
+# 预期:
+#   - 若 read first-token > 5%(vs NM-zero):真泛化成功
+#   - 若 >0% but <5%:partial,需要更多 step / 数据
+#   - 若 =0%:mechanism 在多样 data 上无法 generalize → 需架构改动
+#
+# 时间:10000 × ~3s/step = ~8.3 小时(夜里跑完)
+base: qwen3.5-0.8b.yaml
+
+curriculum_file: curriculum_pcap_skeleton_gen.yaml
+
+state:
+  n_persistent_per_layer: 0
+
+lora:
+  rank: 0
+
+training:
+  grad_accum_steps: 4
+  dtype: bfloat16
+  compile_backbone_layers: false
+
+stage_overrides:
+  pcap_skeleton:
+    learning_rate: 3.0e-4
+    warmup_steps: 200
+    weight_decay: 0.1
+    batch_size: 1
+    grad_accum_steps: 2
+    turn_max_tokens: 256
+    max_turns_per_episode: 8
+    tbptt_turns: 8
+    value_weight_cap: 5.0
+    max_steps: 10000
+    nm_aux_weight: 1.0
+    shortcut_suppression: false
+    memory_dropout: 0.0
